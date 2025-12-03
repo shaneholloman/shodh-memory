@@ -2,27 +2,27 @@
 
 use super::types::*;
 use anyhow::Result;
-use chrono::{Utc, Timelike, Datelike};
-use uuid::Uuid;
+use chrono::{Datelike, Timelike, Utc};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Context builder for creating rich contexts
 ///
 /// Public API for external callers to construct RichContext objects.
 /// Used internally by ContextManager and available for custom context creation.
-#[allow(unused)]  // Public API
+#[allow(unused)] // Public API
 pub struct ContextBuilder {
     context: RichContext,
 }
 
-#[allow(unused)]  // Public API methods
+#[allow(unused)] // Public API methods
 impl Default for ContextBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[allow(unused)]  // Public API methods
+#[allow(unused)] // Public API methods
 impl ContextBuilder {
     /// Create new context builder
     pub fn new() -> Self {
@@ -42,7 +42,7 @@ impl ContextBuilder {
                 decay_rate: 0.1, // Default decay
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
-            }
+            },
         }
     }
 
@@ -110,7 +110,7 @@ impl ContextBuilder {
 ///
 /// Public API for managing conversation context across sessions.
 /// Tracks user profile, project state, and temporal patterns.
-#[allow(unused)]  // Public API
+#[allow(unused)] // Public API
 pub struct ContextManager {
     /// Current active context
     current_context: Option<RichContext>,
@@ -126,14 +126,14 @@ pub struct ContextManager {
     project_state: HashMap<String, ProjectContext>,
 }
 
-#[allow(unused)]  // Public API
+#[allow(unused)] // Public API
 impl Default for ContextManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[allow(unused)]  // Public API methods
+#[allow(unused)] // Public API methods
 impl ContextManager {
     /// Create new context manager
     pub fn new() -> Self {
@@ -191,7 +191,9 @@ impl ContextManager {
         for entity in &experience.entities {
             if !self.user_profile.expertise.contains(entity) {
                 // Check if mentioned frequently
-                let count = self.context_history.iter()
+                let count = self
+                    .context_history
+                    .iter()
                     .filter(|ctx| ctx.conversation.mentioned_entities.contains(entity))
                     .count();
 
@@ -204,13 +206,20 @@ impl ContextManager {
         // Extract preferences from metadata
         if let Some(ctx) = &experience.context {
             for (key, value) in &ctx.user.preferences {
-                self.user_profile.preferences.insert(key.clone(), value.clone());
+                self.user_profile
+                    .preferences
+                    .insert(key.clone(), value.clone());
             }
         }
     }
 
     /// Update conversation context
-    pub fn update_conversation(&mut self, conv_id: String, message: String, topic: Option<String>) -> Result<()> {
+    pub fn update_conversation(
+        &mut self,
+        conv_id: String,
+        message: String,
+        topic: Option<String>,
+    ) -> Result<()> {
         if let Some(ref mut ctx) = self.current_context {
             ctx.conversation.conversation_id = Some(conv_id);
             ctx.conversation.recent_messages.push(message.clone());
@@ -251,8 +260,13 @@ impl ContextManager {
     }
 
     /// Update project context
-    pub fn update_project_context(&mut self, project_id: String, project: ProjectContext) -> Result<()> {
-        self.project_state.insert(project_id.clone(), project.clone());
+    pub fn update_project_context(
+        &mut self,
+        project_id: String,
+        project: ProjectContext,
+    ) -> Result<()> {
+        self.project_state
+            .insert(project_id.clone(), project.clone());
 
         if let Some(ref mut ctx) = self.current_context {
             ctx.project = project;
@@ -276,18 +290,39 @@ impl ContextManager {
 
         for ctx in contexts.iter().skip(1) {
             // Merge conversation contexts
-            merged.conversation.recent_messages.extend(ctx.conversation.recent_messages.clone());
-            merged.conversation.mentioned_entities.extend(ctx.conversation.mentioned_entities.clone());
-            merged.conversation.active_intents.extend(ctx.conversation.active_intents.clone());
+            merged
+                .conversation
+                .recent_messages
+                .extend(ctx.conversation.recent_messages.clone());
+            merged
+                .conversation
+                .mentioned_entities
+                .extend(ctx.conversation.mentioned_entities.clone());
+            merged
+                .conversation
+                .active_intents
+                .extend(ctx.conversation.active_intents.clone());
 
             // Merge code contexts
-            merged.code.related_files.extend(ctx.code.related_files.clone());
-            merged.code.recent_edits.extend(ctx.code.recent_edits.clone());
+            merged
+                .code
+                .related_files
+                .extend(ctx.code.related_files.clone());
+            merged
+                .code
+                .recent_edits
+                .extend(ctx.code.recent_edits.clone());
             merged.code.patterns.extend(ctx.code.patterns.clone());
 
             // Merge semantic contexts
-            merged.semantic.concepts.extend(ctx.semantic.concepts.clone());
-            merged.semantic.related_concepts.extend(ctx.semantic.related_concepts.clone());
+            merged
+                .semantic
+                .concepts
+                .extend(ctx.semantic.concepts.clone());
+            merged
+                .semantic
+                .related_concepts
+                .extend(ctx.semantic.related_concepts.clone());
             merged.semantic.tags.extend(ctx.semantic.tags.clone());
 
             // Deduplicate
@@ -304,8 +339,14 @@ impl ContextManager {
     }
 
     /// Find similar contexts from history
-    pub fn find_similar_contexts(&self, query_context: &RichContext, top_k: usize) -> Vec<RichContext> {
-        let mut scored_contexts: Vec<(f32, RichContext)> = self.context_history.iter()
+    pub fn find_similar_contexts(
+        &self,
+        query_context: &RichContext,
+        top_k: usize,
+    ) -> Vec<RichContext> {
+        let mut scored_contexts: Vec<(f32, RichContext)> = self
+            .context_history
+            .iter()
             .map(|ctx| {
                 let score = self.calculate_context_similarity(query_context, ctx);
                 (score, ctx.clone())
@@ -313,7 +354,11 @@ impl ContextManager {
             .collect();
 
         scored_contexts.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("Failed to compare scores"));
-        scored_contexts.into_iter().take(top_k).map(|(_, ctx)| ctx).collect()
+        scored_contexts
+            .into_iter()
+            .take(top_k)
+            .map(|(_, ctx)| ctx)
+            .collect()
     }
 
     /// Calculate similarity between two contexts
@@ -321,7 +366,10 @@ impl ContextManager {
         let mut score = 0.0;
 
         // Conversation similarity
-        let conv_overlap = ctx1.conversation.mentioned_entities.iter()
+        let conv_overlap = ctx1
+            .conversation
+            .mentioned_entities
+            .iter()
             .filter(|e| ctx2.conversation.mentioned_entities.contains(e))
             .count();
         score += conv_overlap as f32 * 0.2;
@@ -332,13 +380,19 @@ impl ContextManager {
         }
 
         // Code similarity
-        let code_overlap = ctx1.code.related_files.iter()
+        let code_overlap = ctx1
+            .code
+            .related_files
+            .iter()
             .filter(|f| ctx2.code.related_files.contains(f))
             .count();
         score += code_overlap as f32 * 0.15;
 
         // Semantic similarity
-        let concept_overlap = ctx1.semantic.concepts.iter()
+        let concept_overlap = ctx1
+            .semantic
+            .concepts
+            .iter()
             .filter(|c| ctx2.semantic.concepts.contains(c))
             .count();
         score += concept_overlap as f32 * 0.25;
@@ -361,9 +415,9 @@ impl ContextManager {
 
     /// Helper: Calculate time since last interaction
     fn calculate_time_since_last(&self) -> Option<i64> {
-        self.context_history.last().map(|last| {
-            (Utc::now() - last.updated_at).num_seconds()
-        })
+        self.context_history
+            .last()
+            .map(|last| (Utc::now() - last.updated_at).num_seconds())
     }
 
     /// Helper: Detect temporal patterns

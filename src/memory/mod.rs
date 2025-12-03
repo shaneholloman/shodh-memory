@@ -6,34 +6,34 @@
 //! - Multi-modal retrieval (similarity, temporal, causal)
 //! - Automatic memory consolidation
 
-pub mod storage;
 pub mod compression;
-pub mod retrieval;
-pub mod types;
 pub mod context;
+pub mod retrieval;
+pub mod storage;
+pub mod types;
 // pub mod vector_storage;  // Disabled - requires crate::rag::vamana from parent project
-pub mod visualization;
-pub mod query_parser;
 pub mod graph_retrieval;
+pub mod query_parser;
+pub mod visualization;
 
-use anyhow::{Result, Context};
-use serde::{Serialize, Deserialize};
-use std::sync::Arc;
-use std::path::PathBuf;
-use uuid::Uuid;
-use parking_lot::RwLock;
+use anyhow::{Context, Result};
 use dashmap::DashMap;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::debug;
+use uuid::Uuid;
 
-pub use crate::memory::types::*;
 use crate::memory::storage::MemoryStorage;
+pub use crate::memory::types::*;
 // pub use crate::memory::vector_storage::{VectorIndexedMemoryStorage, StorageStats};  // Disabled
+use crate::embeddings::Embedder;
 use crate::memory::compression::CompressionPipeline;
 use crate::memory::retrieval::RetrievalEngine;
-pub use crate::memory::visualization::{MemoryLogger, GraphStats};
-use crate::embeddings::Embedder;
+pub use crate::memory::visualization::{GraphStats, MemoryLogger};
 
 /// Configuration for the memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +66,7 @@ impl Default for MemoryConfig {
             storage_path: PathBuf::from("./memory_store"),
             working_memory_size: 100,
             session_memory_size_mb: 100,
-            max_heap_per_user_mb: 500,  // 500MB per user prevents OOM
+            max_heap_per_user_mb: 500, // 500MB per user prevents OOM
             auto_compress: true,
             compression_age_days: 7,
             importance_threshold: 0.7,
@@ -115,8 +115,10 @@ impl MemorySystem {
         // CRITICAL: Initialize embedder ONCE and share between MemorySystem and RetrievalEngine
         // This prevents loading the ONNX model multiple times (50-200ms overhead per load)
         let embedding_config = crate::embeddings::minilm::EmbeddingConfig::default();
-        let embedder = Arc::new(crate::embeddings::minilm::MiniLMEmbedder::new(embedding_config)
-            .context("Failed to initialize embedder")?);
+        let embedder = Arc::new(
+            crate::embeddings::minilm::MiniLMEmbedder::new(embedding_config)
+                .context("Failed to initialize embedder")?,
+        );
 
         // Pass shared embedder to retrieval engine (no duplicate model load)
         let retriever = RetrievalEngine::new(storage.clone(), embedder.clone())?;
@@ -127,7 +129,9 @@ impl MemorySystem {
         Ok(Self {
             config: config.clone(),
             working_memory: Arc::new(RwLock::new(WorkingMemory::new(config.working_memory_size))),
-            session_memory: Arc::new(RwLock::new(SessionMemory::new(config.session_memory_size_mb))),
+            session_memory: Arc::new(RwLock::new(SessionMemory::new(
+                config.session_memory_size_mb,
+            ))),
             long_term_memory: storage,
             compressor: CompressionPipeline::new(),
             retriever,
@@ -182,11 +186,11 @@ impl MemorySystem {
         // CRITICAL: Move experience instead of clone to avoid 2-10KB allocation
         let memory = Arc::new(Memory::new(
             memory_id.clone(),
-            experience,  // Move ownership (zero-cost)
+            experience, // Move ownership (zero-cost)
             importance,
-            None,  // agent_id
-            None,  // run_id
-            None,  // actor_id
+            None, // agent_id
+            None, // run_id
+            None, // actor_id
         ));
 
         // CRITICAL: Persist to RocksDB storage FIRST (before indexing/in-memory tiers)
@@ -197,7 +201,9 @@ impl MemorySystem {
         self.logger.write().log_created(&memory, "working");
 
         // Add to working memory (cheap Arc clone, not full Memory clone)
-        self.working_memory.write().add_shared(Arc::clone(&memory))?;
+        self.working_memory
+            .write()
+            .add_shared(Arc::clone(&memory))?;
 
         // CRITICAL: Index memory immediately for semantic search (don't wait for long-term promotion)
         // This ensures new memories are searchable right away, not only after consolidation
@@ -211,7 +217,9 @@ impl MemorySystem {
 
         // If important enough, prepare for session storage
         if importance > self.config.importance_threshold {
-            self.session_memory.write().add_shared(Arc::clone(&memory))?;
+            self.session_memory
+                .write()
+                .add_shared(Arc::clone(&memory))?;
             self.logger.write().log_created(&memory, "session");
         }
 
@@ -278,13 +286,17 @@ impl MemorySystem {
             let temporal_b = Self::calculate_temporal_relevance(age_days_b);
             let score_b = b.importance() * temporal_b;
 
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         memories.truncate(query.max_results);
 
         // Log retrieval
-        self.logger.read().log_retrieved("", memories.len(), &sources);
+        self.logger
+            .read()
+            .log_retrieved("", memories.len(), &sources);
 
         // Update access counts asynchronously
         for memory in &memories {
@@ -317,8 +329,14 @@ impl MemorySystem {
             cached_embedding.clone()
         } else {
             // Cache miss - generate embedding
-            tracing::debug!("Query embedding cache MISS - generating for: {}", query_text);
-            let embedding = self.embedder.as_ref().encode(query_text)
+            tracing::debug!(
+                "Query embedding cache MISS - generating for: {}",
+                query_text
+            );
+            let embedding = self
+                .embedder
+                .as_ref()
+                .encode(query_text)
                 .context("Failed to generate query embedding")?;
 
             // Store in cache for future use
@@ -328,7 +346,7 @@ impl MemorySystem {
 
         // Create a modified query with the embedding for vector search
         let vector_query = Query {
-            query_text: None,  // Don't re-generate embedding
+            query_text: None, // Don't re-generate embedding
             query_embedding: Some(query_embedding),
             time_range: query.time_range,
             experience_types: query.experience_types.clone(),
@@ -353,7 +371,9 @@ impl MemorySystem {
         };
 
         // Get memory IDs from vector search (fast HNSW search)
-        let memory_ids = self.retriever.search_ids(&vector_query, query.max_results)?;
+        let memory_ids = self
+            .retriever
+            .search_ids(&vector_query, query.max_results)?;
 
         // Fetch memories with cache-aware strategy
         let mut memories = Vec::new();
@@ -364,7 +384,7 @@ impl MemorySystem {
         for (memory_id, _score) in memory_ids {
             // Try working memory first (hot cache, zero-copy Arc clone)
             if let Some(memory) = self.working_memory.read().get(&memory_id) {
-                memories.push(memory);  // Already cloned by get()
+                memories.push(memory); // Already cloned by get()
                 if !sources.contains(&"working") {
                     sources.push("working");
                 }
@@ -374,7 +394,7 @@ impl MemorySystem {
 
             // Try session memory second (warm cache, zero-copy Arc clone)
             if let Some(memory) = self.session_memory.read().get(&memory_id) {
-                memories.push(memory);  // Already cloned by get()
+                memories.push(memory); // Already cloned by get()
                 if !sources.contains(&"session") {
                     sources.push("session");
                 }
@@ -407,7 +427,9 @@ impl MemorySystem {
             storage_fetches = storage_fetches,
             hit_rate = if cache_hits + storage_fetches > 0 {
                 (cache_hits as f32 / (cache_hits + storage_fetches) as f32) * 100.0
-            } else { 0.0 },
+            } else {
+                0.0
+            },
             "Cache-aware retrieval completed"
         );
 
@@ -417,11 +439,15 @@ impl MemorySystem {
             memories.sort_by(|a, b| {
                 let score_a = Self::linguistic_boost(&a.experience.content, &analysis);
                 let score_b = Self::linguistic_boost(&b.experience.content, &analysis);
-                score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+                score_b
+                    .partial_cmp(&score_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
 
-        self.logger.read().log_retrieved(query_text, memories.len(), &sources);
+        self.logger
+            .read()
+            .log_retrieved(query_text, memories.len(), &sources);
 
         // Update access counts asynchronously
         for memory in &memories {
@@ -467,12 +493,17 @@ impl MemorySystem {
 
                 // Mark as forgotten in long-term (don't delete, just flag)
                 self.long_term_memory.mark_forgotten_by_age(cutoff)?
-            },
+            }
             ForgetCriteria::LowImportance(threshold) => {
-                self.working_memory.write().remove_below_importance(threshold)?;
-                self.session_memory.write().remove_below_importance(threshold)?;
-                self.long_term_memory.mark_forgotten_by_importance(threshold)?
-            },
+                self.working_memory
+                    .write()
+                    .remove_below_importance(threshold)?;
+                self.session_memory
+                    .write()
+                    .remove_below_importance(threshold)?;
+                self.long_term_memory
+                    .mark_forgotten_by_importance(threshold)?
+            }
             ForgetCriteria::Pattern(pattern) => {
                 // Remove memories matching pattern
                 self.forget_by_pattern(&pattern)?
@@ -557,10 +588,10 @@ impl MemorySystem {
     /// access to historical context when needed.
     fn calculate_temporal_relevance(age_days: i64) -> f32 {
         match age_days {
-            0..=7 => 1.0,      // Recent: Full weight
-            8..=30 => 0.7,     // Medium-term: 70% weight
-            31..=90 => 0.4,    // Old: 40% weight
-            _ => 0.2,          // Ancient: 20% weight (never completely forgotten)
+            0..=7 => 1.0,   // Recent: Full weight
+            8..=30 => 0.7,  // Medium-term: 70% weight
+            31..=90 => 0.4, // Old: 40% weight
+            _ => 0.2,       // Ancient: 20% weight (never completely forgotten)
         }
     }
 
@@ -676,7 +707,8 @@ impl MemorySystem {
 
         // Factor 6: Embeddings quality (0.0 - 0.1)
         let embedding_score = if let Some(emb) = &experience.embeddings {
-            if emb.len() >= 384 {  // Full embedding vector
+            if emb.len() >= 384 {
+                // Full embedding vector
                 0.1
             } else {
                 0.05
@@ -691,8 +723,17 @@ impl MemorySystem {
         let mut quality_score: f32 = 0.0;
 
         // Technical terms indicate higher quality
-        let technical_terms = ["algorithm", "architecture", "implementation", "optimization",
-                                "performance", "security", "database", "api", "framework"];
+        let technical_terms = [
+            "algorithm",
+            "architecture",
+            "implementation",
+            "optimization",
+            "performance",
+            "security",
+            "database",
+            "api",
+            "framework",
+        ];
         for term in &technical_terms {
             if content_lower.contains(term) {
                 quality_score += 0.015;
@@ -705,8 +746,11 @@ impl MemorySystem {
         }
 
         // Code snippets indicate actionable content
-        if experience.content.contains("```") || experience.content.contains("fn ") ||
-           experience.content.contains("function ") || experience.content.contains("class ") {
+        if experience.content.contains("```")
+            || experience.content.contains("fn ")
+            || experience.content.contains("function ")
+            || experience.content.contains("class ")
+        {
             quality_score += 0.03;
         }
 
@@ -766,7 +810,9 @@ impl MemorySystem {
 
         for memory in &to_promote {
             // Log promotion
-            self.logger.write().log_promoted(&memory.id, "working", "session", count);
+            self.logger
+                .write()
+                .log_promoted(&memory.id, "working", "session", count);
 
             // Clone out of Arc to get owned Memory for session storage
             session.add((**memory).clone())?;
@@ -787,7 +833,9 @@ impl MemorySystem {
 
         for memory in &to_promote {
             // Log promotion
-            self.logger.write().log_promoted(&memory.id, "session", "longterm", count);
+            self.logger
+                .write()
+                .log_promoted(&memory.id, "session", "longterm", count);
 
             // Clone out of Arc to get owned Memory
             let owned_memory = (**memory).clone();
@@ -804,7 +852,11 @@ impl MemorySystem {
 
             // PRODUCTION: Index memory in Vamana vector DB for semantic search
             if let Err(e) = self.retriever.index_memory(&compressed_memory) {
-                tracing::warn!("Failed to index memory {} in vector DB: {}", compressed_memory.id.0, e);
+                tracing::warn!(
+                    "Failed to index memory {} in vector DB: {}",
+                    compressed_memory.id.0,
+                    e
+                );
                 // Don't fail promotion if indexing fails - memory is still stored
             }
 
@@ -818,7 +870,8 @@ impl MemorySystem {
 
     /// Compress old memories to save space
     fn compress_old_memories(&mut self) -> Result<()> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(self.config.compression_age_days as i64);
+        let cutoff =
+            chrono::Utc::now() - chrono::Duration::days(self.config.compression_age_days as i64);
 
         // Get uncompressed old memories
         let to_compress = self.long_term_memory.get_uncompressed_older_than(cutoff)?;
@@ -847,7 +900,8 @@ impl MemorySystem {
 
             if wm.contains(memory_id) {
                 // Memory found in working memory - update and return
-                return wm.update_access(memory_id)
+                return wm
+                    .update_access(memory_id)
                     .map_err(|e| anyhow::anyhow!("Failed to update working memory access: {e}"));
             }
         } // Release write lock
@@ -857,13 +911,15 @@ impl MemorySystem {
             let mut sm = self.session_memory.write();
 
             if sm.contains(memory_id) {
-                return sm.update_access(memory_id)
+                return sm
+                    .update_access(memory_id)
                     .map_err(|e| anyhow::anyhow!("Failed to update session memory access: {e}"));
             }
         } // Release write lock
 
         // Try long-term memory (has its own internal locking)
-        self.long_term_memory.update_access(memory_id)
+        self.long_term_memory
+            .update_access(memory_id)
             .map_err(|e| anyhow::anyhow!("Failed to update long-term memory access: {e}"))
     }
 
@@ -925,7 +981,10 @@ impl MemorySystem {
     }
 
     /// Get uncompressed old memories
-    pub fn get_uncompressed_older_than(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<Vec<Memory>> {
+    pub fn get_uncompressed_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Memory>> {
         self.long_term_memory.get_uncompressed_older_than(cutoff)
     }
 

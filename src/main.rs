@@ -16,45 +16,48 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::signal;
-use tower_http::cors::{Any, CorsLayer, AllowOrigin};
-use tower_http::services::ServeDir;
-use tower_governor::{
-    governor::GovernorConfigBuilder,
-    GovernorLayer,
-};
 use tower::limit::ConcurrencyLimitLayer;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tracing::info;
 
 mod auth;
 mod config;
-mod memory;
-mod similarity;
-mod validation;
+mod embeddings;
 mod errors;
 mod graph_memory;
-mod vector_db;
-mod embeddings;
-mod metrics;        // P1.1: Observability
-mod middleware;     // P1.3: HTTP request tracking
-mod tracing_setup;  // P1.6: Distributed tracing
+mod memory;
+mod metrics; // P1.1: Observability
+mod middleware; // P1.3: HTTP request tracking
+mod similarity;
+mod tracing_setup;
+mod validation;
+mod vector_db; // P1.6: Distributed tracing
 
 use config::ServerConfig;
 
-use memory::{Experience, Memory, MemoryConfig, MemoryId, MemoryStats, MemorySystem, Query as MemoryQuery, GraphStats as VisualizationStats};
-use similarity::top_k_similar;
 use errors::{AppError, ValidationErrorExt};
-use graph_memory::{GraphMemory, EntityNode, EntityExtractor, RelationshipEdge, RelationType, EpisodicNode, EpisodeSource, GraphTraversal, GraphStats};
+use graph_memory::{
+    EntityExtractor, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats,
+    GraphTraversal, RelationType, RelationshipEdge,
+};
+use memory::{
+    Experience, GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId, MemoryStats,
+    MemorySystem, Query as MemoryQuery,
+};
+use similarity::top_k_similar;
 
 // P0.11: Shutdown timeouts for production resilience
-const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 30;  // Max time to drain requests
-const DATABASE_FLUSH_TIMEOUT_SECS: u64 = 10;     // Max time to flush RocksDB
-const VECTOR_INDEX_SAVE_TIMEOUT_SECS: u64 = 10;  // Max time to save indices
+const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 30; // Max time to drain requests
+const DATABASE_FLUSH_TIMEOUT_SECS: u64 = 10; // Max time to flush RocksDB
+const VECTOR_INDEX_SAVE_TIMEOUT_SECS: u64 = 10; // Max time to save indices
 
 /// Audit event for history tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub event_type: String,  // CREATE, UPDATE, DELETE, RETRIEVE
+    pub event_type: String, // CREATE, UPDATE, DELETE, RETRIEVE
     pub memory_id: String,
     pub details: String,
 }
@@ -124,7 +127,8 @@ impl MultiUserMemoryManagerRotationHelper {
             for key in &keys_to_remove {
                 batch.delete(key);
             }
-            self.audit_db.write(batch)
+            self.audit_db
+                .write(batch)
                 .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
         }
 
@@ -136,8 +140,8 @@ impl MultiUserMemoryManagerRotationHelper {
                 // Keep only events that weren't removed
                 log_guard.retain(|event| {
                     let event_nanos = event.timestamp.timestamp_nanos_opt().unwrap_or(0);
-                    event_nanos >= cutoff_nanos &&
-                    initial_count - removed_count <= self.audit_max_entries
+                    event_nanos >= cutoff_nanos
+                        && initial_count - removed_count <= self.audit_max_entries
                 });
 
                 // If still too many, keep only the newest ones
@@ -156,7 +160,8 @@ impl MultiUserMemoryManagerRotationHelper {
 pub struct MultiUserMemoryManager {
     /// Per-user memory systems with LRU eviction (prevents unbounded growth)
     /// Wrapped in Mutex because LruCache needs exclusive access even for reads (to update LRU order)
-    user_memories: Arc<parking_lot::Mutex<lru::LruCache<String, Arc<parking_lot::RwLock<MemorySystem>>>>>,
+    user_memories:
+        Arc<parking_lot::Mutex<lru::LruCache<String, Arc<parking_lot::RwLock<MemorySystem>>>>>,
 
     /// Per-user audit logs (enterprise feature - in-memory cache)
     audit_logs: Arc<DashMap<String, Arc<parking_lot::RwLock<Vec<AuditEvent>>>>>,
@@ -174,7 +179,8 @@ pub struct MultiUserMemoryManager {
     audit_log_counter: Arc<std::sync::atomic::AtomicUsize>,
 
     /// Per-user graph memory systems (knowledge graphs) - also needs LRU eviction
-    graph_memories: Arc<parking_lot::Mutex<lru::LruCache<String, Arc<parking_lot::RwLock<GraphMemory>>>>>,
+    graph_memories:
+        Arc<parking_lot::Mutex<lru::LruCache<String, Arc<parking_lot::RwLock<GraphMemory>>>>>,
 
     /// Entity extractor for automatic entity extraction
     entity_extractor: Arc<EntityExtractor>,
@@ -202,17 +208,13 @@ impl MultiUserMemoryManager {
             .unwrap_or_else(|| std::num::NonZeroUsize::new(1000).unwrap());
 
         let manager = Self {
-            user_memories: Arc::new(parking_lot::Mutex::new(
-                lru::LruCache::new(cache_size)
-            )),
+            user_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
             audit_logs: Arc::new(DashMap::new()),
             audit_db,
             base_path,
             default_config: MemoryConfig::default(),
             audit_log_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            graph_memories: Arc::new(parking_lot::Mutex::new(
-                lru::LruCache::new(cache_size)
-            )),
+            graph_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
             entity_extractor: Arc::new(EntityExtractor::new()),
             user_evictions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             server_config,
@@ -237,7 +239,11 @@ impl MultiUserMemoryManager {
         };
 
         // Persist to RocksDB in background (non-blocking)
-        let key = format!("{}:{}", user_id, event.timestamp.timestamp_nanos_opt().unwrap_or(0));
+        let key = format!(
+            "{}:{}",
+            user_id,
+            event.timestamp.timestamp_nanos_opt().unwrap_or(0)
+        );
         if let Ok(serialized) = bincode::serialize(&event) {
             let db = self.audit_db.clone();
             let key_bytes = key.into_bytes();
@@ -257,7 +263,9 @@ impl MultiUserMemoryManager {
         }
 
         // Check if rotation is needed (every N events) - LOCK-FREE atomic operation
-        let count = self.audit_log_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = self
+            .audit_log_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Only the thread that hits the interval performs rotation (no race condition)
         if count % self.server_config.audit_rotation_check_interval == 0 && count > 0 {
@@ -294,7 +302,11 @@ impl MultiUserMemoryManager {
             if !events.is_empty() {
                 // Cache hit - use cached data
                 return if let Some(mid) = memory_id {
-                    events.iter().filter(|e| e.memory_id == mid).cloned().collect()
+                    events
+                        .iter()
+                        .filter(|e| e.memory_id == mid)
+                        .cloned()
+                        .collect()
                 } else {
                     events.clone()
                 };
@@ -362,10 +374,16 @@ impl MultiUserMemoryManager {
 
             // Check if insertion will cause eviction
             if cache.len() >= self.server_config.max_users_in_memory {
-                if let Some((evicted_user_id, _evicted_memory)) = cache.push(user_id.to_string(), memory_arc.clone()) {
+                if let Some((evicted_user_id, _evicted_memory)) =
+                    cache.push(user_id.to_string(), memory_arc.clone())
+                {
                     // LRU eviction occurred - log it
-                    self.user_evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    info!("📤 Evicted user '{}' from memory cache (LRU, cache_size={})", evicted_user_id, self.server_config.max_users_in_memory);
+                    self.user_evictions
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    info!(
+                        "📤 Evicted user '{}' from memory cache (LRU, cache_size={})",
+                        evicted_user_id, self.server_config.max_users_in_memory
+                    );
 
                     // Note: Evicted memory system will be flushed when Arc refcount drops to 0
                     // and MemorySystem's Drop implementation runs
@@ -379,7 +397,11 @@ impl MultiUserMemoryManager {
 
         // Initialize vector index (load from disk or rebuild)
         if let Err(e) = self.init_user_vector_index(user_id) {
-            tracing::warn!("Vector index initialization failed for user {}: {}", user_id, e);
+            tracing::warn!(
+                "Vector index initialization failed for user {}: {}",
+                user_id,
+                e
+            );
             // Don't fail user creation if indexing fails - semantic search will be unavailable
         }
 
@@ -410,7 +432,11 @@ impl MultiUserMemoryManager {
 
     /// List all users currently in memory cache
     pub fn list_users(&self) -> Vec<String> {
-        self.user_memories.lock().iter().map(|(key, _)| key.clone()).collect()
+        self.user_memories
+            .lock()
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     /// Flush all RocksDB databases to ensure data persistence (critical for graceful shutdown)
@@ -418,13 +444,18 @@ impl MultiUserMemoryManager {
         info!("💾 Flushing all databases to disk...");
 
         // Flush audit database
-        self.audit_db.flush()
+        self.audit_db
+            .flush()
             .map_err(|e| anyhow::anyhow!("Failed to flush audit database: {e}"))?;
 
         // Flush all user memory databases
         // Collect entries first, then release lock before flushing (avoid holding lock during I/O)
         let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = {
-            self.user_memories.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            self.user_memories
+                .lock()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
         };
 
         let mut flushed = 0;
@@ -443,7 +474,15 @@ impl MultiUserMemoryManager {
             }
         }
 
-        info!("✅ Flushed {} audit database and {} user databases", if self.audit_db.flush().is_ok() { "1" } else { "0" }, flushed);
+        info!(
+            "✅ Flushed {} audit database and {} user databases",
+            if self.audit_db.flush().is_ok() {
+                "1"
+            } else {
+                "0"
+            },
+            flushed
+        );
 
         // Give RocksDB a moment to complete background tasks
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -457,7 +496,11 @@ impl MultiUserMemoryManager {
 
         // Collect entries first, then release lock before saving (avoid holding lock during I/O)
         let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = {
-            self.user_memories.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            self.user_memories
+                .lock()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
         };
 
         let mut saved = 0;
@@ -495,7 +538,11 @@ impl MultiUserMemoryManager {
                     return Ok(());
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to load vector index for user {}: {}. Rebuilding...", user_id, e);
+                    tracing::warn!(
+                        "Failed to load vector index for user {}: {}. Rebuilding...",
+                        user_id,
+                        e
+                    );
                 }
             }
         }
@@ -546,7 +593,10 @@ impl MultiUserMemoryManager {
             match helper.rotate_user_audit_logs(&user_id) {
                 Ok(removed) => {
                     if removed > 0 {
-                        info!("  Rotated audit logs for user {}: removed {} old entries", user_id, removed);
+                        info!(
+                            "  Rotated audit logs for user {}: removed {} old entries",
+                            user_id, removed
+                        );
                         total_removed += removed;
                     }
                 }
@@ -557,7 +607,10 @@ impl MultiUserMemoryManager {
         }
 
         if total_removed > 0 {
-            info!("✅ Audit log rotation complete: removed {} total entries", total_removed);
+            info!(
+                "✅ Audit log rotation complete: removed {} total entries",
+                total_removed
+            );
         }
 
         Ok(())
@@ -584,9 +637,14 @@ impl MultiUserMemoryManager {
 
             // Check if insertion will cause eviction
             if cache.len() >= self.server_config.max_users_in_memory {
-                if let Some((evicted_user_id, _evicted_graph)) = cache.push(user_id.to_string(), graph_arc.clone()) {
+                if let Some((evicted_user_id, _evicted_graph)) =
+                    cache.push(user_id.to_string(), graph_arc.clone())
+                {
                     // LRU eviction occurred - log it
-                    info!("📤 Evicted graph for user '{}' from memory cache (LRU, cache_size={})", evicted_user_id, self.server_config.max_users_in_memory);
+                    info!(
+                        "📤 Evicted graph for user '{}' from memory cache (LRU, cache_size={})",
+                        evicted_user_id, self.server_config.max_users_in_memory
+                    );
                 }
             } else {
                 cache.put(user_id.to_string(), graph_arc.clone());
@@ -599,7 +657,12 @@ impl MultiUserMemoryManager {
     }
 
     /// Process an experience and extract entities/relationships into the graph
-    fn process_experience_into_graph(&self, user_id: &str, experience: &Experience, memory_id: &MemoryId) -> Result<()> {
+    fn process_experience_into_graph(
+        &self,
+        user_id: &str,
+        experience: &Experience,
+        memory_id: &MemoryId,
+    ) -> Result<()> {
         let graph = self.get_user_graph(user_id)?;
         let graph_guard = graph.write();
 
@@ -657,8 +720,10 @@ impl MultiUserMemoryManager {
                     created_at: chrono::Utc::now(),
                     valid_at: chrono::Utc::now(),
                     invalidated_at: None,
-                    source_episode_id: Some(uuid::Uuid::parse_str(&memory_id.0.to_string())
-                        .unwrap_or_else(|_| uuid::Uuid::new_v4())),
+                    source_episode_id: Some(
+                        uuid::Uuid::parse_str(&memory_id.0.to_string())
+                            .unwrap_or_else(|_| uuid::Uuid::new_v4()),
+                    ),
                     context: experience.content.clone(),
                 };
 
@@ -727,7 +792,9 @@ type AppState = Arc<MultiUserMemoryManager>;
 /// Health check endpoint (basic compatibility)
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let users_in_cache = state.user_memories.lock().len();
-    let user_evictions = state.user_evictions.load(std::sync::atomic::Ordering::Relaxed);
+    let user_evictions = state
+        .user_evictions
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     Json(HealthResponse {
         status: "healthy".to_string(),
@@ -743,10 +810,13 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 /// Returns 200 OK if service is running (minimal check, always succeeds if reachable)
 /// Kubernetes uses this to restart crashed/hung pods
 async fn health_live() -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": "alive",
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "alive",
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        })),
+    )
 }
 
 /// P0.9: Readiness probe - indicates if service can handle traffic
@@ -758,12 +828,15 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<serde_
 
     // Service is ready if we can access the user cache without panicking
     // This verifies the lock is not poisoned and the service is operational
-    (StatusCode::OK, Json(serde_json::json!({
-        "status": "ready",
-        "version": env!("CARGO_PKG_VERSION"),
-        "users_in_cache": users_in_cache,
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ready",
+            "version": env!("CARGO_PKG_VERSION"),
+            "users_in_cache": users_in_cache,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        })),
+    )
 }
 
 /// Prometheus metrics endpoint for observability
@@ -776,7 +849,8 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, Statu
     metrics::ACTIVE_USERS.set(users_in_cache as i64);
 
     // Aggregate metrics across all users (no per-user labels to avoid cardinality explosion)
-    let (mut total_working, mut total_session, mut total_longterm, mut total_heap) = (0i64, 0i64, 0i64, 0i64);
+    let (mut total_working, mut total_session, mut total_longterm, mut total_heap) =
+        (0i64, 0i64, 0i64, 0i64);
     let mut total_vectors = 0i64;
 
     let user_entries: Vec<_> = {
@@ -796,9 +870,15 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, Statu
     }
 
     // Set aggregate metrics
-    metrics::MEMORIES_BY_TIER.with_label_values(&["working"]).set(total_working);
-    metrics::MEMORIES_BY_TIER.with_label_values(&["session"]).set(total_session);
-    metrics::MEMORIES_BY_TIER.with_label_values(&["longterm"]).set(total_longterm);
+    metrics::MEMORIES_BY_TIER
+        .with_label_values(&["working"])
+        .set(total_working);
+    metrics::MEMORIES_BY_TIER
+        .with_label_values(&["session"])
+        .set(total_session);
+    metrics::MEMORIES_BY_TIER
+        .with_label_values(&["longterm"])
+        .set(total_longterm);
     metrics::MEMORY_HEAP_BYTES_TOTAL.set(total_heap);
     metrics::VECTOR_INDEX_SIZE_TOTAL.set(total_vectors);
 
@@ -807,11 +887,11 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, Statu
     let metric_families = metrics::METRICS_REGISTRY.gather();
 
     let mut buffer = Vec::new();
-    encoder.encode(&metric_families, &mut buffer)
+    encoder
+        .encode(&metric_families, &mut buffer)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    String::from_utf8(buffer)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    String::from_utf8(buffer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Compute cosine similarity between two embedding vectors
@@ -838,11 +918,9 @@ async fn record_experience(
     Json(req): Json<RecordRequest>,
 ) -> Result<Json<RecordResponse>, AppError> {
     // Enterprise input validation
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    validation::validate_content(&req.experience.content, false)
-        .map_validation_err("content")?;
+    validation::validate_content(&req.experience.content, false).map_validation_err("content")?;
 
     if let Some(ref embeddings) = req.experience.embeddings {
         validation::validate_embeddings(embeddings)
@@ -883,13 +961,18 @@ async fn record_experience(
         &req.user_id,
         "CREATE",
         &memory_id.0.to_string(),
-        &format!("Created memory: {}", req.experience.content.chars().take(50).collect::<String>())
+        &format!(
+            "Created memory: {}",
+            req.experience.content.chars().take(50).collect::<String>()
+        ),
     );
 
     // Record metrics (no user_id to prevent cardinality explosion)
     let duration = store_start.elapsed().as_secs_f64();
     metrics::MEMORY_STORE_DURATION.observe(duration);
-    metrics::MEMORY_STORE_TOTAL.with_label_values(&["success"]).inc();
+    metrics::MEMORY_STORE_TOTAL
+        .with_label_values(&["success"])
+        .inc();
 
     Ok(Json(RecordResponse {
         memory_id: memory_id.0.to_string(),
@@ -905,11 +988,10 @@ async fn retrieve_memories(
 ) -> Result<Json<RetrieveResponse>, AppError> {
     // P1.2: Instrument memory retrieve operation
     let retrieve_start = std::time::Instant::now();
-    let retrieval_mode = "hybrid";  // Default mode
+    let retrieval_mode = "hybrid"; // Default mode
 
     // Enterprise input validation
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     if let Some(ref emb) = req.query_embedding {
         validation::validate_embeddings(emb)
@@ -917,8 +999,7 @@ async fn retrieve_memories(
     }
 
     let max_results = req.max_results.unwrap_or(10);
-    validation::validate_max_results(max_results)
-        .map_validation_err("max_results")?;
+    validation::validate_max_results(max_results).map_validation_err("max_results")?;
 
     if let Some(threshold) = req.importance_threshold {
         validation::validate_importance_threshold(threshold)
@@ -958,7 +1039,8 @@ async fn retrieve_memories(
             // Check if we should use graph-aware retrieval
             let memories: Vec<Memory> = if let Some(ref query_text) = query_text {
                 // GRAPH-AWARE RETRIEVAL (Anderson & Pirolli 1984 + Xiong et al. 2017)
-                let graph = state_clone.get_user_graph(&user_id)
+                let graph = state_clone
+                    .get_user_graph(&user_id)
                     .map_err(AppError::Internal)?;
                 let graph_guard = graph.read();
 
@@ -982,25 +1064,34 @@ async fn retrieve_memories(
                         }
                         Ok(None)
                     },
-                ).map_err(AppError::Internal)?;
+                )
+                .map_err(AppError::Internal)?;
 
                 // Convert ActivatedMemory to Memory with scores
-                let graph_results: Vec<Memory> = activated.into_iter().map(|am| {
-                    let mut mem = (*am.memory).clone();
-                    mem.score = Some(am.final_score);
-                    mem
-                }).collect();
+                let graph_results: Vec<Memory> = activated
+                    .into_iter()
+                    .map(|am| {
+                        let mut mem = (*am.memory).clone();
+                        mem.score = Some(am.final_score);
+                        mem
+                    })
+                    .collect();
 
                 // If graph retrieval returned 0 results, fall back to semantic search
                 if graph_results.is_empty() {
-                    tracing::info!("Graph retrieval returned 0 results, falling back to semantic search");
+                    tracing::info!(
+                        "Graph retrieval returned 0 results, falling back to semantic search"
+                    );
 
                     // Generate query embedding
-                    let query_embedding = memory_guard.get_embedder().encode(query_text)
+                    let query_embedding = memory_guard
+                        .get_embedder()
+                        .encode(query_text)
                         .map_err(AppError::Internal)?;
 
                     // Get all memories
-                    let all_memories = memory_guard.get_all_memories()
+                    let all_memories = memory_guard
+                        .get_all_memories()
                         .map_err(AppError::Internal)?;
 
                     // Score each memory by semantic similarity
@@ -1023,16 +1114,15 @@ async fn retrieve_memories(
                         .collect();
 
                     // Sort by similarity (descending)
-                    scored_memories.sort_by(|a, b| {
-                        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+                    scored_memories
+                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
                     // Take top-k and set scores
                     scored_memories
                         .into_iter()
                         .take(query.max_results)
                         .map(|(score, mut mem)| {
-                            mem.score = Some(score);  // REAL semantic score!
+                            mem.score = Some(score); // REAL semantic score!
                             mem
                         })
                         .collect()
@@ -1041,15 +1131,11 @@ async fn retrieve_memories(
                 }
             } else {
                 // Fallback to traditional retrieval
-                let shared_memories = memory_guard
-                    .retrieve(&query)
-                    .map_err(AppError::Internal)?;
+                let shared_memories = memory_guard.retrieve(&query).map_err(AppError::Internal)?;
 
                 // Convert Arc<Memory> to owned Memory
-                let mut memories: Vec<Memory> = shared_memories
-                    .iter()
-                    .map(|m| (**m).clone())
-                    .collect();
+                let mut memories: Vec<Memory> =
+                    shared_memories.iter().map(|m| (**m).clone()).collect();
 
                 // If query embedding provided, re-rank by semantic similarity
                 if let Some(query_emb) = &query_embedding {
@@ -1060,14 +1146,18 @@ async fn retrieve_memories(
                         })
                         .collect();
 
-                    let ranked = top_k_similar(query_emb, &candidates, max_results_val.unwrap_or(10));
+                    let ranked =
+                        top_k_similar(query_emb, &candidates, max_results_val.unwrap_or(10));
 
                     // Create new vec with scores populated
-                    ranked.into_iter().map(|(score, m)| {
-                        let mut mem = m.clone();
-                        mem.score = Some(score);
-                        mem
-                    }).collect()
+                    ranked
+                        .into_iter()
+                        .map(|(score, m)| {
+                            let mut mem = m.clone();
+                            mem.score = Some(score);
+                            mem
+                        })
+                        .collect()
                 } else {
                     // Populate scores based on importance * temporal_relevance
                     for memory in &mut memories {
@@ -1106,9 +1196,7 @@ async fn get_user_stats(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<Json<MemoryStats>, AppError> {
-    let stats = state
-        .get_stats(&user_id)
-        .map_err(AppError::Internal)?;
+    let stats = state.get_stats(&user_id).map_err(AppError::Internal)?;
 
     Ok(Json(stats))
 }
@@ -1118,9 +1206,7 @@ async fn delete_user(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    state
-        .forget_user(&user_id)
-        .map_err(AppError::Internal)?;
+    state.forget_user(&user_id).map_err(AppError::Internal)?;
 
     Ok(StatusCode::OK)
 }
@@ -1136,25 +1222,26 @@ async fn get_memory(
     Path(memory_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Memory>, AppError> {
-    let user_id = params.get("user_id")
-        .ok_or_else(|| AppError::InvalidInput { field: "user_id".to_string(), reason: "user_id required".to_string() })?;
+    let user_id = params
+        .get("user_id")
+        .ok_or_else(|| AppError::InvalidInput {
+            field: "user_id".to_string(),
+            reason: "user_id required".to_string(),
+        })?;
 
     // Enterprise input validation
-    validation::validate_user_id(user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(user_id).map_validation_err("user_id")?;
 
     validation::validate_memory_id(&memory_id)
         .map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
 
-    let memory = state
-        .get_user_memory(user_id)
-        .map_err(AppError::Internal)?;
+    let memory = state.get_user_memory(user_id).map_err(AppError::Internal)?;
 
     let memory_guard = memory.read();
 
     // Parse memory ID (already validated above)
-    let mem_id = uuid::Uuid::parse_str(&memory_id)
-        .map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
+    let mem_id =
+        uuid::Uuid::parse_str(&memory_id).map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
 
     let _memory_id_obj = MemoryId(mem_id);
 
@@ -1164,9 +1251,7 @@ async fn get_memory(
         ..Default::default()
     };
 
-    let all_memories = memory_guard
-        .retrieve(&query)
-        .map_err(AppError::Internal)?;
+    let all_memories = memory_guard.retrieve(&query).map_err(AppError::Internal)?;
 
     let shared_memory = all_memories
         .into_iter()
@@ -1191,14 +1276,12 @@ async fn update_memory(
     Json(req): Json<UpdateMemoryRequest>,
 ) -> Result<StatusCode, AppError> {
     // Enterprise input validation
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     validation::validate_memory_id(&memory_id)
         .map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
 
-    validation::validate_content(&req.content, false)
-        .map_validation_err("content")?;
+    validation::validate_content(&req.content, false).map_validation_err("content")?;
 
     if let Some(ref emb) = req.embeddings {
         validation::validate_embeddings(emb)
@@ -1211,8 +1294,8 @@ async fn update_memory(
 
     let mut memory_guard = memory.write();
 
-    let mem_id = uuid::Uuid::parse_str(&memory_id)
-        .map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
+    let mem_id =
+        uuid::Uuid::parse_str(&memory_id).map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
 
     // Get current memory to preserve metadata
     let query = MemoryQuery {
@@ -1220,9 +1303,7 @@ async fn update_memory(
         ..Default::default()
     };
 
-    let all_memories = memory_guard
-        .retrieve(&query)
-        .map_err(AppError::Internal)?;
+    let all_memories = memory_guard.retrieve(&query).map_err(AppError::Internal)?;
 
     let shared_memory = all_memories
         .into_iter()
@@ -1253,7 +1334,7 @@ async fn update_memory(
         &req.user_id,
         "UPDATE",
         &memory_id,
-        &format!("Updated memory content: {content_preview}")
+        &format!("Updated memory content: {content_preview}"),
     );
 
     Ok(StatusCode::OK)
@@ -1265,19 +1346,20 @@ async fn delete_memory(
     Path(memory_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<StatusCode, AppError> {
-    let user_id = params.get("user_id")
-        .ok_or_else(|| AppError::InvalidInput { field: "user_id".to_string(), reason: "user_id required".to_string() })?;
+    let user_id = params
+        .get("user_id")
+        .ok_or_else(|| AppError::InvalidInput {
+            field: "user_id".to_string(),
+            reason: "user_id required".to_string(),
+        })?;
 
     // Enterprise input validation
-    validation::validate_user_id(user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(user_id).map_validation_err("user_id")?;
 
     validation::validate_memory_id(&memory_id)
         .map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
 
-    let memory = state
-        .get_user_memory(user_id)
-        .map_err(AppError::Internal)?;
+    let memory = state.get_user_memory(user_id).map_err(AppError::Internal)?;
 
     let mut memory_guard = memory.write();
 
@@ -1289,12 +1371,7 @@ async fn delete_memory(
         .map_err(AppError::Internal)?;
 
     // Enterprise audit logging
-    state.log_event(
-        user_id,
-        "DELETE",
-        &memory_id,
-        "Memory deleted"
-    );
+    state.log_event(user_id, "DELETE", &memory_id, "Memory deleted");
 
     // Return 200 OK instead of 204 NO_CONTENT so Python client can verify success
     Ok(StatusCode::OK)
@@ -1324,15 +1401,10 @@ async fn get_all_memories(
         ..Default::default()
     };
 
-    let shared_memories = memory_guard
-        .retrieve(&query)
-        .map_err(AppError::Internal)?;
+    let shared_memories = memory_guard.retrieve(&query).map_err(AppError::Internal)?;
 
     // Convert Arc<Memory> to owned Memory for response
-    let memories: Vec<Memory> = shared_memories
-        .iter()
-        .map(|m| (**m).clone())
-        .collect();
+    let memories: Vec<Memory> = shared_memories.iter().map(|m| (**m).clone()).collect();
 
     let count = memories.len();
 
@@ -1353,7 +1425,7 @@ struct HistoryResponse {
 
 #[derive(Debug, Serialize)]
 struct HistoryEvent {
-    timestamp: String,  // ISO 8601 format
+    timestamp: String, // ISO 8601 format
     event_type: String,
     memory_id: String,
     details: String,
@@ -1371,21 +1443,24 @@ async fn get_history(
         let user_id = req.user_id.clone();
         let memory_id = req.memory_id.clone();
 
-        tokio::task::spawn_blocking(move || {
-            state.get_history(&user_id, memory_id.as_deref())
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        tokio::task::spawn_blocking(move || state.get_history(&user_id, memory_id.as_deref()))
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
     };
 
-    let history_events: Vec<HistoryEvent> = events.iter().map(|e| HistoryEvent {
-        timestamp: e.timestamp.to_rfc3339(),
-        event_type: e.event_type.clone(),
-        memory_id: e.memory_id.clone(),
-        details: e.details.clone(),
-    }).collect();
+    let history_events: Vec<HistoryEvent> = events
+        .iter()
+        .map(|e| HistoryEvent {
+            timestamp: e.timestamp.to_rfc3339(),
+            event_type: e.event_type.clone(),
+            memory_id: e.memory_id.clone(),
+            details: e.details.clone(),
+        })
+        .collect();
 
-    Ok(Json(HistoryResponse { events: history_events }))
+    Ok(Json(HistoryResponse {
+        events: history_events,
+    }))
 }
 
 // ====== Advanced Memory Management Endpoints ======
@@ -1401,15 +1476,17 @@ async fn compress_memory(
     State(state): State<AppState>,
     Json(req): Json<CompressMemoryRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let _memory_sys = state.get_user_memory(&req.user_id)
+    let _memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     // Validate memory_id format
-    let _memory_id = MemoryId(uuid::Uuid::parse_str(&req.memory_id)
-        .map_err(|_| AppError::InvalidMemoryId(req.memory_id.clone()))?);
+    let _memory_id = MemoryId(
+        uuid::Uuid::parse_str(&req.memory_id)
+            .map_err(|_| AppError::InvalidMemoryId(req.memory_id.clone()))?,
+    );
 
     // Compression happens automatically in the memory system based on age and importance
     Ok(Json(serde_json::json!({
@@ -1429,21 +1506,22 @@ async fn invalidate_relationship(
     State(state): State<AppState>,
     Json(req): Json<InvalidateRelationshipRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let graph = state.get_user_graph(&req.user_id)
+    let graph = state
+        .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let graph_guard = graph.write();
 
-    let rel_uuid = uuid::Uuid::parse_str(&req.relationship_uuid)
-        .map_err(|_| AppError::InvalidInput {
+    let rel_uuid =
+        uuid::Uuid::parse_str(&req.relationship_uuid).map_err(|_| AppError::InvalidInput {
             field: "relationship_uuid".to_string(),
-            reason: "Invalid UUID format".to_string()
+            reason: "Invalid UUID format".to_string(),
         })?;
 
-    graph_guard.invalidate_relationship(&rel_uuid)
+    graph_guard
+        .invalidate_relationship(&rel_uuid)
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     Ok(Json(serde_json::json!({
@@ -1463,21 +1541,22 @@ async fn get_episode(
     State(state): State<AppState>,
     Json(req): Json<GetEpisodeRequest>,
 ) -> Result<Json<Option<EpisodicNode>>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let graph = state.get_user_graph(&req.user_id)
+    let graph = state
+        .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let graph_guard = graph.read();
 
-    let episode_uuid = uuid::Uuid::parse_str(&req.episode_uuid)
-        .map_err(|_| AppError::InvalidInput {
+    let episode_uuid =
+        uuid::Uuid::parse_str(&req.episode_uuid).map_err(|_| AppError::InvalidInput {
             field: "episode_uuid".to_string(),
-            reason: "Invalid UUID format".to_string()
+            reason: "Invalid UUID format".to_string(),
         })?;
 
-    let episode = graph_guard.get_episode(&episode_uuid)
+    let episode = graph_guard
+        .get_episode(&episode_uuid)
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     Ok(Json(episode))
@@ -1498,10 +1577,10 @@ async fn advanced_search(
     State(state): State<AppState>,
     Json(req): Json<AdvancedSearchRequest>,
 ) -> Result<Json<RetrieveResponse>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory_sys.read();
@@ -1530,20 +1609,20 @@ async fn advanced_search(
 
         criterias.push(memory::storage::SearchCriteria::ByDate {
             start: start_dt,
-            end: end_dt
+            end: end_dt,
         });
     }
 
     if let (Some(min), Some(max)) = (req.min_importance, req.max_importance) {
-        criterias.push(memory::storage::SearchCriteria::ByImportance {
-            min,
-            max
-        });
+        criterias.push(memory::storage::SearchCriteria::ByImportance { min, max });
     }
 
     // Execute combined search
     let criteria = if criterias.len() == 1 {
-        criterias.into_iter().next().expect("Criteria list has exactly one element")
+        criterias
+            .into_iter()
+            .next()
+            .expect("Criteria list has exactly one element")
     } else {
         memory::storage::SearchCriteria::Combined(criterias)
     };
@@ -1564,8 +1643,7 @@ async fn get_graph_stats(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<Json<GraphStats>, AppError> {
-    validation::validate_user_id(&user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
 
     let stats = state
         .get_user_graph_stats(&user_id)
@@ -1585,8 +1663,7 @@ async fn find_entity(
     State(state): State<AppState>,
     Json(req): Json<FindEntityRequest>,
 ) -> Result<Json<Option<EntityNode>>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     let graph = state
         .get_user_graph(&req.user_id)
@@ -1612,8 +1689,7 @@ async fn traverse_graph(
     State(state): State<AppState>,
     Json(req): Json<TraverseGraphRequest>,
 ) -> Result<Json<GraphTraversal>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     let graph = state
         .get_user_graph(&req.user_id)
@@ -1625,7 +1701,9 @@ async fn traverse_graph(
     let entity = graph_guard
         .find_entity_by_name(&req.entity_name)
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-        .ok_or_else(|| AppError::MemoryNotFound(format!("Entity not found: {}", req.entity_name)))?;
+        .ok_or_else(|| {
+            AppError::MemoryNotFound(format!("Entity not found: {}", req.entity_name))
+        })?;
 
     // Traverse from that entity
     let max_depth = req.max_depth.unwrap_or(2);
@@ -1651,18 +1729,21 @@ async fn decompress_memory(
     State(state): State<AppState>,
     Json(req): Json<DecompressMemoryRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory_sys.read();
-    let memory_id = MemoryId(uuid::Uuid::parse_str(&req.memory_id)
-        .map_err(|_| AppError::InvalidMemoryId(req.memory_id.clone()))?);
+    let memory_id = MemoryId(
+        uuid::Uuid::parse_str(&req.memory_id)
+            .map_err(|_| AppError::InvalidMemoryId(req.memory_id.clone()))?,
+    );
 
     // Get the memory
-    let memory = memory_guard.get_memory(&memory_id)
+    let memory = memory_guard
+        .get_memory(&memory_id)
         .map_err(AppError::Internal)?;
 
     if !memory.compressed {
@@ -1674,7 +1755,8 @@ async fn decompress_memory(
     }
 
     // Decompress using compression pipeline
-    let decompressed = memory_guard.decompress_memory(&memory)
+    let decompressed = memory_guard
+        .decompress_memory(&memory)
         .map_err(AppError::Internal)?;
 
     Ok(Json(serde_json::json!({
@@ -1699,14 +1781,15 @@ async fn get_storage_stats(
     State(state): State<AppState>,
     Json(req): Json<StorageStatsRequest>,
 ) -> Result<Json<memory::storage::StorageStats>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory_sys.read();
-    let stats = memory_guard.get_storage_stats()
+    let stats = memory_guard
+        .get_storage_stats()
         .map_err(AppError::Internal)?;
 
     Ok(Json(stats))
@@ -1723,21 +1806,22 @@ async fn forget_by_age(
     State(state): State<AppState>,
     Json(req): Json<ForgetByAgeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let mut memory_guard = memory_sys.write();
-    let count = memory_guard.forget(memory::ForgetCriteria::OlderThan(req.days_old))
+    let count = memory_guard
+        .forget(memory::ForgetCriteria::OlderThan(req.days_old))
         .map_err(AppError::Internal)?;
 
     state.log_event(
         &req.user_id,
         "FORGET_BY_AGE",
         &format!("{} days", req.days_old),
-        &format!("Forgot {count} memories")
+        &format!("Forgot {count} memories"),
     );
 
     Ok(Json(serde_json::json!({
@@ -1758,28 +1842,29 @@ async fn forget_by_importance(
     State(state): State<AppState>,
     Json(req): Json<ForgetByImportanceRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     if req.threshold < 0.0 || req.threshold > 1.0 {
         return Err(AppError::InvalidInput {
             field: "threshold".to_string(),
-            reason: "Must be between 0.0 and 1.0".to_string()
+            reason: "Must be between 0.0 and 1.0".to_string(),
         });
     }
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let mut memory_guard = memory_sys.write();
-    let count = memory_guard.forget(memory::ForgetCriteria::LowImportance(req.threshold))
+    let count = memory_guard
+        .forget(memory::ForgetCriteria::LowImportance(req.threshold))
         .map_err(AppError::Internal)?;
 
     state.log_event(
         &req.user_id,
         "FORGET_BY_IMPORTANCE",
         &format!("threshold {}", req.threshold),
-        &format!("Forgot {count} memories")
+        &format!("Forgot {count} memories"),
     );
 
     Ok(Json(serde_json::json!({
@@ -1800,21 +1885,22 @@ async fn forget_by_pattern(
     State(state): State<AppState>,
     Json(req): Json<ForgetByPatternRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let mut memory_guard = memory_sys.write();
-    let count = memory_guard.forget(memory::ForgetCriteria::Pattern(req.pattern.clone()))
+    let count = memory_guard
+        .forget(memory::ForgetCriteria::Pattern(req.pattern.clone()))
         .map_err(AppError::Internal)?;
 
     state.log_event(
         &req.user_id,
         "FORGET_BY_PATTERN",
         &req.pattern,
-        &format!("Forgot {count} memories")
+        &format!("Forgot {count} memories"),
     );
 
     Ok(Json(serde_json::json!({
@@ -1829,7 +1915,7 @@ async fn forget_by_pattern(
 struct MultiModalSearchRequest {
     user_id: String,
     query_text: String,
-    mode: String,  // "similarity", "temporal", "causal", "associative", "hybrid"
+    mode: String, // "similarity", "temporal", "causal", "associative", "hybrid"
     limit: Option<usize>,
 }
 
@@ -1837,10 +1923,10 @@ async fn multimodal_search(
     State(state): State<AppState>,
     Json(req): Json<MultiModalSearchRequest>,
 ) -> Result<Json<RetrieveResponse>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory_sys.read();
@@ -1869,14 +1955,10 @@ async fn multimodal_search(
         ..Default::default()
     };
 
-    let shared_memories = memory_guard.retrieve(&query)
-        .map_err(AppError::Internal)?;
+    let shared_memories = memory_guard.retrieve(&query).map_err(AppError::Internal)?;
 
     // Convert Arc<Memory> to owned Memory for response
-    let memories: Vec<Memory> = shared_memories
-        .iter()
-        .map(|m| (**m).clone())
-        .collect();
+    let memories: Vec<Memory> = shared_memories.iter().map(|m| (**m).clone()).collect();
 
     let count = memories.len();
 
@@ -1884,7 +1966,7 @@ async fn multimodal_search(
         &req.user_id,
         "MULTIMODAL_SEARCH",
         &req.mode,
-        &format!("Retrieved {} memories using {} mode", count, req.mode)
+        &format!("Retrieved {} memories using {} mode", count, req.mode),
     );
 
     Ok(Json(RetrieveResponse { memories, count }))
@@ -1926,10 +2008,10 @@ async fn robotics_search(
     State(state): State<AppState>,
     Json(req): Json<RoboticsSearchRequest>,
 ) -> Result<Json<RetrieveResponse>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory_sys.read();
@@ -1941,18 +2023,19 @@ async fn robotics_search(
         "action_outcome" => memory::RetrievalMode::ActionOutcome,
         "hybrid" => memory::RetrievalMode::Hybrid,
         "similarity" => memory::RetrievalMode::Similarity,
-        _ => return Err(AppError::InvalidInput {
-            field: "mode".to_string(),
-            reason: "Invalid mode. Use: spatial, mission, action_outcome, hybrid, similarity".to_string()
-        })
+        _ => {
+            return Err(AppError::InvalidInput {
+                field: "mode".to_string(),
+                reason: "Invalid mode. Use: spatial, mission, action_outcome, hybrid, similarity"
+                    .to_string(),
+            })
+        }
     };
 
     // Build geo filter if spatial coordinates provided
     let geo_filter = match (req.lat, req.lon, req.radius_meters) {
-        (Some(lat), Some(lon), Some(radius)) => {
-            Some(memory::GeoFilter::new(lat, lon, radius))
-        }
-        _ => None
+        (Some(lat), Some(lon), Some(radius)) => Some(memory::GeoFilter::new(lat, lon, radius)),
+        _ => None,
     };
 
     // Build reward range
@@ -1960,14 +2043,14 @@ async fn robotics_search(
         (Some(min), Some(max)) => Some((min, max)),
         (Some(min), None) => Some((min, 1.0)),
         (None, Some(max)) => Some((-1.0, max)),
-        _ => None
+        _ => None,
     };
 
     // Validate spatial mode has coordinates
     if matches!(retrieval_mode, memory::RetrievalMode::Spatial) && geo_filter.is_none() {
         return Err(AppError::InvalidInput {
             field: "lat/lon/radius_meters".to_string(),
-            reason: "Spatial mode requires lat, lon, and radius_meters".to_string()
+            reason: "Spatial mode requires lat, lon, and radius_meters".to_string(),
         });
     }
 
@@ -1975,7 +2058,7 @@ async fn robotics_search(
     if matches!(retrieval_mode, memory::RetrievalMode::Mission) && req.mission_id.is_none() {
         return Err(AppError::InvalidInput {
             field: "mission_id".to_string(),
-            reason: "Mission mode requires mission_id".to_string()
+            reason: "Mission mode requires mission_id".to_string(),
         });
     }
 
@@ -1991,13 +2074,9 @@ async fn robotics_search(
         ..Default::default()
     };
 
-    let shared_memories = memory_guard.retrieve(&query)
-        .map_err(AppError::Internal)?;
+    let shared_memories = memory_guard.retrieve(&query).map_err(AppError::Internal)?;
 
-    let memories: Vec<Memory> = shared_memories
-        .iter()
-        .map(|m| (**m).clone())
-        .collect();
+    let memories: Vec<Memory> = shared_memories.iter().map(|m| (**m).clone()).collect();
 
     let count = memories.len();
 
@@ -2005,8 +2084,10 @@ async fn robotics_search(
         &req.user_id,
         "ROBOTICS_SEARCH",
         &req.mode,
-        &format!("Retrieved {} robotics memories (robot={:?}, mission={:?})",
-                 count, req.robot_id, req.mission_id)
+        &format!(
+            "Retrieved {} robotics memories (robot={:?}, mission={:?})",
+            count, req.robot_id, req.mission_id
+        ),
     );
 
     Ok(Json(RetrieveResponse { memories, count }))
@@ -2023,10 +2104,10 @@ async fn get_uncompressed_old(
     State(state): State<AppState>,
     Json(req): Json<GetUncompressedRequest>,
 ) -> Result<Json<RetrieveResponse>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory_sys = state.get_user_memory(&req.user_id)
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory_sys.read();
@@ -2054,16 +2135,14 @@ async fn add_entity(
     State(state): State<AppState>,
     Json(req): Json<AddEntityRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    validation::validate_entity(&req.name)
-        .map_validation_err("name")?;
+    validation::validate_entity(&req.name).map_validation_err("name")?;
 
-    validation::validate_entity(&req.label)
-        .map_validation_err("label")?;
+    validation::validate_entity(&req.label).map_validation_err("label")?;
 
-    let graph = state.get_user_graph(&req.user_id)
+    let graph = state
+        .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
     let graph_guard = graph.write();
 
@@ -2093,7 +2172,8 @@ async fn add_entity(
         name_embedding: None,
     };
 
-    let entity_uuid = graph_guard.add_entity(entity)
+    let entity_uuid = graph_guard
+        .add_entity(entity)
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     Ok(Json(serde_json::json!({
@@ -2118,32 +2198,35 @@ async fn add_relationship(
     State(state): State<AppState>,
     Json(req): Json<AddRelationshipRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    validation::validate_entity(&req.from_entity_name)
-        .map_validation_err("from_entity_name")?;
+    validation::validate_entity(&req.from_entity_name).map_validation_err("from_entity_name")?;
 
-    validation::validate_entity(&req.to_entity_name)
-        .map_validation_err("to_entity_name")?;
+    validation::validate_entity(&req.to_entity_name).map_validation_err("to_entity_name")?;
 
     if let Some(strength) = req.strength {
-        validation::validate_relationship_strength(strength)
-            .map_validation_err("strength")?;
+        validation::validate_relationship_strength(strength).map_validation_err("strength")?;
     }
 
-    let graph = state.get_user_graph(&req.user_id)
+    let graph = state
+        .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
     let graph_guard = graph.write();
 
     // Find entities
-    let from_entity = graph_guard.find_entity_by_name(&req.from_entity_name)
+    let from_entity = graph_guard
+        .find_entity_by_name(&req.from_entity_name)
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-        .ok_or_else(|| AppError::MemoryNotFound(format!("Entity not found: {}", req.from_entity_name)))?;
+        .ok_or_else(|| {
+            AppError::MemoryNotFound(format!("Entity not found: {}", req.from_entity_name))
+        })?;
 
-    let to_entity = graph_guard.find_entity_by_name(&req.to_entity_name)
+    let to_entity = graph_guard
+        .find_entity_by_name(&req.to_entity_name)
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-        .ok_or_else(|| AppError::MemoryNotFound(format!("Entity not found: {}", req.to_entity_name)))?;
+        .ok_or_else(|| {
+            AppError::MemoryNotFound(format!("Entity not found: {}", req.to_entity_name))
+        })?;
 
     // Parse relation type
     let relation_type = match req.relation_type.as_str() {
@@ -2181,7 +2264,8 @@ async fn add_relationship(
         context: req.context.unwrap_or_default(),
     };
 
-    let edge_uuid = graph_guard.add_relationship(edge)
+    let edge_uuid = graph_guard
+        .add_relationship(edge)
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     Ok(Json(serde_json::json!({
@@ -2204,14 +2288,15 @@ async fn get_all_entities(
     State(state): State<AppState>,
     Json(req): Json<GetAllEntitiesRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let graph = state.get_user_graph(&req.user_id)
+    let graph = state
+        .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
     let graph_guard = graph.read();
 
-    let entities = graph_guard.get_all_entities()
+    let entities = graph_guard
+        .get_all_entities()
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     let limit = req.limit.unwrap_or(100);
@@ -2231,8 +2316,7 @@ async fn get_visualization_stats(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<Json<VisualizationStats>, AppError> {
-    validation::validate_user_id(&user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
 
     let memory = state
         .get_user_memory(&user_id)
@@ -2249,8 +2333,7 @@ async fn get_visualization_dot(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<String, AppError> {
-    validation::validate_user_id(&user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
 
     let memory = state
         .get_user_memory(&user_id)
@@ -2272,15 +2355,15 @@ async fn build_visualization(
     State(state): State<AppState>,
     Json(req): Json<BuildVisualizationRequest>,
 ) -> Result<Json<VisualizationStats>, AppError> {
-    validation::validate_user_id(&req.user_id)
-        .map_validation_err("user_id")?;
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     let memory = state
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory.read();
-    let stats = memory_guard.build_visualization_graph()
+    let stats = memory_guard
+        .build_visualization_graph()
         .map_err(AppError::Internal)?;
 
     Ok(Json(stats))
@@ -2291,8 +2374,7 @@ async fn main() -> Result<()> {
     // P1.6: Initialize distributed tracing with OpenTelemetry (optional)
     #[cfg(feature = "telemetry")]
     {
-        tracing_setup::init_tracing()
-            .expect("Failed to initialize tracing");
+        tracing_setup::init_tracing().expect("Failed to initialize tracing");
     }
     #[cfg(not(feature = "telemetry"))]
     {
@@ -2302,8 +2384,7 @@ async fn main() -> Result<()> {
     }
 
     // P1.1: Register Prometheus metrics
-    metrics::register_metrics()
-        .expect("Failed to register metrics");
+    metrics::register_metrics().expect("Failed to register metrics");
     info!("📊 Metrics registered at /metrics");
 
     info!("🧠 Starting Shodh-Memory server...");
@@ -2318,7 +2399,7 @@ async fn main() -> Result<()> {
     info!("📁 Storage path: {:?}", server_config.storage_path);
     let manager = Arc::new(MultiUserMemoryManager::new(
         server_config.storage_path.clone(),
-        server_config.clone()
+        server_config.clone(),
     )?);
 
     // Keep a reference to manager for shutdown cleanup (clone BEFORE moving into router)
@@ -2333,8 +2414,10 @@ async fn main() -> Result<()> {
 
     let governor_layer = GovernorLayer::new(governor_conf);
 
-    info!("⚡ Rate limiting enabled: {} req/sec, burst of {}",
-        server_config.rate_limit_per_second, server_config.rate_limit_burst);
+    info!(
+        "⚡ Rate limiting enabled: {} req/sec, burst of {}",
+        server_config.rate_limit_per_second, server_config.rate_limit_burst
+    );
 
     // Configure CORS - secure by default, configurable via environment
     // In production, SHODH_CORS_ORIGINS should be set to a comma-separated list of allowed origins
@@ -2349,22 +2432,43 @@ async fn main() -> Result<()> {
             info!("⚠️  CORS: No valid origins in SHODH_CORS_ORIGINS, using restrictive default");
             CorsLayer::new()
                 .allow_origin(AllowOrigin::exact("http://localhost:3000".parse().unwrap()))
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::DELETE])
-                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ])
         } else {
             info!("🔒 CORS: Allowing origins: {:?}", allowed_origins);
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(allowed_origins))
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::DELETE])
-                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::DELETE,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ])
         }
     } else if is_production {
         // Production without explicit CORS config: very restrictive
         info!("🔒 CORS: Production mode - allowing only localhost");
         CorsLayer::new()
             .allow_origin(AllowOrigin::exact("http://localhost:3000".parse().unwrap()))
-            .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::DELETE])
-            .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ])
     } else {
         // Development mode: allow all (for local testing only)
         info!("⚠️  CORS: Development mode - allowing all origins (NOT for production!)");
@@ -2382,54 +2486,53 @@ async fn main() -> Result<()> {
         // Core endpoints
         .route("/api/record", post(record_experience))
         .route("/api/retrieve", post(retrieve_memories))
-
         // User management
         .route("/api/users", get(list_users))
         .route("/api/users/{user_id}/stats", get(get_user_stats))
         .route("/api/users/{user_id}", delete(delete_user))
-
         // Memory CRUD
         .route("/api/memory/{memory_id}", get(get_memory))
         .route("/api/memory/{memory_id}", axum::routing::put(update_memory))
         .route("/api/memory/{memory_id}", delete(delete_memory))
         .route("/api/memories", post(get_all_memories))
         .route("/api/memories/history", post(get_history))
-
         // Compression & Storage Management
         .route("/api/memory/compress", post(compress_memory))
         .route("/api/memory/decompress", post(decompress_memory))
         .route("/api/storage/stats", post(get_storage_stats))
         .route("/api/storage/uncompressed", post(get_uncompressed_old))
-
         // Forgetting Operations
         .route("/api/forget/age", post(forget_by_age))
         .route("/api/forget/importance", post(forget_by_importance))
         .route("/api/forget/pattern", post(forget_by_pattern))
-
         // Advanced Search
         .route("/api/search/advanced", post(advanced_search))
         .route("/api/search/multimodal", post(multimodal_search))
         .route("/api/search/robotics", post(robotics_search))
-
         // Graph Memory - Entity Management
         .route("/api/graph/{user_id}/stats", get(get_graph_stats))
         .route("/api/graph/entity/find", post(find_entity))
         .route("/api/graph/entity/add", post(add_entity))
         .route("/api/graph/entities/all", post(get_all_entities))
-
         // Graph Memory - Relationship Management
         .route("/api/graph/relationship/add", post(add_relationship))
-        .route("/api/graph/relationship/invalidate", post(invalidate_relationship))
+        .route(
+            "/api/graph/relationship/invalidate",
+            post(invalidate_relationship),
+        )
         .route("/api/graph/traverse", post(traverse_graph))
-
         // Graph Memory - Episodes
         .route("/api/graph/episode/get", post(get_episode))
-
         // Memory Visualization
-        .route("/api/visualization/{user_id}/stats", get(get_visualization_stats))
-        .route("/api/visualization/{user_id}/dot", get(get_visualization_dot))
+        .route(
+            "/api/visualization/{user_id}/stats",
+            get(get_visualization_stats),
+        )
+        .route(
+            "/api/visualization/{user_id}/dot",
+            get(get_visualization_dot),
+        )
         .route("/api/visualization/build", post(build_visualization))
-
         // Apply auth middleware only to protected routes
         .layer(axum::middleware::from_fn(auth::auth_middleware))
         .with_state(manager.clone());
@@ -2438,7 +2541,10 @@ async fn main() -> Result<()> {
     // Limits max concurrent requests to prevent resource exhaustion
     let max_concurrent = server_config.max_concurrent_requests;
 
-    info!("🔄 Concurrency limiting enabled: max_concurrent={}", max_concurrent);
+    info!(
+        "🔄 Concurrency limiting enabled: max_concurrent={}",
+        max_concurrent
+    );
 
     // Combine public and protected routes
     let app = Router::new()
@@ -2463,7 +2569,9 @@ async fn main() -> Result<()> {
 
     // Conditionally add trace propagation middleware only when telemetry feature is enabled
     #[cfg(feature = "telemetry")]
-    let app = app.layer(axum::middleware::from_fn(crate::tracing_setup::trace_propagation::propagate_trace_context));
+    let app = app.layer(axum::middleware::from_fn(
+        crate::tracing_setup::trace_propagation::propagate_trace_context,
+    ));
 
     let app = app
         .layer(axum::middleware::from_fn(crate::middleware::track_metrics))
@@ -2484,7 +2592,7 @@ async fn main() -> Result<()> {
         // Graceful shutdown with ConnectInfo for rate limiting (tower_governor requires SocketAddr)
         axum::serve(
             listener,
-            app.into_make_service_with_connect_info::<SocketAddr>()
+            app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -2492,32 +2600,38 @@ async fn main() -> Result<()> {
         info!("🔒 All requests completed, flushing databases...");
 
         // P0.11: Flush RocksDB with timeout
-        let flush_future = async {
-            manager_for_shutdown.flush_all_databases()
-        };
+        let flush_future = async { manager_for_shutdown.flush_all_databases() };
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(DATABASE_FLUSH_TIMEOUT_SECS),
-            flush_future
-        ).await {
+            flush_future,
+        )
+        .await
+        {
             Ok(Ok(())) => info!("✅ Databases flushed successfully"),
             Ok(Err(e)) => tracing::error!("❌ Failed to flush databases: {}", e),
-            Err(_) => tracing::error!("⏱️  Database flush timed out after {}s", DATABASE_FLUSH_TIMEOUT_SECS),
+            Err(_) => tracing::error!(
+                "⏱️  Database flush timed out after {}s",
+                DATABASE_FLUSH_TIMEOUT_SECS
+            ),
         }
 
         // P0.11: Save vector indices with timeout
         info!("💾 Persisting vector indices...");
-        let save_future = async {
-            manager_for_shutdown.save_all_vector_indices()
-        };
+        let save_future = async { manager_for_shutdown.save_all_vector_indices() };
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(VECTOR_INDEX_SAVE_TIMEOUT_SECS),
-            save_future
-        ).await {
+            save_future,
+        )
+        .await
+        {
             Ok(Ok(())) => info!("✅ Vector indices saved successfully"),
             Ok(Err(e)) => tracing::error!("❌ Failed to save vector indices: {}", e),
-            Err(_) => tracing::error!("⏱️  Vector index save timed out after {}s", VECTOR_INDEX_SAVE_TIMEOUT_SECS),
+            Err(_) => tracing::error!(
+                "⏱️  Vector index save timed out after {}s",
+                VECTOR_INDEX_SAVE_TIMEOUT_SECS
+            ),
         }
 
         // P1.6: Shutdown tracing and flush remaining spans (optional, only with telemetry feature)
@@ -2530,8 +2644,10 @@ async fn main() -> Result<()> {
     // P0.11: Enforce overall shutdown timeout with force-kill fallback
     match tokio::time::timeout(
         std::time::Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
-        shutdown_future
-    ).await {
+        shutdown_future,
+    )
+    .await
+    {
         Ok(Ok(())) => {
             info!("👋 Server shutdown complete");
         }
@@ -2540,7 +2656,10 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
         Err(_) => {
-            tracing::error!("⏱️  Graceful shutdown timed out after {}s, forcing exit", GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
+            tracing::error!(
+                "⏱️  Graceful shutdown timed out after {}s, forcing exit",
+                GRACEFUL_SHUTDOWN_TIMEOUT_SECS
+            );
             std::process::exit(1);
         }
     }

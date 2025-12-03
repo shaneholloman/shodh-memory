@@ -1,10 +1,10 @@
 //! Type definitions for the memory system
 
-use serde::{Serialize, Deserialize};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 /// Unique identifier for memories
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -304,14 +304,14 @@ pub struct ConceptRelationship {
 /// Types of relationships
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RelationshipType {
-    IsA,           // Inheritance
-    HasA,          // Composition
-    Uses,          // Dependency
-    RelatedTo,     // General association
-    Causes,        // Causation
-    PartOf,        // Part-whole
-    Similar,       // Similarity
-    Opposite,      // Antonym/opposite
+    IsA,       // Inheritance
+    HasA,      // Composition
+    Uses,      // Dependency
+    RelatedTo, // General association
+    Causes,    // Causation
+    PartOf,    // Part-whole
+    Similar,   // Similarity
+    Opposite,  // Antonym/opposite
 }
 
 /// Raw experience data to be stored (ENHANCED with smart defaults)
@@ -365,7 +365,6 @@ pub struct Experience {
     // =========================================================================
     // ROBOTICS FIELDS (optional, backward compatible)
     // =========================================================================
-
     /// Robot/drone identifier for multi-agent systems
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub robot_id: Option<String>,
@@ -401,7 +400,6 @@ pub struct Experience {
     // =========================================================================
     // DECISION & LEARNING FIELDS (for action-outcome learning)
     // =========================================================================
-
     /// Decision context: What state/conditions led to this decision?
     /// E.g., "battery_low=true, obstacle_ahead=true, weather=windy"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -433,7 +431,6 @@ pub struct Experience {
     // =========================================================================
     // ENVIRONMENTAL CONTEXT
     // =========================================================================
-
     /// Weather conditions: {"wind_speed": "15", "visibility": "good", "precipitation": "none"}
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weather: Option<HashMap<String, String>>,
@@ -453,7 +450,6 @@ pub struct Experience {
     // =========================================================================
     // FAILURE & ANOMALY TRACKING
     // =========================================================================
-
     /// Is this a failure/error event?
     #[serde(default)]
     pub is_failure: bool,
@@ -477,7 +473,6 @@ pub struct Experience {
     // =========================================================================
     // LEARNED PATTERNS & PREDICTIONS
     // =========================================================================
-
     /// Pattern ID this experience matches (if recognized)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern_id: Option<String>,
@@ -629,7 +624,7 @@ impl Serialize for Memory {
         state.serialize_field("run_id", &self.run_id)?;
         state.serialize_field("actor_id", &self.actor_id)?;
         state.serialize_field("temporal_relevance", &meta.temporal_relevance)?;
-        state.serialize_field("score", &self.score)?;  // Always serialize, Option handles None
+        state.serialize_field("score", &self.score)?; // Always serialize, Option handles None
         state.end()
     }
 }
@@ -690,7 +685,11 @@ pub struct GeoFilter {
 
 impl GeoFilter {
     pub fn new(lat: f64, lon: f64, radius_meters: f64) -> Self {
-        Self { lat, lon, radius_meters }
+        Self {
+            lat,
+            lon,
+            radius_meters,
+        }
     }
 
     /// Calculate haversine distance between two points in meters
@@ -794,23 +793,23 @@ impl Default for Query {
 /// Retrieval modes
 #[derive(Debug, Clone)]
 pub enum RetrievalMode {
-    Similarity,     // Vector similarity search
-    Temporal,       // Time-based retrieval
-    Causal,         // Cause-effect chains
-    Associative,    // Related memories
-    Hybrid,         // Combination of methods
+    Similarity,  // Vector similarity search
+    Temporal,    // Time-based retrieval
+    Causal,      // Cause-effect chains
+    Associative, // Related memories
+    Hybrid,      // Combination of methods
     // === Robotics-Specific Modes ===
-    Spatial,        // Geo-location based retrieval
-    Mission,        // Mission context retrieval
-    ActionOutcome,  // Reward-based learning retrieval
+    Spatial,       // Geo-location based retrieval
+    Mission,       // Mission context retrieval
+    ActionOutcome, // Reward-based learning retrieval
 }
 
 /// Criteria for forgetting memories
 #[derive(Debug, Clone)]
 pub enum ForgetCriteria {
-    OlderThan(u32),           // Days
-    LowImportance(f32),       // Threshold
-    Pattern(String),          // Regex pattern
+    OlderThan(u32),     // Days
+    LowImportance(f32), // Threshold
+    Pattern(String),    // Regex pattern
 }
 
 /// Working memory - fast access, limited size
@@ -833,7 +832,7 @@ impl WorkingMemory {
     }
 
     /// Add memory (convenience wrapper - use add_shared for zero-copy)
-    #[allow(unused)]  // Public API convenience method
+    #[allow(unused)] // Public API convenience method
     pub fn add(&mut self, memory: Memory) -> anyhow::Result<()> {
         self.add_shared(Arc::new(memory))
     }
@@ -856,7 +855,9 @@ impl WorkingMemory {
 
     /// Search memories (returns Arc<Memory> for zero-copy)
     pub fn search(&self, query: &Query, limit: usize) -> anyhow::Result<Vec<SharedMemory>> {
-        let mut results: Vec<SharedMemory> = self.memories.values()
+        let mut results: Vec<SharedMemory> = self
+            .memories
+            .values()
             .filter(|m| {
                 // Apply filters
                 if let Some(threshold) = query.importance_threshold {
@@ -865,7 +866,10 @@ impl WorkingMemory {
                     }
                 }
                 if let Some(types) = &query.experience_types {
-                    if !types.iter().any(|t| std::mem::discriminant(&m.experience.experience_type) == std::mem::discriminant(t)) {
+                    if !types.iter().any(|t| {
+                        std::mem::discriminant(&m.experience.experience_type)
+                            == std::mem::discriminant(t)
+                    }) {
                         return false;
                     }
                 }
@@ -876,12 +880,13 @@ impl WorkingMemory {
                 }
                 true
             })
-            .cloned()  // Arc::clone is cheap (just increments ref count)
+            .cloned() // Arc::clone is cheap (just increments ref count)
             .collect();
 
         // Sort by importance and recency
         results.sort_by(|a, b| {
-            b.importance().partial_cmp(&a.importance())
+            b.importance()
+                .partial_cmp(&a.importance())
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(b.last_accessed().cmp(&a.last_accessed()))
         });
@@ -922,7 +927,7 @@ impl WorkingMemory {
         let mut result = Vec::new();
         for id in self.access_order.iter().take(count) {
             if let Some(memory) = self.memories.get(id) {
-                result.push(Arc::clone(memory));  // Cheap: just ref count increment
+                result.push(Arc::clone(memory)); // Cheap: just ref count increment
             }
         }
         Ok(result)
@@ -935,7 +940,8 @@ impl WorkingMemory {
     }
 
     pub fn remove_older_than(&mut self, cutoff: DateTime<Utc>) -> anyhow::Result<()> {
-        let to_remove: Vec<MemoryId> = self.memories
+        let to_remove: Vec<MemoryId> = self
+            .memories
             .iter()
             .filter(|(_, m)| m.created_at < cutoff)
             .map(|(id, _)| id.clone())
@@ -948,7 +954,8 @@ impl WorkingMemory {
     }
 
     pub fn remove_below_importance(&mut self, threshold: f32) -> anyhow::Result<()> {
-        let to_remove: Vec<MemoryId> = self.memories
+        let to_remove: Vec<MemoryId> = self
+            .memories
             .iter()
             .filter(|(_, m)| m.importance() < threshold)
             .map(|(id, _)| id.clone())
@@ -961,7 +968,8 @@ impl WorkingMemory {
     }
 
     pub fn remove_matching(&mut self, regex: &regex::Regex) -> anyhow::Result<usize> {
-        let to_remove: Vec<MemoryId> = self.memories
+        let to_remove: Vec<MemoryId> = self
+            .memories
             .iter()
             .filter(|(_, m)| regex.is_match(&m.experience.content))
             .map(|(id, _)| id.clone())
@@ -1019,7 +1027,8 @@ impl SessionMemory {
     }
 
     fn evict_to_make_space(&mut self, needed_bytes: usize) -> anyhow::Result<()> {
-        let mut sorted: Vec<(MemoryId, f32)> = self.memories
+        let mut sorted: Vec<(MemoryId, f32)> = self
+            .memories
             .iter()
             .map(|(id, m)| (id.clone(), m.importance()))
             .collect();
@@ -1040,7 +1049,9 @@ impl SessionMemory {
 
     /// Search memories (returns Arc<Memory> for zero-copy)
     pub fn search(&self, query: &Query, limit: usize) -> anyhow::Result<Vec<SharedMemory>> {
-        let mut results: Vec<SharedMemory> = self.memories.values()
+        let mut results: Vec<SharedMemory> = self
+            .memories
+            .values()
             .filter(|m| {
                 if let Some(threshold) = query.importance_threshold {
                     if m.importance() < threshold {
@@ -1049,10 +1060,14 @@ impl SessionMemory {
                 }
                 true
             })
-            .cloned()  // Arc::clone is cheap
+            .cloned() // Arc::clone is cheap
             .collect();
 
-        results.sort_by(|a, b| b.importance().partial_cmp(&a.importance()).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.importance()
+                .partial_cmp(&a.importance())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         Ok(results)
     }
@@ -1080,9 +1095,11 @@ impl SessionMemory {
 
     /// Get important memories (zero-copy with Arc)
     pub fn get_important(&self, threshold: f32) -> anyhow::Result<Vec<SharedMemory>> {
-        Ok(self.memories.values()
+        Ok(self
+            .memories
+            .values()
             .filter(|m| m.importance() >= threshold)
-            .cloned()  // Arc::clone is cheap
+            .cloned() // Arc::clone is cheap
             .collect())
     }
 
@@ -1095,7 +1112,8 @@ impl SessionMemory {
     }
 
     pub fn remove_older_than(&mut self, cutoff: DateTime<Utc>) -> anyhow::Result<()> {
-        let to_remove: Vec<MemoryId> = self.memories
+        let to_remove: Vec<MemoryId> = self
+            .memories
             .iter()
             .filter(|(_, m)| m.created_at < cutoff)
             .map(|(id, _)| id.clone())
@@ -1108,7 +1126,8 @@ impl SessionMemory {
     }
 
     pub fn remove_below_importance(&mut self, threshold: f32) -> anyhow::Result<()> {
-        let to_remove: Vec<MemoryId> = self.memories
+        let to_remove: Vec<MemoryId> = self
+            .memories
             .iter()
             .filter(|(_, m)| m.importance() < threshold)
             .map(|(id, _)| id.clone())
@@ -1121,7 +1140,8 @@ impl SessionMemory {
     }
 
     pub fn remove_matching(&mut self, regex: &regex::Regex) -> anyhow::Result<usize> {
-        let to_remove: Vec<MemoryId> = self.memories
+        let to_remove: Vec<MemoryId> = self
+            .memories
             .iter()
             .filter(|(_, m)| regex.is_match(&m.experience.content))
             .map(|(id, _)| id.clone())
@@ -1167,15 +1187,20 @@ mod tests {
 
         let distance = sf.haversine_distance(oakland_lat, oakland_lon);
         // Should be approximately 13km (13000m)
-        assert!(distance > 12000.0 && distance < 14000.0,
-                "SF to Oakland should be ~13km, got {distance}m");
+        assert!(
+            distance > 12000.0 && distance < 14000.0,
+            "SF to Oakland should be ~13km, got {distance}m"
+        );
     }
 
     #[test]
     fn test_geo_filter_same_point() {
         let filter = GeoFilter::new(37.7749, -122.4194, 100.0);
         let distance = filter.haversine_distance(37.7749, -122.4194);
-        assert!(distance < 1.0, "Same point should have ~0 distance, got {distance}");
+        assert!(
+            distance < 1.0,
+            "Same point should have ~0 distance, got {distance}"
+        );
     }
 
     #[test]
@@ -1187,14 +1212,18 @@ mod tests {
         // ~0.001 degrees latitude ≈ 111m
         let nearby_lat = 37.7750;
         let nearby_lon = -122.4194;
-        assert!(filter.contains(nearby_lat, nearby_lon),
-                "Point ~11m away should be within 100m radius");
+        assert!(
+            filter.contains(nearby_lat, nearby_lon),
+            "Point ~11m away should be within 100m radius"
+        );
 
         // Point far away should NOT be contained
         let oakland_lat = 37.8044;
         let oakland_lon = -122.2712;
-        assert!(!filter.contains(oakland_lat, oakland_lon),
-                "Oakland (~13km) should NOT be within 100m radius");
+        assert!(
+            !filter.contains(oakland_lat, oakland_lon),
+            "Oakland (~13km) should NOT be within 100m radius"
+        );
     }
 
     #[test]
@@ -1203,8 +1232,10 @@ mod tests {
         let equator = GeoFilter::new(0.0, 0.0, 1000.0);
         let distance = equator.haversine_distance(0.0, 0.01);
         // 0.01 degrees at equator ≈ 1.11km
-        assert!(distance > 1000.0 && distance < 1200.0,
-                "0.01 degrees at equator should be ~1.1km, got {distance}m");
+        assert!(
+            distance > 1000.0 && distance < 1200.0,
+            "0.01 degrees at equator should be ~1.1km, got {distance}m"
+        );
     }
 
     #[test]

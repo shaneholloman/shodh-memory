@@ -1,11 +1,6 @@
 //! P1.3: HTTP request tracking middleware for observability
 
-use axum::{
-    extract::Request,
-    http::StatusCode,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use std::time::Instant;
 
 /// P1.3: Middleware to track HTTP request latency and counts
@@ -99,10 +94,7 @@ mod tests {
             normalize_path("/api/memories/550e8400-e29b-41d4-a716-446655440000"),
             "/api/memories/{id}"
         );
-        assert_eq!(
-            normalize_path("/health"),
-            "/health"
-        );
+        assert_eq!(normalize_path("/health"), "/health");
         assert_eq!(
             normalize_path("/api/users/12345/stats"),
             "/api/users/{id}/stats"

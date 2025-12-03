@@ -2,8 +2,8 @@
 //!
 //! Uses SIMD-optimized operations from distance_inline for single comparisons.
 
-use ordered_float::OrderedFloat;
 use crate::vector_db::distance_inline::dot_product_inline;
+use ordered_float::OrderedFloat;
 
 /// Compute cosine similarity between two vectors (SIMD-optimized)
 #[inline]
@@ -24,11 +24,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Find top-k most similar vectors
-pub fn top_k_similar<T>(
-    query: &[f32],
-    candidates: &[(Vec<f32>, T)],
-    k: usize,
-) -> Vec<(f32, T)>
+pub fn top_k_similar<T>(query: &[f32], candidates: &[(Vec<f32>, T)], k: usize) -> Vec<(f32, T)>
 where
     T: Clone,
 {

@@ -1,15 +1,15 @@
 //! Input validation for enterprise security
 //! Prevents injection attacks, ensures data integrity, protects against ReDoS
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use regex::Regex;
 
 /// Maximum lengths for security
 pub const MAX_USER_ID_LENGTH: usize = 128;
-pub const MAX_CONTENT_LENGTH: usize = 50_000;  // 50KB
-pub const MAX_PATTERN_LENGTH: usize = 256;     // Max regex pattern length
-pub const MAX_ENTITY_LENGTH: usize = 256;      // Max entity name length
-pub const MAX_METADATA_SIZE: usize = 10_000;   // Max metadata JSON size (10KB)
+pub const MAX_CONTENT_LENGTH: usize = 50_000; // 50KB
+pub const MAX_PATTERN_LENGTH: usize = 256; // Max regex pattern length
+pub const MAX_ENTITY_LENGTH: usize = 256; // Max entity name length
+pub const MAX_METADATA_SIZE: usize = 10_000; // Max metadata JSON size (10KB)
 pub const MAX_ENTITIES_PER_MEMORY: usize = 50; // Max entities per memory
 
 /// Validate user_id
@@ -27,7 +27,10 @@ pub fn validate_user_id(user_id: &str) -> Result<()> {
     }
 
     // Only allow alphanumeric, dash, underscore
-    if !user_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '@' || c == '.') {
+    if !user_id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '@' || c == '.')
+    {
         return Err(anyhow!(
             "user_id contains invalid characters (allowed: alphanumeric, -, _, @, .)"
         ));
@@ -38,8 +41,7 @@ pub fn validate_user_id(user_id: &str) -> Result<()> {
 
 /// Validate memory_id (UUID format)
 pub fn validate_memory_id(memory_id: &str) -> Result<uuid::Uuid> {
-    uuid::Uuid::parse_str(memory_id)
-        .map_err(|e| anyhow!("Invalid memory_id UUID format: {e}"))
+    uuid::Uuid::parse_str(memory_id).map_err(|e| anyhow!("Invalid memory_id UUID format: {e}"))
 }
 
 /// Validate content
@@ -259,21 +261,21 @@ mod tests {
 
     #[test]
     fn test_invalid_user_id() {
-        assert!(validate_user_id("").is_err());  // empty
-        assert!(validate_user_id("user/123").is_err());  // invalid char
-        assert!(validate_user_id(&"a".repeat(200)).is_err());  // too long
+        assert!(validate_user_id("").is_err()); // empty
+        assert!(validate_user_id("user/123").is_err()); // invalid char
+        assert!(validate_user_id(&"a".repeat(200)).is_err()); // too long
     }
 
     #[test]
     fn test_valid_content() {
         assert!(validate_content("Hello world", false).is_ok());
-        assert!(validate_content("", true).is_ok());  // allowed when allow_empty=true
+        assert!(validate_content("", true).is_ok()); // allowed when allow_empty=true
     }
 
     #[test]
     fn test_invalid_content() {
-        assert!(validate_content("", false).is_err());  // empty not allowed
-        assert!(validate_content(&"x".repeat(100_000), false).is_err());  // too long
+        assert!(validate_content("", false).is_err()); // empty not allowed
+        assert!(validate_content(&"x".repeat(100_000), false).is_err()); // too long
     }
 
     #[test]
@@ -287,9 +289,9 @@ mod tests {
 
     #[test]
     fn test_invalid_embeddings() {
-        assert!(validate_embeddings(&[]).is_err());  // empty
-        assert!(validate_embeddings(&[f32::NAN, 0.5]).is_err());  // NaN
-        assert!(validate_embeddings(&vec![0.5; 999]).is_err());  // unusual dimension
+        assert!(validate_embeddings(&[]).is_err()); // empty
+        assert!(validate_embeddings(&[f32::NAN, 0.5]).is_err()); // NaN
+        assert!(validate_embeddings(&vec![0.5; 999]).is_err()); // unusual dimension
     }
 
     #[test]
@@ -341,10 +343,10 @@ mod tests {
 
     #[test]
     fn test_invalid_entity() {
-        assert!(validate_entity("").is_err());  // empty
-        assert!(validate_entity(&"a".repeat(300)).is_err());  // too long
-        assert!(validate_entity("../etc/passwd").is_err());  // path traversal
-        assert!(validate_entity("entity\x00null").is_err());  // control char
+        assert!(validate_entity("").is_err()); // empty
+        assert!(validate_entity(&"a".repeat(300)).is_err()); // too long
+        assert!(validate_entity("../etc/passwd").is_err()); // path traversal
+        assert!(validate_entity("entity\x00null").is_err()); // control char
     }
 
     #[test]

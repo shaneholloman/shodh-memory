@@ -5,8 +5,8 @@
 //! - P50 < 10ms for retrieval (most critical)
 //! - 5-10x faster than competitors (Cognee, Mem0, ChromaDB)
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, BatchSize};
-use shodh_memory::memory::{MemoryConfig, MemorySystem, Experience, Query, ExperienceType};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use shodh_memory::memory::{Experience, ExperienceType, MemoryConfig, MemorySystem, Query};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -20,13 +20,12 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
         working_memory_size: 100,
         session_memory_size_mb: 50,
         max_heap_per_user_mb: 200,
-        auto_compress: false,  // Disable for consistent benchmarks
+        auto_compress: false, // Disable for consistent benchmarks
         compression_age_days: 30,
         importance_threshold: 0.7,
     };
 
-    let memory_system = MemorySystem::new(config)
-        .expect("Failed to create memory system");
+    let memory_system = MemorySystem::new(config).expect("Failed to create memory system");
 
     (memory_system, temp_dir)
 }
@@ -36,10 +35,10 @@ fn create_experience(content: &str) -> Experience {
     Experience {
         experience_type: ExperienceType::Observation,
         content: content.to_string(),
-        context: None,  // Skip complex RichContext for benchmarks
+        context: None, // Skip complex RichContext for benchmarks
         entities: vec![],
         metadata: HashMap::new(),
-        embeddings: None,  // Auto-generated
+        embeddings: None, // Auto-generated
         related_memories: vec![],
         causal_chain: vec![],
         outcomes: vec![],
@@ -57,7 +56,8 @@ fn populate_memories(memory_system: &mut MemorySystem, count: usize) {
         );
 
         let experience = create_experience(&content);
-        memory_system.record(experience)
+        memory_system
+            .record(experience)
             .expect("Failed to record experience");
     }
 }
@@ -103,14 +103,18 @@ fn bench_record_experience(c: &mut Criterion) {
     for (label, content) in sizes {
         eprintln!("   📊 Testing {} char message", label);
 
-        group.bench_with_input(BenchmarkId::from_parameter(label), &content, |b, &content| {
-            // Use iter_batched to separate setup (experience creation) from measurement (record)
-            b.iter_batched(
-                || create_experience(content),  // Setup: not measured
-                |experience| memory_system.record(experience).expect("Failed to record"),  // Measured
-                BatchSize::SmallInput
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(label),
+            &content,
+            |b, &content| {
+                // Use iter_batched to separate setup (experience creation) from measurement (record)
+                b.iter_batched(
+                    || create_experience(content), // Setup: not measured
+                    |experience| memory_system.record(experience).expect("Failed to record"), // Measured
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
 
     group.finish();
@@ -142,8 +146,7 @@ fn bench_retrieve_memories(c: &mut Criterion) {
                     retrieval_mode: shodh_memory::memory::RetrievalMode::Hybrid,
                 };
 
-                memory_system.retrieve(&query)
-                    .expect("Failed to retrieve");
+                memory_system.retrieve(&query).expect("Failed to retrieve");
             });
         });
     }
@@ -159,12 +162,11 @@ fn bench_embedding_generation(c: &mut Criterion) {
     eprintln!("\n⚡ EMBEDDING BENCHMARK - Optimized v2.0 ⚡\n");
     let mut group = c.benchmark_group("embedding_generation");
 
-    use shodh_memory::embeddings::minilm::{MiniLMEmbedder, EmbeddingConfig};
+    use shodh_memory::embeddings::minilm::{EmbeddingConfig, MiniLMEmbedder};
     use shodh_memory::embeddings::Embedder;
 
     let config = EmbeddingConfig::default();
-    let embedder = MiniLMEmbedder::new(config)
-        .expect("Failed to create embedder");
+    let embedder = MiniLMEmbedder::new(config).expect("Failed to create embedder");
 
     let texts = vec![
         ("10_words", "This is a short test message"),
@@ -185,8 +187,7 @@ fn bench_embedding_generation(c: &mut Criterion) {
     for (label, text) in texts {
         group.bench_with_input(BenchmarkId::from_parameter(label), &text, |b, &text| {
             b.iter(|| {
-                embedder.encode(text)
-                    .expect("Failed to generate embedding");
+                embedder.encode(text).expect("Failed to generate embedding");
             });
         });
     }
@@ -219,8 +220,7 @@ fn bench_vector_search(c: &mut Criterion) {
                     retrieval_mode: shodh_memory::memory::RetrievalMode::Similarity,
                 };
 
-                memory_system.retrieve(&query)
-                    .expect("Failed to search");
+                memory_system.retrieve(&query).expect("Failed to search");
             });
         });
     }
@@ -237,9 +237,7 @@ fn bench_memory_stats(c: &mut Criterion) {
     populate_memories(&mut memory_system, 50);
 
     c.bench_function("memory_stats", |b| {
-        b.iter(|| {
-            memory_system.stats()
-        });
+        b.iter(|| memory_system.stats());
     });
 }
 
@@ -269,8 +267,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                         let experience = create_experience(&content);
 
                         let mut memory = memory_clone.lock().unwrap();
-                        memory.record(experience)
-                            .expect("Failed to record");
+                        memory.record(experience).expect("Failed to record");
                     });
                     handles.push(handle);
                 }
@@ -279,7 +276,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                     handle.join().unwrap();
                 }
             },
-            BatchSize::SmallInput
+            BatchSize::SmallInput,
         );
     });
 }
@@ -301,10 +298,9 @@ fn bench_end_to_end(c: &mut Criterion) {
         b.iter(|| {
             // Record a new experience
             let experience = create_experience(
-                "User completed task X and is now working on task Y with dependencies on module Z"
+                "User completed task X and is now working on task Y with dependencies on module Z",
             );
-            let _memory_id = memory_system.record(experience)
-                .expect("Failed to record");
+            let _memory_id = memory_system.record(experience).expect("Failed to record");
 
             // Immediately retrieve related memories
             let query = Query {
@@ -317,8 +313,7 @@ fn bench_end_to_end(c: &mut Criterion) {
                 retrieval_mode: shodh_memory::memory::RetrievalMode::Hybrid,
             };
 
-            let results = memory_system.retrieve(&query)
-                .expect("Failed to retrieve");
+            let results = memory_system.retrieve(&query).expect("Failed to retrieve");
 
             // Verify we got results (including the just-recorded memory)
             assert!(!results.is_empty());
@@ -411,44 +406,72 @@ fn print_performance_summary() {
 
     // Retrieve
     if let Some((p50, _)) = retrieve_25 {
-        let status = if p50 < 5.0 { format!("{}✅ PERFECT{}", GREEN, RESET) }
-                     else if p50 < 10.0 { format!("{}✅ GREAT{}", GREEN, RESET) }
-                     else { format!("{}⚠ NEEDS WORK{}", YELLOW, RESET) };
-        println!("║ Memory Retrieve (k=5)        │ {}  │   < 5ms    │ {}  │  Imperceptible lag     ║",
-                 format_ms(p50, 5.0), status);
+        let status = if p50 < 5.0 {
+            format!("{}✅ PERFECT{}", GREEN, RESET)
+        } else if p50 < 10.0 {
+            format!("{}✅ GREAT{}", GREEN, RESET)
+        } else {
+            format!("{}⚠ NEEDS WORK{}", YELLOW, RESET)
+        };
+        println!(
+            "║ Memory Retrieve (k=5)        │ {}  │   < 5ms    │ {}  │  Imperceptible lag     ║",
+            format_ms(p50, 5.0),
+            status
+        );
     } else {
         println!("║ Memory Retrieve (k=5)        │   PENDING   │   < 5ms    │    ⏳    │  Imperceptible lag     ║");
     }
 
     // Record
     if let Some((p50, _)) = record_100 {
-        let status = if p50 < 10.0 { format!("{}✅ PERFECT{}", GREEN, RESET) }
-                     else if p50 < 20.0 { format!("{}✅ GOOD{}", GREEN, RESET) }
-                     else { format!("{}⚠ NEEDS WORK{}", YELLOW, RESET) };
-        println!("║ Memory Record (100 chars)    │ {}  │   < 10ms   │ {}  │  Instant feel          ║",
-                 format_ms(p50, 10.0), status);
+        let status = if p50 < 10.0 {
+            format!("{}✅ PERFECT{}", GREEN, RESET)
+        } else if p50 < 20.0 {
+            format!("{}✅ GOOD{}", GREEN, RESET)
+        } else {
+            format!("{}⚠ NEEDS WORK{}", YELLOW, RESET)
+        };
+        println!(
+            "║ Memory Record (100 chars)    │ {}  │   < 10ms   │ {}  │  Instant feel          ║",
+            format_ms(p50, 10.0),
+            status
+        );
     } else {
         println!("║ Memory Record (100 chars)    │   PENDING   │   < 10ms   │    ⏳    │  Instant feel          ║");
     }
 
     // End-to-End
     if let Some((p50, _)) = end_to_end {
-        let status = if p50 < 15.0 { format!("{}✅ PERFECT{}", GREEN, RESET) }
-                     else if p50 < 30.0 { format!("{}✅ GOOD{}", GREEN, RESET) }
-                     else { format!("{}⚠ NEEDS WORK{}", YELLOW, RESET) };
-        println!("║ End-to-End (Record+Retrieve) │ {}  │   < 15ms   │ {}  │  Smooth, responsive    ║",
-                 format_ms(p50, 15.0), status);
+        let status = if p50 < 15.0 {
+            format!("{}✅ PERFECT{}", GREEN, RESET)
+        } else if p50 < 30.0 {
+            format!("{}✅ GOOD{}", GREEN, RESET)
+        } else {
+            format!("{}⚠ NEEDS WORK{}", YELLOW, RESET)
+        };
+        println!(
+            "║ End-to-End (Record+Retrieve) │ {}  │   < 15ms   │ {}  │  Smooth, responsive    ║",
+            format_ms(p50, 15.0),
+            status
+        );
     } else {
         println!("║ End-to-End (Record+Retrieve) │   PENDING   │   < 15ms   │    ⏳    │  Smooth, responsive    ║");
     }
 
     // Concurrent
     if let Some((p50, _)) = concurrent {
-        let status = if p50 < 50.0 { format!("{}✅ PERFECT{}", GREEN, RESET) }
-                     else if p50 < 100.0 { format!("{}✅ GOOD{}", GREEN, RESET) }
-                     else { format!("{}⚠ NEEDS WORK{}", YELLOW, RESET) };
-        println!("║ Concurrent (10 threads)      │ {}  │   < 50ms   │ {}  │  Multi-user ready      ║",
-                 format_ms(p50, 50.0), status);
+        let status = if p50 < 50.0 {
+            format!("{}✅ PERFECT{}", GREEN, RESET)
+        } else if p50 < 100.0 {
+            format!("{}✅ GOOD{}", GREEN, RESET)
+        } else {
+            format!("{}⚠ NEEDS WORK{}", YELLOW, RESET)
+        };
+        println!(
+            "║ Concurrent (10 threads)      │ {}  │   < 50ms   │ {}  │  Multi-user ready      ║",
+            format_ms(p50, 50.0),
+            status
+        );
     } else {
         println!("║ Concurrent (10 threads)      │   PENDING   │   < 50ms   │    ⏳    │  Multi-user ready      ║");
     }
@@ -636,7 +659,7 @@ fn bench_cache_performance(c: &mut Criterion) {
 
     // Test 1: Record with cache (repeated content)
     let mut record_group = c.benchmark_group("cache_record");
-    record_group.sample_size(10);  // Reduced since embedding generation is slow
+    record_group.sample_size(10); // Reduced since embedding generation is slow
 
     // COLD: Generate UNIQUE content every time (no cache hits)
     let cold_counter = std::sync::atomic::AtomicUsize::new(0);
@@ -666,7 +689,7 @@ fn bench_cache_performance(c: &mut Criterion) {
 
     // Test 2: Retrieve with cache (repeated queries)
     let mut retrieve_group = c.benchmark_group("cache_retrieve");
-    retrieve_group.sample_size(10);  // Reduced since embedding generation is slow
+    retrieve_group.sample_size(10); // Reduced since embedding generation is slow
 
     // Populate with some memories
     populate_memories(&mut memory_system, 50);

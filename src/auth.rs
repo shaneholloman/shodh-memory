@@ -17,14 +17,8 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            AuthError::MissingApiKey => (
-                StatusCode::UNAUTHORIZED,
-                "Missing X-API-Key header",
-            ),
-            AuthError::InvalidApiKey => (
-                StatusCode::UNAUTHORIZED,
-                "Invalid API key",
-            ),
+            AuthError::MissingApiKey => (StatusCode::UNAUTHORIZED, "Missing X-API-Key header"),
+            AuthError::InvalidApiKey => (StatusCode::UNAUTHORIZED, "Invalid API key"),
             AuthError::NotConfigured => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "API keys not configured. Set SHODH_API_KEYS environment variable.",
@@ -98,10 +92,7 @@ pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
 }
 
 /// Authentication middleware
-pub async fn auth_middleware(
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn auth_middleware(request: Request, next: Next) -> Response {
     // Skip auth for health endpoint
     if request.uri().path() == "/health" {
         return next.run(request).await;

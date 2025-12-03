@@ -1,19 +1,19 @@
 //! Storage backend for the memory system
 
-use anyhow::{Result, anyhow, Context};
-use rocksdb::{DB, Options, IteratorMode, WriteBatch};
-use std::path::Path;
-use std::sync::Arc;
-use serde::{Serialize, Deserialize};
+use anyhow::{anyhow, Context, Result};
 use bincode;
 use chrono::{DateTime, Utc};
+use rocksdb::{IteratorMode, Options, WriteBatch, DB};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Arc;
 
 use super::types::*;
 
 /// Storage engine for long-term memory persistence
 pub struct MemoryStorage {
     db: Arc<DB>,
-    index_db: Arc<DB>,  // Secondary indices
+    index_db: Arc<DB>, // Secondary indices
 }
 
 impl MemoryStorage {
@@ -27,20 +27,20 @@ impl MemoryStorage {
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
         // Write performance optimizations
-        opts.set_max_write_buffer_number(6);  // 2x increase for write-heavy workload
-        opts.set_write_buffer_size(128 * 1024 * 1024);  // 128MB write buffer
-        opts.set_level_zero_file_num_compaction_trigger(4);  // Trigger compaction earlier
-        opts.set_target_file_size_base(64 * 1024 * 1024);  // 64MB
-        opts.set_max_bytes_for_level_base(512 * 1024 * 1024);  // 512MB base level
+        opts.set_max_write_buffer_number(6); // 2x increase for write-heavy workload
+        opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB write buffer
+        opts.set_level_zero_file_num_compaction_trigger(4); // Trigger compaction earlier
+        opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
+        opts.set_max_bytes_for_level_base(512 * 1024 * 1024); // 512MB base level
         opts.set_max_background_jobs(4);
         opts.set_level_compaction_dynamic_level_bytes(true);
 
         // Read performance optimizations (CRITICAL for retrieval speed)
         use rocksdb::{BlockBasedOptions, Cache};
         let mut block_opts = BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false);  // 10 bits per key - MASSIVE read speedup
-        block_opts.set_block_cache(&Cache::new_lru_cache(256 * 1024 * 1024));  // 256MB block cache
-        block_opts.set_cache_index_and_filter_blocks(true);  // Cache index/filter blocks
+        block_opts.set_bloom_filter(10.0, false); // 10 bits per key - MASSIVE read speedup
+        block_opts.set_block_cache(&Cache::new_lru_cache(256 * 1024 * 1024)); // 256MB block cache
+        block_opts.set_cache_index_and_filter_blocks(true); // Cache index/filter blocks
         opts.set_block_based_table_factory(&block_opts);
 
         // Open main database
@@ -63,7 +63,8 @@ impl MemoryStorage {
             .context(format!("Failed to serialize memory {}", memory.id.0))?;
 
         // Store in main database
-        self.db.put(key, &value)
+        self.db
+            .put(key, &value)
             .context(format!("Failed to put memory {} in RocksDB", memory.id.0))?;
 
         // Update indices
@@ -84,7 +85,10 @@ impl MemoryStorage {
         batch.put(date_key.as_bytes(), memory_id_str.as_bytes());
 
         // Index by type
-        let type_key = format!("type:{:?}:{}", memory.experience.experience_type, memory.id.0);
+        let type_key = format!(
+            "type:{:?}:{}",
+            memory.experience.experience_type, memory.id.0
+        );
         batch.put(type_key.as_bytes(), b"1");
 
         // Index by importance (quantized into buckets)
@@ -146,11 +150,14 @@ impl MemoryStorage {
     pub fn get(&self, id: &MemoryId) -> Result<Memory> {
         let key = id.0.as_bytes();
         match self.db.get(key)? {
-            Some(value) => {
-                bincode::deserialize::<Memory>(&value)
-                    .with_context(|| format!("Failed to deserialize memory {} ({} bytes)", id.0, value.len()))
-            }
-            None => Err(anyhow!("Memory not found: {id:?}"))
+            Some(value) => bincode::deserialize::<Memory>(&value).with_context(|| {
+                format!(
+                    "Failed to deserialize memory {} ({} bytes)",
+                    id.0,
+                    value.len()
+                )
+            }),
+            None => Err(anyhow!("Memory not found: {id:?}")),
         }
     }
 
@@ -160,7 +167,7 @@ impl MemoryStorage {
     }
 
     /// Delete a memory
-    #[allow(unused)]  // Public API - available for memory management
+    #[allow(unused)] // Public API - available for memory management
     pub fn delete(&self, id: &MemoryId) -> Result<()> {
         let key = id.0.as_bytes();
         self.db.delete(key)?;
@@ -184,17 +191,20 @@ impl MemoryStorage {
         ];
 
         for prefix in prefix_patterns {
-            let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+            let iter = self.index_db.iterator(IteratorMode::From(
+                prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
             for result in iter {
                 if let Ok((key, _)) = result {
-                let key_str = String::from_utf8_lossy(&key);
-                if !key_str.starts_with(&prefix) {
-                    break;
+                    let key_str = String::from_utf8_lossy(&key);
+                    if !key_str.starts_with(&prefix) {
+                        break;
+                    }
+                    if key_str.contains(&id.0.to_string()) {
+                        batch.delete(&key);
+                    }
                 }
-                if key_str.contains(&id.0.to_string()) {
-                    batch.delete(&key);
-                }
-            }
             }
         }
 
@@ -228,7 +238,11 @@ impl MemoryStorage {
             SearchCriteria::ByMission(mission_id) => {
                 memory_ids = self.search_by_mission(&mission_id)?;
             }
-            SearchCriteria::ByLocation { lat, lon, radius_meters } => {
+            SearchCriteria::ByLocation {
+                lat,
+                lon,
+                radius_meters,
+            } => {
                 memory_ids = self.search_by_location(lat, lon, radius_meters)?;
             }
             SearchCriteria::ByActionType(action_type) => {
@@ -243,10 +257,7 @@ impl MemoryStorage {
                 // Intersection of all criteria results
                 let mut result_sets: Vec<Vec<MemoryId>> = Vec::new();
                 for c in criterias {
-                    result_sets.push(self.search(c)?
-                        .into_iter()
-                        .map(|m| m.id)
-                        .collect());
+                    result_sets.push(self.search(c)?.into_iter().map(|m| m.id).collect());
                 }
 
                 if !result_sets.is_empty() {
@@ -269,24 +280,31 @@ impl MemoryStorage {
         Ok(memories)
     }
 
-    fn search_by_date_range(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<MemoryId>> {
+    fn search_by_date_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
         let start_key = format!("date:{}", start.format("%Y%m%d"));
         let end_key = format!("date:{}", end.format("%Y%m%d"));
 
-        let iter = self.index_db.iterator(IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward));
+        let iter = self.index_db.iterator(IteratorMode::From(
+            start_key.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
         for result in iter {
             if let Ok((key, value)) = result {
-            let key_str = String::from_utf8_lossy(&key);
-            if key_str.as_ref() > end_key.as_str() {
-                break;
-            }
-            if key_str.starts_with("date:") {
-                let id_str = String::from_utf8_lossy(&value);
-                if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
-                    ids.push(MemoryId(uuid));
+                let key_str = String::from_utf8_lossy(&key);
+                if key_str.as_ref() > end_key.as_str() {
+                    break;
                 }
-            }
+                if key_str.starts_with("date:") {
+                    let id_str = String::from_utf8_lossy(&value);
+                    if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
+                        ids.push(MemoryId(uuid));
+                    }
+                }
             }
         }
 
@@ -297,19 +315,22 @@ impl MemoryStorage {
         let mut ids = Vec::new();
         let prefix = format!("type:{exp_type:?}:");
 
-        let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
         for result in iter {
             if let Ok((key, _)) = result {
-            let key_str = String::from_utf8_lossy(&key);
-            if !key_str.starts_with(&prefix) {
-                break;
-            }
-            // Extract ID from key
-            if let Some(id_str) = key_str.strip_prefix(&prefix) {
-                if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
-                    ids.push(MemoryId(uuid));
+                let key_str = String::from_utf8_lossy(&key);
+                if !key_str.starts_with(&prefix) {
+                    break;
                 }
-            }
+                // Extract ID from key
+                if let Some(id_str) = key_str.strip_prefix(&prefix) {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
+                        ids.push(MemoryId(uuid));
+                    }
+                }
             }
         }
 
@@ -323,21 +344,24 @@ impl MemoryStorage {
 
         for bucket in min_bucket..=max_bucket {
             let prefix = format!("importance:{bucket}:");
-            let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+            let iter = self.index_db.iterator(IteratorMode::From(
+                prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
 
             for result in iter {
                 if let Ok((key, _)) = result {
-                let key_str = String::from_utf8_lossy(&key);
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-                // Extract ID from key
-                if let Some(id_str) = key_str.strip_prefix(&prefix) {
-                    if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
-                        ids.push(MemoryId(uuid));
+                    let key_str = String::from_utf8_lossy(&key);
+                    if !key_str.starts_with(&prefix) {
+                        break;
+                    }
+                    // Extract ID from key
+                    if let Some(id_str) = key_str.strip_prefix(&prefix) {
+                        if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
+                            ids.push(MemoryId(uuid));
+                        }
                     }
                 }
-            }
             }
         }
 
@@ -348,19 +372,22 @@ impl MemoryStorage {
         let mut ids = Vec::new();
         let prefix = format!("entity:{entity}:");
 
-        let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
         for result in iter {
             if let Ok((key, _)) = result {
-            let key_str = String::from_utf8_lossy(&key);
-            if !key_str.starts_with(&prefix) {
-                break;
-            }
-            // Extract ID from key
-            if let Some(id_str) = key_str.strip_prefix(&prefix) {
-                if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
-                    ids.push(MemoryId(uuid));
+                let key_str = String::from_utf8_lossy(&key);
+                if !key_str.starts_with(&prefix) {
+                    break;
                 }
-            }
+                // Extract ID from key
+                if let Some(id_str) = key_str.strip_prefix(&prefix) {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
+                        ids.push(MemoryId(uuid));
+                    }
+                }
             }
         }
 
@@ -376,7 +403,10 @@ impl MemoryStorage {
         let mut ids = Vec::new();
         let prefix = format!("robot:{robot_id}:");
 
-        let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
         for result in iter {
             if let Ok((key, _)) = result {
                 let key_str = String::from_utf8_lossy(&key);
@@ -399,7 +429,10 @@ impl MemoryStorage {
         let mut ids = Vec::new();
         let prefix = format!("mission:{mission_id}:");
 
-        let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
         for result in iter {
             if let Ok((key, _)) = result {
                 let key_str = String::from_utf8_lossy(&key);
@@ -418,7 +451,12 @@ impl MemoryStorage {
     }
 
     /// Search memories by geographic location (haversine distance)
-    fn search_by_location(&self, center_lat: f64, center_lon: f64, radius_meters: f64) -> Result<Vec<MemoryId>> {
+    fn search_by_location(
+        &self,
+        center_lat: f64,
+        center_lon: f64,
+        radius_meters: f64,
+    ) -> Result<Vec<MemoryId>> {
         use super::types::GeoFilter;
 
         let geo_filter = GeoFilter::new(center_lat, center_lon, radius_meters);
@@ -426,7 +464,10 @@ impl MemoryStorage {
 
         // Scan all memories with geo_location (prefix scan on geo index)
         let prefix = "geo:";
-        let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
 
         for result in iter {
             if let Ok((key, value)) = result {
@@ -459,7 +500,10 @@ impl MemoryStorage {
         let mut ids = Vec::new();
         let prefix = format!("action:{action_type}:");
 
-        let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
         for result in iter {
             if let Ok((key, _)) = result {
                 let key_str = String::from_utf8_lossy(&key);
@@ -482,12 +526,15 @@ impl MemoryStorage {
         let mut ids = Vec::new();
 
         // Reward is bucketed similar to importance (-10 to 10 buckets)
-        let min_bucket = ((min + 1.0) * 10.0) as i32;  // -1.0 -> 0, 1.0 -> 20
+        let min_bucket = ((min + 1.0) * 10.0) as i32; // -1.0 -> 0, 1.0 -> 20
         let max_bucket = ((max + 1.0) * 10.0) as i32;
 
         for bucket in min_bucket..=max_bucket {
             let prefix = format!("reward:{bucket}:");
-            let iter = self.index_db.iterator(IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward));
+            let iter = self.index_db.iterator(IteratorMode::From(
+                prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
 
             for result in iter {
                 if let Ok((key, _)) = result {
@@ -531,11 +578,11 @@ impl MemoryStorage {
         let iter = self.db.iterator(IteratorMode::Start);
         for result in iter {
             if let Ok((_, value)) = result {
-            if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
-                if !memory.compressed && memory.created_at < cutoff {
-                    memories.push(memory);
+                if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
+                    if !memory.compressed && memory.created_at < cutoff {
+                        memories.push(memory);
+                    }
                 }
-            }
             }
         }
 
@@ -549,17 +596,23 @@ impl MemoryStorage {
         let iter = self.db.iterator(IteratorMode::Start);
         for result in iter {
             if let Ok((key, value)) = result {
-            if let Ok(mut memory) = bincode::deserialize::<Memory>(&value) {
-                if memory.created_at < cutoff {
-                    // Add forgotten flag to metadata
-                    memory.experience.metadata.insert("forgotten".to_string(), "true".to_string());
-                    memory.experience.metadata.insert("forgotten_at".to_string(), Utc::now().to_rfc3339());
+                if let Ok(mut memory) = bincode::deserialize::<Memory>(&value) {
+                    if memory.created_at < cutoff {
+                        // Add forgotten flag to metadata
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten".to_string(), "true".to_string());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten_at".to_string(), Utc::now().to_rfc3339());
 
-                    let updated_value = bincode::serialize(&memory)?;
-                    self.db.put(&key, updated_value)?;
-                    count += 1;
+                        let updated_value = bincode::serialize(&memory)?;
+                        self.db.put(&key, updated_value)?;
+                        count += 1;
+                    }
                 }
-            }
             }
         }
 
@@ -573,16 +626,22 @@ impl MemoryStorage {
         let iter = self.db.iterator(IteratorMode::Start);
         for result in iter {
             if let Ok((key, value)) = result {
-            if let Ok(mut memory) = bincode::deserialize::<Memory>(&value) {
-                if memory.importance() < threshold {
-                    memory.experience.metadata.insert("forgotten".to_string(), "true".to_string());
-                    memory.experience.metadata.insert("forgotten_at".to_string(), Utc::now().to_rfc3339());
+                if let Ok(mut memory) = bincode::deserialize::<Memory>(&value) {
+                    if memory.importance() < threshold {
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten".to_string(), "true".to_string());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten_at".to_string(), Utc::now().to_rfc3339());
 
-                    let updated_value = bincode::serialize(&memory)?;
-                    self.db.put(&key, updated_value)?;
-                    count += 1;
+                        let updated_value = bincode::serialize(&memory)?;
+                        self.db.put(&key, updated_value)?;
+                        count += 1;
+                    }
                 }
-            }
             }
         }
 
@@ -597,12 +656,12 @@ impl MemoryStorage {
         let iter = self.db.iterator(IteratorMode::Start);
         for result in iter {
             if let Ok((key, value)) = result {
-            if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
-                if regex.is_match(&memory.experience.content) {
-                    to_delete.push(key.to_vec());
-                    count += 1;
+                if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
+                    if regex.is_match(&memory.experience.content) {
+                        to_delete.push(key.to_vec());
+                        count += 1;
+                    }
                 }
-            }
             }
         }
 
@@ -632,13 +691,13 @@ impl MemoryStorage {
         let iter = self.db.iterator(IteratorMode::Start);
         for result in iter {
             if let Ok((_, value)) = result {
-            if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
-                stats.total_count += 1;
-                stats.total_size_bytes += value.len();
-                if memory.compressed {
-                    stats.compressed_count += 1;
-                }
-                stats.importance_sum += memory.importance();
+                if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
+                    stats.total_count += 1;
+                    stats.total_size_bytes += value.len();
+                    if memory.compressed {
+                        stats.compressed_count += 1;
+                    }
+                    stats.importance_sum += memory.importance();
                 }
             }
         }
@@ -653,11 +712,13 @@ impl MemoryStorage {
     /// Flush both databases to ensure all data is persisted (critical for graceful shutdown)
     pub fn flush(&self) -> Result<()> {
         // Flush main memory database
-        self.db.flush()
+        self.db
+            .flush()
             .map_err(|e| anyhow::anyhow!("Failed to flush main database: {e}"))?;
 
         // Flush index database
-        self.index_db.flush()
+        self.index_db
+            .flush()
             .map_err(|e| anyhow::anyhow!("Failed to flush index database: {e}"))?;
 
         Ok(())
@@ -668,9 +729,15 @@ impl MemoryStorage {
 #[derive(Debug, Clone)]
 pub enum SearchCriteria {
     // === Standard Criteria ===
-    ByDate { start: DateTime<Utc>, end: DateTime<Utc> },
+    ByDate {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
     ByType(ExperienceType),
-    ByImportance { min: f32, max: f32 },
+    ByImportance {
+        min: f32,
+        max: f32,
+    },
     ByEntity(String),
 
     // === Robotics Criteria ===
@@ -679,11 +746,18 @@ pub enum SearchCriteria {
     /// Filter by mission identifier
     ByMission(String),
     /// Spatial filter: memories within radius of (lat, lon)
-    ByLocation { lat: f64, lon: f64, radius_meters: f64 },
+    ByLocation {
+        lat: f64,
+        lon: f64,
+        radius_meters: f64,
+    },
     /// Filter by action type
     ByActionType(String),
     /// Filter by reward range (for RL-style queries)
-    ByReward { min: f32, max: f32 },
+    ByReward {
+        min: f32,
+        max: f32,
+    },
 
     // === Compound Criteria ===
     Combined(Vec<SearchCriteria>),

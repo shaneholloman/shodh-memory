@@ -14,12 +14,12 @@
 //! - SHODH_LAZY_LOAD: Set to "false" to load model at startup (default: true)
 //! - SHODH_ONNX_THREADS: Number of ONNX threads (default: 2 for edge, 4 for desktop)
 
-use anyhow::{Result, Context};
-use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
-use parking_lot::Mutex;
+use anyhow::{Context, Result};
 use ort::session::Session;
 use ort::value::Value;
+use parking_lot::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use tokenizers::Tokenizer;
 
 use super::Embedder;
@@ -37,8 +37,11 @@ impl LazyModel {
             .and_then(|s| s.parse().ok())
             .unwrap_or(2); // Default 2 threads for edge devices
 
-        tracing::info!("Loading MiniLM-L6-v2 model from {:?} with {} threads",
-            config.model_path, num_threads);
+        tracing::info!(
+            "Loading MiniLM-L6-v2 model from {:?} with {} threads",
+            config.model_path,
+            num_threads
+        );
 
         let session = Session::builder()
             .context("Failed to create ONNX session builder")?
@@ -109,7 +112,9 @@ impl EmbeddingConfig {
 
                 candidates
                     .into_iter()
-                    .find(|p| p.join("model_quantized.onnx").exists() || p.join("model.onnx").exists())
+                    .find(|p| {
+                        p.join("model_quantized.onnx").exists() || p.join("model.onnx").exists()
+                    })
                     .unwrap_or_else(|| super::downloader::get_models_dir()) // Default to cache dir
             });
 
@@ -122,7 +127,11 @@ impl EmbeddingConfig {
             .map(|v| v != "0" && v.to_lowercase() != "false")
             .unwrap_or(true);
 
-        let model_filename = if use_quantized { "model_quantized.onnx" } else { "model.onnx" };
+        let model_filename = if use_quantized {
+            "model_quantized.onnx"
+        } else {
+            "model.onnx"
+        };
 
         Self {
             model_path: base_path.join(model_filename),
@@ -169,14 +178,20 @@ impl MiniLMEmbedder {
         if let Ok(existing_path) = std::env::var("ORT_DYLIB_PATH") {
             let path = std::path::PathBuf::from(&existing_path);
             if path.exists() {
-                tracing::debug!("Using existing ONNX Runtime from ORT_DYLIB_PATH: {:?}", path);
+                tracing::debug!(
+                    "Using existing ONNX Runtime from ORT_DYLIB_PATH: {:?}",
+                    path
+                );
                 return Ok(());
             }
         }
 
         // Check if we have ONNX Runtime in our cache
         if let Some(cached_path) = super::downloader::get_onnx_runtime_path() {
-            tracing::info!("Setting ORT_DYLIB_PATH to cached runtime: {:?}", cached_path);
+            tracing::info!(
+                "Setting ORT_DYLIB_PATH to cached runtime: {:?}",
+                cached_path
+            );
             std::env::set_var("ORT_DYLIB_PATH", &cached_path);
             return Ok(());
         }
@@ -188,7 +203,10 @@ impl MiniLMEmbedder {
 
         tracing::info!("ONNX Runtime not found. Downloading...");
         let onnx_path = super::downloader::download_onnx_runtime(None)?;
-        tracing::info!("Setting ORT_DYLIB_PATH to downloaded runtime: {:?}", onnx_path);
+        tracing::info!(
+            "Setting ORT_DYLIB_PATH to downloaded runtime: {:?}",
+            onnx_path
+        );
         std::env::set_var("ORT_DYLIB_PATH", &onnx_path);
         Ok(())
     }
@@ -215,7 +233,10 @@ impl MiniLMEmbedder {
         // CRITICAL: Ensure ORT_DYLIB_PATH is set BEFORE any ort code runs
         // This prevents ort from picking up system DLLs with wrong versions
         if let Err(e) = Self::ensure_onnx_runtime_available(offline_mode) {
-            tracing::warn!("Failed to set up ONNX Runtime: {}. Using simplified embeddings.", e);
+            tracing::warn!(
+                "Failed to set up ONNX Runtime: {}. Using simplified embeddings.",
+                e
+            );
             return Self::new_simplified(config);
         }
 
@@ -236,19 +257,30 @@ impl MiniLMEmbedder {
                 config.model_path.parent().unwrap_or(&config.model_path)
             );
 
-            match super::downloader::download_models(Some(std::sync::Arc::new(|downloaded, total| {
-                if total > 0 {
-                    let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-                    if percent % 10 == 0 {
-                        tracing::info!("Downloading models: {}% ({}/{})", percent, downloaded, total);
+            match super::downloader::download_models(Some(std::sync::Arc::new(
+                |downloaded, total| {
+                    if total > 0 {
+                        let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
+                        if percent % 10 == 0 {
+                            tracing::info!(
+                                "Downloading models: {}% ({}/{})",
+                                percent,
+                                downloaded,
+                                total
+                            );
+                        }
                     }
-                }
-            }))) {
+                },
+            ))) {
                 Ok(models_dir) => {
                     tracing::info!("Models downloaded to {:?}", models_dir);
 
                     // Update config with downloaded paths
-                    let model_filename = if config.use_quantized { "model_quantized.onnx" } else { "model.onnx" };
+                    let model_filename = if config.use_quantized {
+                        "model_quantized.onnx"
+                    } else {
+                        "model.onnx"
+                    };
                     let updated_config = EmbeddingConfig {
                         model_path: models_dir.join(model_filename),
                         tokenizer_path: models_dir.join("tokenizer.json"),
@@ -259,7 +291,10 @@ impl MiniLMEmbedder {
                     return Self::new(updated_config);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to download models: {}. Using simplified embeddings.", e);
+                    tracing::warn!(
+                        "Failed to download models: {}. Using simplified embeddings.",
+                        e
+                    );
                     return Self::new_simplified(config);
                 }
             }
@@ -307,8 +342,12 @@ impl MiniLMEmbedder {
     /// Uses hash-based embeddings that are fast but less semantic.
     /// Suitable for edge devices without enough RAM for ONNX.
     fn new_simplified(config: EmbeddingConfig) -> Result<Self> {
-        tracing::warn!("Using SIMPLIFIED embeddings (hash-based). Semantic search will be limited.");
-        tracing::warn!("    To enable full semantic search, ensure MiniLM-L6-v2 model files exist at:");
+        tracing::warn!(
+            "Using SIMPLIFIED embeddings (hash-based). Semantic search will be limited."
+        );
+        tracing::warn!(
+            "    To enable full semantic search, ensure MiniLM-L6-v2 model files exist at:"
+        );
         tracing::warn!("    Model: {:?}", config.model_path);
         tracing::warn!("    Tokenizer: {:?}", config.tokenizer_path);
 
@@ -376,8 +415,8 @@ impl MiniLMEmbedder {
         // Production fallback: Hash-based embeddings for resilience
         // Used when: (1) ONNX models unavailable, (2) ONNX inference fails, (3) Timeout exceeded
         // Provides basic semantic similarity via word + character n-gram hashing
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut embedding = vec![0.0; self.dimension];
         let mut hasher = DefaultHasher::new();
@@ -429,7 +468,8 @@ impl MiniLMEmbedder {
         let mut session = model.session.lock();
 
         // Tokenize input text
-        let encoding = model.tokenizer
+        let encoding = model
+            .tokenizer
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
 
@@ -566,9 +606,7 @@ impl Embedder for MiniLMEmbedder {
     }
 
     fn encode_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        texts.iter()
-            .map(|text| self.encode(text))
-            .collect()
+        texts.iter().map(|text| self.encode(text)).collect()
     }
 }
 

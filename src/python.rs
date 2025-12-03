@@ -8,13 +8,13 @@
 // - Failure tracking and recovery patterns
 // - Learned behaviors and predictions
 
-use pyo3::prelude::*;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use std::path::PathBuf;
+use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-use crate::memory::{MemorySystem, MemoryConfig, Query, RetrievalMode};
-use crate::memory::types::{Experience, ExperienceType, Memory, GeoFilter};
+use crate::memory::types::{Experience, ExperienceType, GeoFilter, Memory};
+use crate::memory::{MemoryConfig, MemorySystem, Query, RetrievalMode};
 
 // ============================================================================
 // Position - Local coordinates (x, y, z in meters)
@@ -41,7 +41,8 @@ impl PyPosition {
     }
 
     fn distance_to(&self, other: &PyPosition) -> f32 {
-        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2) + (self.z - other.z).powi(2)).sqrt()
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2) + (self.z - other.z).powi(2))
+            .sqrt()
     }
 
     fn to_list(&self) -> Vec<f32> {
@@ -74,7 +75,11 @@ impl PyGeoLocation {
     #[new]
     #[pyo3(signature = (latitude=0.0, longitude=0.0, altitude=0.0))]
     fn new(latitude: f64, longitude: f64, altitude: f64) -> Self {
-        PyGeoLocation { latitude, longitude, altitude }
+        PyGeoLocation {
+            latitude,
+            longitude,
+            altitude,
+        }
     }
 
     fn to_list(&self) -> Vec<f64> {
@@ -82,7 +87,10 @@ impl PyGeoLocation {
     }
 
     fn __repr__(&self) -> String {
-        format!("GeoLocation(lat={}, lon={}, alt={})", self.latitude, self.longitude, self.altitude)
+        format!(
+            "GeoLocation(lat={}, lon={}, alt={})",
+            self.latitude, self.longitude, self.altitude
+        )
     }
 }
 
@@ -107,7 +115,11 @@ impl PyGeoFilter {
     #[new]
     #[pyo3(signature = (latitude, longitude, radius_meters))]
     fn new(latitude: f64, longitude: f64, radius_meters: f64) -> Self {
-        PyGeoFilter { latitude, longitude, radius_meters }
+        PyGeoFilter {
+            latitude,
+            longitude,
+            radius_meters,
+        }
     }
 
     #[staticmethod]
@@ -120,7 +132,10 @@ impl PyGeoFilter {
     }
 
     fn __repr__(&self) -> String {
-        format!("GeoFilter(lat={}, lon={}, radius={}m)", self.latitude, self.longitude, self.radius_meters)
+        format!(
+            "GeoFilter(lat={}, lon={}, radius={}m)",
+            self.latitude, self.longitude, self.radius_meters
+        )
     }
 }
 
@@ -165,7 +180,10 @@ impl PyDecisionContext {
     }
 
     fn __repr__(&self) -> String {
-        format!("DecisionContext(state={:?}, confidence={:?})", self.state, self.confidence)
+        format!(
+            "DecisionContext(state={:?}, confidence={:?})",
+            self.state, self.confidence
+        )
     }
 }
 
@@ -201,7 +219,12 @@ impl PyOutcome {
         reward: Option<f32>,
         prediction_accurate: Option<bool>,
     ) -> Self {
-        PyOutcome { outcome_type, details, reward, prediction_accurate }
+        PyOutcome {
+            outcome_type,
+            details,
+            reward,
+            prediction_accurate,
+        }
     }
 
     fn is_success(&self) -> bool {
@@ -213,7 +236,10 @@ impl PyOutcome {
     }
 
     fn __repr__(&self) -> String {
-        format!("Outcome(type={}, reward={:?})", self.outcome_type, self.reward)
+        format!(
+            "Outcome(type={}, reward={:?})",
+            self.outcome_type, self.reward
+        )
     }
 }
 
@@ -258,7 +284,10 @@ impl PyEnvironment {
     }
 
     fn __repr__(&self) -> String {
-        format!("Environment(terrain={:?}, lighting={:?})", self.terrain_type, self.lighting)
+        format!(
+            "Environment(terrain={:?}, lighting={:?})",
+            self.terrain_type, self.lighting
+        )
     }
 }
 
@@ -289,8 +318,9 @@ impl PyMemorySystem {
             ..Default::default()
         };
 
-        let inner = MemorySystem::new(config)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create memory system: {}", e)))?;
+        let inner = MemorySystem::new(config).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to create memory system: {}", e))
+        })?;
 
         Ok(PyMemorySystem {
             inner,
@@ -382,7 +412,11 @@ impl PyMemorySystem {
             embeddings: None,
             related_memories: vec![],
             causal_chain: vec![],
-            outcomes: outcome.as_ref().and_then(|o| o.details.clone()).map(|d| vec![d]).unwrap_or_default(),
+            outcomes: outcome
+                .as_ref()
+                .and_then(|o| o.details.clone())
+                .map(|d| vec![d])
+                .unwrap_or_default(),
             // Robotics fields
             robot_id: self.robot_id.clone(),
             mission_id: self.mission_id.clone(),
@@ -398,12 +432,16 @@ impl PyMemorySystem {
             outcome_type: outcome.map(|o| o.outcome_type.clone()),
             outcome_details: outcome.and_then(|o| o.details.clone()),
             confidence: decision_context.and_then(|d| d.confidence),
-            alternatives_considered: decision_context.map(|d| d.alternatives.clone()).unwrap_or_default(),
+            alternatives_considered: decision_context
+                .map(|d| d.alternatives.clone())
+                .unwrap_or_default(),
             // Environment fields
             weather: environment.map(|e| e.weather.clone()),
             terrain_type: environment.and_then(|e| e.terrain_type.clone()),
             lighting: environment.and_then(|e| e.lighting.clone()),
-            nearby_agents: environment.map(|e| e.nearby_agents.clone()).unwrap_or_default(),
+            nearby_agents: environment
+                .map(|e| e.nearby_agents.clone())
+                .unwrap_or_default(),
             // Failure fields
             is_failure,
             is_anomaly,
@@ -417,7 +455,9 @@ impl PyMemorySystem {
             tags: tags.unwrap_or_default(),
         };
 
-        let memory_id = self.inner.record(experience)
+        let memory_id = self
+            .inner
+            .record(experience)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to record memory: {}", e)))?;
 
         Ok(memory_id.0.to_string())
@@ -692,7 +732,12 @@ impl PyMemorySystem {
             "spatial" => RetrievalMode::Spatial,
             "mission" => RetrievalMode::Mission,
             "action_outcome" => RetrievalMode::ActionOutcome,
-            _ => return Err(PyValueError::new_err(format!("Unknown retrieval mode: {}", mode))),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown retrieval mode: {}",
+                    mode
+                )))
+            }
         };
 
         let confidence_range = match (min_confidence, max_confidence) {
@@ -710,7 +755,8 @@ impl PyMemorySystem {
             importance_threshold: min_importance,
             robot_id: self.robot_id.clone(),
             mission_id,
-            geo_filter: geo_filter.map(|f| GeoFilter::new(f.latitude, f.longitude, f.radius_meters)),
+            geo_filter: geo_filter
+                .map(|f| GeoFilter::new(f.latitude, f.longitude, f.radius_meters)),
             action_type,
             reward_range: None,
             outcome_type,
@@ -725,7 +771,9 @@ impl PyMemorySystem {
             retrieval_mode,
         };
 
-        let memories = self.inner.retrieve(&query_obj)
+        let memories = self
+            .inner
+            .retrieve(&query_obj)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to retrieve memories: {}", e)))?;
 
         Python::with_gil(|py| {
@@ -860,19 +908,35 @@ impl PyMemorySystem {
 
         let mut result = HashMap::new();
         result.insert("total_memories".to_string(), stats.total_memories);
-        result.insert("working_memory_count".to_string(), stats.working_memory_count);
-        result.insert("session_memory_count".to_string(), stats.session_memory_count);
-        result.insert("long_term_memory_count".to_string(), stats.long_term_memory_count);
+        result.insert(
+            "working_memory_count".to_string(),
+            stats.working_memory_count,
+        );
+        result.insert(
+            "session_memory_count".to_string(),
+            stats.session_memory_count,
+        );
+        result.insert(
+            "long_term_memory_count".to_string(),
+            stats.long_term_memory_count,
+        );
         result.insert("compressed_count".to_string(), stats.compressed_count);
-        result.insert("promotions_to_session".to_string(), stats.promotions_to_session);
-        result.insert("promotions_to_longterm".to_string(), stats.promotions_to_longterm);
+        result.insert(
+            "promotions_to_session".to_string(),
+            stats.promotions_to_session,
+        );
+        result.insert(
+            "promotions_to_longterm".to_string(),
+            stats.promotions_to_longterm,
+        );
         result.insert("total_retrievals".to_string(), stats.total_retrievals);
 
         Ok(result)
     }
 
     fn flush(&self) -> PyResult<()> {
-        self.inner.flush_storage()
+        self.inner
+            .flush_storage()
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to flush: {}", e)))
     }
 
@@ -892,14 +956,35 @@ fn memory_to_dict(_py: Python, memory: &Memory) -> PyResult<HashMap<String, PyOb
 
         // Core fields
         dict.insert("id".to_string(), memory.id.0.to_string().into_py(py));
-        dict.insert("content".to_string(), memory.experience.content.clone().into_py(py));
-        dict.insert("experience_type".to_string(), format!("{:?}", memory.experience.experience_type).into_py(py));
-        dict.insert("entities".to_string(), memory.experience.entities.clone().into_py(py));
-        dict.insert("metadata".to_string(), memory.experience.metadata.clone().into_py(py));
+        dict.insert(
+            "content".to_string(),
+            memory.experience.content.clone().into_py(py),
+        );
+        dict.insert(
+            "experience_type".to_string(),
+            format!("{:?}", memory.experience.experience_type).into_py(py),
+        );
+        dict.insert(
+            "entities".to_string(),
+            memory.experience.entities.clone().into_py(py),
+        );
+        dict.insert(
+            "metadata".to_string(),
+            memory.experience.metadata.clone().into_py(py),
+        );
         dict.insert("importance".to_string(), memory.importance().into_py(py));
-        dict.insert("access_count".to_string(), memory.access_count().into_py(py));
-        dict.insert("created_at".to_string(), memory.created_at.to_rfc3339().into_py(py));
-        dict.insert("last_accessed".to_string(), memory.last_accessed().to_rfc3339().into_py(py));
+        dict.insert(
+            "access_count".to_string(),
+            memory.access_count().into_py(py),
+        );
+        dict.insert(
+            "created_at".to_string(),
+            memory.created_at.to_rfc3339().into_py(py),
+        );
+        dict.insert(
+            "last_accessed".to_string(),
+            memory.last_accessed().to_rfc3339().into_py(py),
+        );
         dict.insert("compressed".to_string(), memory.compressed.into_py(py));
 
         // Robotics fields
@@ -925,7 +1010,10 @@ fn memory_to_dict(_py: Python, memory: &Memory) -> PyResult<HashMap<String, PyOb
             dict.insert("reward".to_string(), reward.into_py(py));
         }
         if !memory.experience.sensor_data.is_empty() {
-            dict.insert("sensor_data".to_string(), memory.experience.sensor_data.clone().into_py(py));
+            dict.insert(
+                "sensor_data".to_string(),
+                memory.experience.sensor_data.clone().into_py(py),
+            );
         }
 
         // Decision fields
@@ -945,7 +1033,14 @@ fn memory_to_dict(_py: Python, memory: &Memory) -> PyResult<HashMap<String, PyOb
             dict.insert("confidence".to_string(), confidence.into_py(py));
         }
         if !memory.experience.alternatives_considered.is_empty() {
-            dict.insert("alternatives_considered".to_string(), memory.experience.alternatives_considered.clone().into_py(py));
+            dict.insert(
+                "alternatives_considered".to_string(),
+                memory
+                    .experience
+                    .alternatives_considered
+                    .clone()
+                    .into_py(py),
+            );
         }
 
         // Environment fields
@@ -959,12 +1054,21 @@ fn memory_to_dict(_py: Python, memory: &Memory) -> PyResult<HashMap<String, PyOb
             dict.insert("lighting".to_string(), lighting.clone().into_py(py));
         }
         if !memory.experience.nearby_agents.is_empty() {
-            dict.insert("nearby_agents".to_string(), memory.experience.nearby_agents.clone().into_py(py));
+            dict.insert(
+                "nearby_agents".to_string(),
+                memory.experience.nearby_agents.clone().into_py(py),
+            );
         }
 
         // Failure fields
-        dict.insert("is_failure".to_string(), memory.experience.is_failure.into_py(py));
-        dict.insert("is_anomaly".to_string(), memory.experience.is_anomaly.into_py(py));
+        dict.insert(
+            "is_failure".to_string(),
+            memory.experience.is_failure.into_py(py),
+        );
+        dict.insert(
+            "is_anomaly".to_string(),
+            memory.experience.is_anomaly.into_py(py),
+        );
         if let Some(ref severity) = memory.experience.severity {
             dict.insert("severity".to_string(), severity.clone().into_py(py));
         }
@@ -980,13 +1084,19 @@ fn memory_to_dict(_py: Python, memory: &Memory) -> PyResult<HashMap<String, PyOb
             dict.insert("pattern_id".to_string(), pattern.clone().into_py(py));
         }
         if let Some(ref predicted) = memory.experience.predicted_outcome {
-            dict.insert("predicted_outcome".to_string(), predicted.clone().into_py(py));
+            dict.insert(
+                "predicted_outcome".to_string(),
+                predicted.clone().into_py(py),
+            );
         }
         if let Some(accurate) = memory.experience.prediction_accurate {
             dict.insert("prediction_accurate".to_string(), accurate.into_py(py));
         }
         if !memory.experience.tags.is_empty() {
-            dict.insert("tags".to_string(), memory.experience.tags.clone().into_py(py));
+            dict.insert(
+                "tags".to_string(),
+                memory.experience.tags.clone().into_py(py),
+            );
         }
 
         Ok(dict)
@@ -1011,7 +1121,9 @@ fn shodh_memory(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Version and metadata
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add("__doc__", "Shodh-Memory: AI Memory System for Autonomous Robots & Drones\n\n\
+    m.add(
+        "__doc__",
+        "Shodh-Memory: AI Memory System for Autonomous Robots & Drones\n\n\
                        Features:\n\
                        - Position(x, y, z) for local coordinates\n\
                        - GeoLocation(lat, lon, alt) for GPS\n\
@@ -1020,7 +1132,8 @@ fn shodh_memory(m: &Bound<'_, PyModule>) -> PyResult<()> {
                        - Environment for weather, terrain, lighting\n\
                        - Failure tracking and anomaly detection\n\
                        - Pattern learning and predictions\n\
-                       - 100% offline capable")?;
+                       - 100% offline capable",
+    )?;
 
     Ok(())
 }

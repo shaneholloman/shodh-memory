@@ -35,8 +35,8 @@ pub fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
     let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".to_string());
 
-    let service_name = std::env::var("OTEL_SERVICE_NAME")
-        .unwrap_or_else(|_| "shodh-memory".to_string());
+    let service_name =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "shodh-memory".to_string());
 
     // Configure OpenTelemetry tracer
     let tracer = opentelemetry_otlp::new_pipeline()
@@ -44,7 +44,7 @@ pub fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
         .with_exporter(
             opentelemetry_otlp::new_exporter()
                 .tonic()
-                .with_endpoint(&otlp_endpoint)
+                .with_endpoint(&otlp_endpoint),
         )
         .with_trace_config(
             trace::config()
@@ -53,7 +53,7 @@ pub fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
                 .with_resource(Resource::new(vec![
                     KeyValue::new("service.name", service_name.clone()),
                     KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                ]))
+                ])),
         )
         .install_batch(opentelemetry_sdk::runtime::Tokio)?;
 
@@ -61,8 +61,7 @@ pub fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     // Configure log filter (RUST_LOG env var or default to info)
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Set up tracing subscriber with both console and OpenTelemetry layers
     tracing_subscriber::registry()
@@ -95,11 +94,7 @@ pub fn shutdown_tracing() {
 /// following W3C Trace Context specification (traceparent/tracestate headers)
 #[cfg(feature = "telemetry")]
 pub mod trace_propagation {
-    use axum::{
-        extract::Request,
-        middleware::Next,
-        response::Response,
-    };
+    use axum::{extract::Request, middleware::Next, response::Response};
     use opentelemetry::global;
     use opentelemetry::propagation::Extractor;
     use tracing::Span;
@@ -126,9 +121,8 @@ pub mod trace_propagation {
         let extractor = HeaderExtractor {
             headers: req.headers(),
         };
-        let parent_cx = global::get_text_map_propagator(|propagator| {
-            propagator.extract(&extractor)
-        });
+        let parent_cx =
+            global::get_text_map_propagator(|propagator| propagator.extract(&extractor));
 
         // Set parent context on current span
         let current_span = Span::current();

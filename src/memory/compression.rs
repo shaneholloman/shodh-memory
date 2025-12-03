@@ -1,10 +1,10 @@
 //! Compression pipeline for memory optimization
 
-use anyhow::{Result, anyhow};
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose, Engine as _};
 use lz4;
-use base64::{Engine as _, engine::general_purpose};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::types::*;
 
@@ -15,9 +15,9 @@ const MAX_DECOMPRESSED_SIZE: i32 = 10 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub enum CompressionStrategy {
     None,
-    Lz4,              // Fast compression
-    Summarization,    // Semantic compression
-    Hybrid,           // Combination of methods
+    Lz4,           // Fast compression
+    Summarization, // Semantic compression
+    Hybrid,        // Combination of methods
 }
 
 /// Compressed memory representation
@@ -104,18 +104,18 @@ impl CompressionPipeline {
 
         // Store compressed data in metadata
         let compressed_b64 = general_purpose::STANDARD.encode(&compressed);
-        compressed_memory.experience.metadata.insert(
-            "compressed_data".to_string(),
-            compressed_b64
-        );
+        compressed_memory
+            .experience
+            .metadata
+            .insert("compressed_data".to_string(), compressed_b64);
         compressed_memory.experience.metadata.insert(
             "compression_ratio".to_string(),
-            compression_ratio.to_string()
+            compression_ratio.to_string(),
         );
-        compressed_memory.experience.metadata.insert(
-            "compression_strategy".to_string(),
-            "lz4".to_string()
-        );
+        compressed_memory
+            .experience
+            .metadata
+            .insert("compression_strategy".to_string(), "lz4".to_string());
 
         Ok(compressed_memory)
     }
@@ -132,14 +132,14 @@ impl CompressionPipeline {
 
         // Store only summary and keywords
         compressed_memory.experience.content = summary;
-        compressed_memory.experience.metadata.insert(
-            "keywords".to_string(),
-            keywords.join(",")
-        );
-        compressed_memory.experience.metadata.insert(
-            "compression_strategy".to_string(),
-            "semantic".to_string()
-        );
+        compressed_memory
+            .experience
+            .metadata
+            .insert("keywords".to_string(), keywords.join(","));
+        compressed_memory
+            .experience
+            .metadata
+            .insert("compression_strategy".to_string(), "semantic".to_string());
         compressed_memory.compressed = true;
 
         Ok(compressed_memory)
@@ -160,7 +160,9 @@ impl CompressionPipeline {
             return Ok(memory.clone());
         }
 
-        let strategy = memory.experience.metadata
+        let strategy = memory
+            .experience
+            .metadata
             .get("compression_strategy")
             .map(|s| s.as_str())
             .unwrap_or("unknown");
@@ -170,8 +172,8 @@ impl CompressionPipeline {
             "semantic" => {
                 // Semantic compression is lossy, can't fully decompress
                 Ok(memory.clone())
-            },
-            _ => Ok(memory.clone())
+            }
+            _ => Ok(memory.clone()),
         }
     }
 
@@ -207,7 +209,6 @@ impl CompressionPipeline {
         let summary_words = &words[..words.len().min(max_words)];
         format!("{}...", summary_words.join(" "))
     }
-
 }
 
 /// Keyword extraction for semantic compression
@@ -226,7 +227,8 @@ impl KeywordExtractor {
         let mut word_freq: HashMap<String, usize> = HashMap::new();
 
         for word in text.split_whitespace() {
-            let clean_word = word.to_lowercase()
+            let clean_word = word
+                .to_lowercase()
                 .chars()
                 .filter(|c| c.is_alphanumeric())
                 .collect::<String>();
@@ -240,7 +242,8 @@ impl KeywordExtractor {
         let mut keywords: Vec<(String, usize)> = word_freq.into_iter().collect();
         keywords.sort_by(|a, b| b.1.cmp(&a.1));
 
-        keywords.into_iter()
+        keywords
+            .into_iter()
             .take(10)
             .map(|(word, _)| word)
             .collect()
@@ -249,18 +252,15 @@ impl KeywordExtractor {
     fn load_stop_words() -> HashSet<String> {
         // Common English stop words
         let words = vec![
-            "the", "is", "at", "which", "on", "and", "a", "an", "as", "are",
-            "was", "were", "been", "be", "have", "has", "had", "do", "does",
-            "did", "will", "would", "could", "should", "may", "might", "must",
-            "shall", "can", "need", "dare", "ought", "used", "to", "of", "in",
-            "for", "with", "by", "from", "about", "into", "through", "during",
-            "before", "after", "above", "below", "up", "down", "out", "off",
-            "over", "under", "again", "further", "then", "once", "there",
-            "these", "those", "this", "that", "it", "its", "what", "which",
-            "who", "whom", "whose", "where", "when", "why", "how", "all",
-            "both", "each", "few", "more", "most", "other", "some", "such",
-            "no", "nor", "not", "only", "own", "same", "so", "than", "too",
-            "very", "just", "but", "or", "if"
+            "the", "is", "at", "which", "on", "and", "a", "an", "as", "are", "was", "were", "been",
+            "be", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should",
+            "may", "might", "must", "shall", "can", "need", "dare", "ought", "used", "to", "of",
+            "in", "for", "with", "by", "from", "about", "into", "through", "during", "before",
+            "after", "above", "below", "up", "down", "out", "off", "over", "under", "again",
+            "further", "then", "once", "there", "these", "those", "this", "that", "it", "its",
+            "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "all", "both",
+            "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only",
+            "own", "same", "so", "than", "too", "very", "just", "but", "or", "if",
         ];
 
         words.into_iter().map(String::from).collect()

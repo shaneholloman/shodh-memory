@@ -15,10 +15,10 @@ use anyhow::Result;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::graph_memory::{GraphMemory, EpisodicNode};
-use crate::memory::query_parser::{QueryAnalysis, analyze_query};
-use crate::memory::types::{Memory, SharedMemory, Query};
 use crate::embeddings::Embedder;
+use crate::graph_memory::{EpisodicNode, GraphMemory};
+use crate::memory::query_parser::{analyze_query, QueryAnalysis};
+use crate::memory::types::{Memory, Query, SharedMemory};
 
 /// Activation decay rate (Anderson & Pirolli 1984)
 /// A(d) = A₀ × e^(-λd) where λ = DECAY_RATE
@@ -34,11 +34,11 @@ const ACTIVATION_THRESHOLD: f32 = 0.01;
 #[derive(Debug, Clone)]
 pub struct ActivatedMemory {
     pub memory: SharedMemory,
-    #[allow(dead_code)]  // Useful for debugging score breakdown
+    #[allow(dead_code)] // Useful for debugging score breakdown
     pub activation_score: f32,
-    #[allow(dead_code)]  // Useful for debugging score breakdown
+    #[allow(dead_code)] // Useful for debugging score breakdown
     pub semantic_score: f32,
-    #[allow(dead_code)]  // Useful for debugging score breakdown
+    #[allow(dead_code)] // Useful for debugging score breakdown
     pub linguistic_score: f32,
     pub final_score: f32,
 }
@@ -54,17 +54,34 @@ pub fn spreading_activation_retrieve(
     embedder: &dyn Embedder,
     episode_to_memory_fn: impl Fn(&EpisodicNode) -> Result<Option<SharedMemory>>,
 ) -> Result<Vec<ActivatedMemory>> {
-
     // Step 1: Linguistic query analysis (Lioma & Ounis 2006)
     let analysis = analyze_query(query_text);
 
     tracing::info!("🔍 Query Analysis:");
-    tracing::info!("  Focal Entities: {:?}",
-        analysis.focal_entities.iter().map(|e| &e.text).collect::<Vec<_>>());
-    tracing::info!("  Modifiers: {:?}",
-        analysis.discriminative_modifiers.iter().map(|m| &m.text).collect::<Vec<_>>());
-    tracing::info!("  Relations: {:?}",
-        analysis.relational_context.iter().map(|r| &r.text).collect::<Vec<_>>());
+    tracing::info!(
+        "  Focal Entities: {:?}",
+        analysis
+            .focal_entities
+            .iter()
+            .map(|e| &e.text)
+            .collect::<Vec<_>>()
+    );
+    tracing::info!(
+        "  Modifiers: {:?}",
+        analysis
+            .discriminative_modifiers
+            .iter()
+            .map(|m| &m.text)
+            .collect::<Vec<_>>()
+    );
+    tracing::info!(
+        "  Relations: {:?}",
+        analysis
+            .relational_context
+            .iter()
+            .map(|r| &r.text)
+            .collect::<Vec<_>>()
+    );
 
     // Step 2: Initialize activation map from focal entities (nouns)
     let mut activation_map: HashMap<Uuid, f32> = HashMap::new();
@@ -75,8 +92,12 @@ pub fn spreading_activation_retrieve(
             // Initial activation = IC weight (2.3 for nouns)
             activation_map.insert(entity_node.uuid, entity.ic_weight);
 
-            tracing::debug!("  ✓ Activated entity '{}' (UUID: {}, IC: {})",
-                entity.text, entity_node.uuid, entity.ic_weight);
+            tracing::debug!(
+                "  ✓ Activated entity '{}' (UUID: {}, IC: {})",
+                entity.text,
+                entity_node.uuid,
+                entity.ic_weight
+            );
         } else {
             tracing::debug!("  ✗ Entity '{}' not found in graph", entity.text);
         }
@@ -92,14 +113,16 @@ pub fn spreading_activation_retrieve(
     for hop in 1..=MAX_HOPS {
         let decay = (-DECAY_RATE * hop as f32).exp();
 
-        tracing::debug!("📊 Spreading activation (hop {}/{}), decay factor: {:.3}",
-            hop, MAX_HOPS, decay);
+        tracing::debug!(
+            "📊 Spreading activation (hop {}/{}), decay factor: {:.3}",
+            hop,
+            MAX_HOPS,
+            decay
+        );
 
         // Clone to avoid borrow issues
-        let current_activated: Vec<(Uuid, f32)> = activation_map
-            .iter()
-            .map(|(id, act)| (*id, *act))
-            .collect();
+        let current_activated: Vec<(Uuid, f32)> =
+            activation_map.iter().map(|(id, act)| (*id, *act)).collect();
 
         for (entity_uuid, source_activation) in current_activated {
             // Only spread from entities with sufficient activation
@@ -144,7 +167,10 @@ pub fn spreading_activation_retrieve(
         }
     }
 
-    tracing::info!("📊 Retrieved {} episodic memories", activated_memories.len());
+    tracing::info!(
+        "📊 Retrieved {} episodic memories",
+        activated_memories.len()
+    );
 
     // Step 5: Convert episodes to memories and calculate scores
     let mut scored_memories = Vec::new();
@@ -168,9 +194,7 @@ pub fn spreading_activation_retrieve(
             // Hybrid scoring (Xiong et al. 2017)
             // Graph: 60%, Semantic: 25%, Linguistic: 15%
             let final_score =
-                0.60 * graph_activation +
-                0.25 * semantic_score +
-                0.15 * linguistic_score;
+                0.60 * graph_activation + 0.25 * semantic_score + 0.15 * linguistic_score;
 
             scored_memories.push(ActivatedMemory {
                 memory,
@@ -184,15 +208,23 @@ pub fn spreading_activation_retrieve(
 
     // Step 6: Sort by final score (descending)
     scored_memories.sort_by(|a, b| {
-        b.final_score.partial_cmp(&a.final_score).unwrap_or(std::cmp::Ordering::Equal)
+        b.final_score
+            .partial_cmp(&a.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Step 7: Apply limit
     scored_memories.truncate(query.max_results);
 
-    tracing::info!("🎯 Returning {} memories (top scores: {:?})",
+    tracing::info!(
+        "🎯 Returning {} memories (top scores: {:?})",
         scored_memories.len(),
-        scored_memories.iter().take(3).map(|m| m.final_score).collect::<Vec<_>>());
+        scored_memories
+            .iter()
+            .take(3)
+            .map(|m| m.final_score)
+            .collect::<Vec<_>>()
+    );
 
     Ok(scored_memories)
 }
@@ -246,10 +278,9 @@ fn calculate_linguistic_match(memory: &Memory, analysis: &QueryAnalysis) -> f32 
     }
 
     // Normalize by total possible score
-    let max_possible =
-        analysis.focal_entities.len() as f32 * 1.0 +
-        analysis.discriminative_modifiers.len() as f32 * 0.5 +
-        analysis.relational_context.len() as f32 * 0.2;
+    let max_possible = analysis.focal_entities.len() as f32 * 1.0
+        + analysis.discriminative_modifiers.len() as f32 * 0.5
+        + analysis.relational_context.len() as f32 * 0.2;
 
     if max_possible > 0.0 {
         score / max_possible

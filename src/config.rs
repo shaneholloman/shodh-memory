@@ -129,11 +129,21 @@ impl ServerConfig {
     /// Log the current configuration
     pub fn log(&self) {
         info!("📋 Configuration:");
-        info!("   Mode: {}", if self.is_production { "PRODUCTION" } else { "Development" });
+        info!(
+            "   Mode: {}",
+            if self.is_production {
+                "PRODUCTION"
+            } else {
+                "Development"
+            }
+        );
         info!("   Port: {}", self.port);
         info!("   Storage: {:?}", self.storage_path);
         info!("   Max users in memory: {}", self.max_users_in_memory);
-        info!("   Rate limit: {} req/sec (burst: {})", self.rate_limit_per_second, self.rate_limit_burst);
+        info!(
+            "   Rate limit: {} req/sec (burst: {})",
+            self.rate_limit_per_second, self.rate_limit_burst
+        );
         info!("   Max concurrent: {}", self.max_concurrent_requests);
         info!("   Audit retention: {} days", self.audit_retention_days);
     }

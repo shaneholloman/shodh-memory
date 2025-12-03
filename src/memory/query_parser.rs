@@ -21,7 +21,7 @@ pub struct FocalEntity {
 
 /// Discriminative modifier (adjective/qualifier)
 #[derive(Debug, Clone)]
-#[allow(unused)]  // Public API - fields exposed for analysis consumers
+#[allow(unused)] // Public API - fields exposed for analysis consumers
 pub struct Modifier {
     pub text: String,
     /// IC weight for importance scoring (Lioma & Ounis 2006)
@@ -30,7 +30,7 @@ pub struct Modifier {
 
 /// Relational context (verb)
 #[derive(Debug, Clone)]
-#[allow(unused)]  // Public API - fields exposed for analysis consumers
+#[allow(unused)] // Public API - fields exposed for analysis consumers
 pub struct Relation {
     pub text: String,
     /// IC weight for importance scoring (Lioma & Ounis 2006)
@@ -39,7 +39,7 @@ pub struct Relation {
 
 /// Complete linguistic analysis of a query
 #[derive(Debug, Clone)]
-#[allow(unused)]  // Public API - fields exposed for analysis consumers
+#[allow(unused)] // Public API - fields exposed for analysis consumers
 pub struct QueryAnalysis {
     /// Focal entities (nouns) - primary search targets
     pub focal_entities: Vec<FocalEntity>,
@@ -54,21 +54,19 @@ pub struct QueryAnalysis {
     pub original_query: String,
 }
 
-#[allow(unused)]  // Public API
+#[allow(unused)] // Public API
 impl QueryAnalysis {
     /// Calculate weighted importance of this query (for ranking)
     pub fn total_weight(&self) -> f32 {
-        let entity_weight: f32 = self.focal_entities.iter()
-            .map(|e| e.ic_weight)
-            .sum();
+        let entity_weight: f32 = self.focal_entities.iter().map(|e| e.ic_weight).sum();
 
-        let modifier_weight: f32 = self.discriminative_modifiers.iter()
+        let modifier_weight: f32 = self
+            .discriminative_modifiers
+            .iter()
             .map(|m| m.ic_weight)
             .sum();
 
-        let relation_weight: f32 = self.relational_context.iter()
-            .map(|r| r.ic_weight)
-            .sum();
+        let relation_weight: f32 = self.relational_context.iter().map(|r| r.ic_weight).sum();
 
         entity_weight + modifier_weight + relation_weight
     }
@@ -142,22 +140,79 @@ fn is_noun(word: &str, position: usize, context: &[&str]) -> bool {
     // Common nouns in robotics/memory domain
     const NOUN_INDICATORS: &[&str] = &[
         // Robotics domain
-        "robot", "drone", "sensor", "lidar", "camera", "motor", "actuator",
-        "obstacle", "path", "waypoint", "location", "coordinates", "position",
-        "battery", "power", "energy", "voltage", "current",
-        "system", "module", "component", "unit", "device",
-        "temperature", "pressure", "humidity", "speed", "velocity",
-        "signal", "communication", "network", "link", "connection",
-        "navigation", "guidance", "control", "steering",
-        "data", "information", "message", "command", "response",
-
+        "robot",
+        "drone",
+        "sensor",
+        "lidar",
+        "camera",
+        "motor",
+        "actuator",
+        "obstacle",
+        "path",
+        "waypoint",
+        "location",
+        "coordinates",
+        "position",
+        "battery",
+        "power",
+        "energy",
+        "voltage",
+        "current",
+        "system",
+        "module",
+        "component",
+        "unit",
+        "device",
+        "temperature",
+        "pressure",
+        "humidity",
+        "speed",
+        "velocity",
+        "signal",
+        "communication",
+        "network",
+        "link",
+        "connection",
+        "navigation",
+        "guidance",
+        "control",
+        "steering",
+        "data",
+        "information",
+        "message",
+        "command",
+        "response",
         // General nouns
-        "person", "people", "user", "agent", "operator",
-        "time", "date", "day", "hour", "minute", "second",
-        "area", "zone", "region", "sector", "space",
-        "task", "mission", "goal", "objective", "target",
-        "error", "warning", "alert", "notification",
-        "level", "status", "state", "condition", "mode",
+        "person",
+        "people",
+        "user",
+        "agent",
+        "operator",
+        "time",
+        "date",
+        "day",
+        "hour",
+        "minute",
+        "second",
+        "area",
+        "zone",
+        "region",
+        "sector",
+        "space",
+        "task",
+        "mission",
+        "goal",
+        "objective",
+        "target",
+        "error",
+        "warning",
+        "alert",
+        "notification",
+        "level",
+        "status",
+        "state",
+        "condition",
+        "mode",
     ];
 
     if NOUN_INDICATORS.contains(&word) {
@@ -165,10 +220,14 @@ fn is_noun(word: &str, position: usize, context: &[&str]) -> bool {
     }
 
     // Check for noun suffixes
-    if word.ends_with("tion") || word.ends_with("sion") ||
-       word.ends_with("ment") || word.ends_with("ness") ||
-       word.ends_with("ity") || word.ends_with("ance") ||
-       word.ends_with("ence") {
+    if word.ends_with("tion")
+        || word.ends_with("sion")
+        || word.ends_with("ment")
+        || word.ends_with("ness")
+        || word.ends_with("ity")
+        || word.ends_with("ance")
+        || word.ends_with("ence")
+    {
         return true;
     }
 
@@ -187,30 +246,94 @@ fn is_noun(word: &str, position: usize, context: &[&str]) -> bool {
 fn is_adjective(word: &str) -> bool {
     const ADJECTIVE_INDICATORS: &[&str] = &[
         // Colors
-        "red", "blue", "green", "yellow", "orange", "purple", "black", "white",
-        "gray", "grey", "pink", "brown",
-
+        "red",
+        "blue",
+        "green",
+        "yellow",
+        "orange",
+        "purple",
+        "black",
+        "white",
+        "gray",
+        "grey",
+        "pink",
+        "brown",
         // Sizes
-        "big", "small", "large", "tiny", "huge", "massive", "mini", "micro",
-        "high", "low", "tall", "short", "long", "wide", "narrow",
-
+        "big",
+        "small",
+        "large",
+        "tiny",
+        "huge",
+        "massive",
+        "mini",
+        "micro",
+        "high",
+        "low",
+        "tall",
+        "short",
+        "long",
+        "wide",
+        "narrow",
         // States
-        "hot", "cold", "warm", "cool", "frozen", "heated",
-        "fast", "slow", "quick", "rapid", "gradual",
-        "active", "inactive", "enabled", "disabled", "on", "off",
-        "open", "closed", "locked", "unlocked",
-        "full", "empty", "partial", "complete",
-
+        "hot",
+        "cold",
+        "warm",
+        "cool",
+        "frozen",
+        "heated",
+        "fast",
+        "slow",
+        "quick",
+        "rapid",
+        "gradual",
+        "active",
+        "inactive",
+        "enabled",
+        "disabled",
+        "on",
+        "off",
+        "open",
+        "closed",
+        "locked",
+        "unlocked",
+        "full",
+        "empty",
+        "partial",
+        "complete",
         // Quality
-        "good", "bad", "excellent", "poor", "optimal", "suboptimal",
-        "normal", "abnormal", "stable", "unstable",
-        "safe", "unsafe", "dangerous", "hazardous",
-        "new", "old", "recent", "ancient", "current", "latest",
-
+        "good",
+        "bad",
+        "excellent",
+        "poor",
+        "optimal",
+        "suboptimal",
+        "normal",
+        "abnormal",
+        "stable",
+        "unstable",
+        "safe",
+        "unsafe",
+        "dangerous",
+        "hazardous",
+        "new",
+        "old",
+        "recent",
+        "ancient",
+        "current",
+        "latest",
         // Robotics-specific
-        "autonomous", "manual", "automatic", "remote",
-        "digital", "analog", "electronic", "mechanical",
-        "wireless", "wired", "connected", "disconnected",
+        "autonomous",
+        "manual",
+        "automatic",
+        "remote",
+        "digital",
+        "analog",
+        "electronic",
+        "mechanical",
+        "wireless",
+        "wired",
+        "connected",
+        "disconnected",
     ];
 
     if ADJECTIVE_INDICATORS.contains(&word) {
@@ -218,10 +341,15 @@ fn is_adjective(word: &str) -> bool {
     }
 
     // Common adjective suffixes
-    if word.ends_with("ful") || word.ends_with("less") ||
-       word.ends_with("ous") || word.ends_with("ive") ||
-       word.ends_with("able") || word.ends_with("ible") ||
-       word.ends_with("al") || word.ends_with("ic") {
+    if word.ends_with("ful")
+        || word.ends_with("less")
+        || word.ends_with("ous")
+        || word.ends_with("ive")
+        || word.ends_with("able")
+        || word.ends_with("ible")
+        || word.ends_with("al")
+        || word.ends_with("ic")
+    {
         return true;
     }
 
@@ -244,32 +372,106 @@ fn is_adjective(word: &str) -> bool {
 fn is_verb(word: &str) -> bool {
     const VERB_INDICATORS: &[&str] = &[
         // Common verbs (high frequency, low information)
-        "is", "are", "was", "were", "be", "been", "being",
-        "has", "have", "had", "do", "does", "did",
-        "can", "could", "will", "would", "shall", "should",
-        "may", "might", "must",
-
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "has",
+        "have",
+        "had",
+        "do",
+        "does",
+        "did",
+        "can",
+        "could",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "must",
         // Action verbs (still common)
-        "go", "goes", "went", "gone", "going",
-        "get", "gets", "got", "gotten", "getting",
-        "make", "makes", "made", "making",
-        "take", "takes", "took", "taken", "taking",
-        "see", "sees", "saw", "seen", "seeing",
-
+        "go",
+        "goes",
+        "went",
+        "gone",
+        "going",
+        "get",
+        "gets",
+        "got",
+        "gotten",
+        "getting",
+        "make",
+        "makes",
+        "made",
+        "making",
+        "take",
+        "takes",
+        "took",
+        "taken",
+        "taking",
+        "see",
+        "sees",
+        "saw",
+        "seen",
+        "seeing",
         // Robotics action verbs
-        "detected", "detect", "detects", "detecting",
-        "found", "find", "finds", "finding",
-        "observed", "observe", "observes", "observing",
-        "measured", "measure", "measures", "measuring",
-        "sensed", "sense", "senses", "sensing",
-        "scanned", "scan", "scans", "scanning",
-        "navigated", "navigate", "navigates", "navigating",
-        "moved", "move", "moves", "moving",
-        "stopped", "stop", "stops", "stopping",
-        "started", "start", "starts", "starting",
-        "reached", "reach", "reaches", "reaching",
-        "avoided", "avoid", "avoids", "avoiding",
-        "blocked", "block", "blocks", "blocking",
+        "detected",
+        "detect",
+        "detects",
+        "detecting",
+        "found",
+        "find",
+        "finds",
+        "finding",
+        "observed",
+        "observe",
+        "observes",
+        "observing",
+        "measured",
+        "measure",
+        "measures",
+        "measuring",
+        "sensed",
+        "sense",
+        "senses",
+        "sensing",
+        "scanned",
+        "scan",
+        "scans",
+        "scanning",
+        "navigated",
+        "navigate",
+        "navigates",
+        "navigating",
+        "moved",
+        "move",
+        "moves",
+        "moving",
+        "stopped",
+        "stop",
+        "stops",
+        "stopping",
+        "started",
+        "start",
+        "starts",
+        "starting",
+        "reached",
+        "reach",
+        "reaches",
+        "reaching",
+        "avoided",
+        "avoid",
+        "avoids",
+        "avoiding",
+        "blocked",
+        "block",
+        "blocks",
+        "blocking",
     ];
 
     VERB_INDICATORS.contains(&word)
@@ -278,12 +480,10 @@ fn is_verb(word: &str) -> bool {
 /// Check if word is a stop word (no information content)
 fn is_stop_word(word: &str) -> bool {
     const STOP_WORDS: &[&str] = &[
-        "a", "an", "the", "this", "that", "these", "those",
-        "at", "in", "on", "to", "for", "of", "from", "by", "with",
-        "and", "or", "but", "not", "as", "if", "when", "where",
-        "i", "you", "he", "she", "it", "we", "they",
-        "me", "him", "her", "us", "them",
-        "my", "your", "his", "her", "its", "our", "their",
+        "a", "an", "the", "this", "that", "these", "those", "at", "in", "on", "to", "for", "of",
+        "from", "by", "with", "and", "or", "but", "not", "as", "if", "when", "where", "i", "you",
+        "he", "she", "it", "we", "they", "me", "him", "her", "us", "them", "my", "your", "his",
+        "her", "its", "our", "their",
     ];
 
     STOP_WORDS.contains(&word)
@@ -298,7 +498,8 @@ mod tests {
         let query = "robot detected obstacle at coordinates";
         let analysis = analyze_query(query);
 
-        let noun_texts: Vec<String> = analysis.focal_entities
+        let noun_texts: Vec<String> = analysis
+            .focal_entities
             .iter()
             .map(|e| e.text.clone())
             .collect();
@@ -313,7 +514,8 @@ mod tests {
         let query = "red large obstacle in path";
         let analysis = analyze_query(query);
 
-        let adj_texts: Vec<String> = analysis.discriminative_modifiers
+        let adj_texts: Vec<String> = analysis
+            .discriminative_modifiers
             .iter()
             .map(|m| m.text.clone())
             .collect();
@@ -327,7 +529,8 @@ mod tests {
         let query = "robot detected obstacle";
         let analysis = analyze_query(query);
 
-        let verb_texts: Vec<String> = analysis.relational_context
+        let verb_texts: Vec<String> = analysis
+            .relational_context
             .iter()
             .map(|r| r.text.clone())
             .collect();

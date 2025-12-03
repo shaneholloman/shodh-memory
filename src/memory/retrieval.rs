@@ -1,16 +1,16 @@
 //! Production-grade retrieval engine for memory search
 //! Integrated with Vamana HNSW and MiniLM embeddings for robotics/drones
 
-use anyhow::{Result, Context};
-use std::sync::Arc;
+use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use parking_lot::RwLock;
+use std::sync::Arc;
 
-use super::types::*;
 use super::storage::{MemoryStorage, SearchCriteria};
-use crate::embeddings::{Embedder, minilm::MiniLMEmbedder};
-use crate::vector_db::vamana::{VamanaIndex, VamanaConfig};
+use super::types::*;
+use crate::embeddings::{minilm::MiniLMEmbedder, Embedder};
+use crate::vector_db::vamana::{VamanaConfig, VamanaIndex};
 
 /// Multi-modal retrieval engine with production vector search
 pub struct RetrievalEngine {
@@ -18,7 +18,7 @@ pub struct RetrievalEngine {
     embedder: Arc<MiniLMEmbedder>,
     vector_index: Arc<RwLock<VamanaIndex>>,
     id_mapping: Arc<RwLock<IdMapping>>,
-    graph: RwLock<MemoryGraph>,  // Interior mutability for graph updates
+    graph: RwLock<MemoryGraph>, // Interior mutability for graph updates
 }
 
 /// Bidirectional mapping between memory IDs and vector IDs
@@ -50,11 +50,11 @@ impl RetrievalEngine {
     pub fn new(storage: Arc<MemoryStorage>, embedder: Arc<MiniLMEmbedder>) -> Result<Self> {
         // Initialize Vamana index optimized for robotics (low memory)
         let vamana_config = VamanaConfig {
-            dimension: 384,           // MiniLM dimension
-            max_degree: 24,           // Lower for robotics/drones (less RAM)
-            search_list_size: 50,     // Lower for speed
+            dimension: 384,       // MiniLM dimension
+            max_degree: 24,       // Lower for robotics/drones (less RAM)
+            search_list_size: 50, // Lower for speed
             alpha: 1.2,
-            use_mmap: false,          // Keep in memory for robotics
+            use_mmap: false, // Keep in memory for robotics
         };
 
         let vector_index = Arc::new(RwLock::new(VamanaIndex::new(vamana_config)?));
@@ -76,13 +76,15 @@ impl RetrievalEngine {
         } else {
             // Generate embedding if not provided
             let text = Self::extract_searchable_text(memory);
-            self.embedder.encode(&text)
+            self.embedder
+                .encode(&text)
                 .context("Failed to generate embedding")?
         };
 
         // Add to Vamana index
         let mut index = self.vector_index.write();
-        let vector_id = index.add_vector(embedding)
+        let vector_id = index
+            .add_vector(embedding)
             .context("Failed to add vector to index")?;
 
         // Map memory ID to vector ID
@@ -137,7 +139,8 @@ impl RetrievalEngine {
         let query_embedding = if let Some(embedding) = &query.query_embedding {
             embedding.clone()
         } else if let Some(query_text) = &query.query_text {
-            self.embedder.encode(query_text)
+            self.embedder
+                .encode(query_text)
                 .context("Failed to generate query embedding")?
         } else {
             return Ok(Vec::new());
@@ -145,7 +148,8 @@ impl RetrievalEngine {
 
         // Search vector index
         let index = self.vector_index.read();
-        let results = index.search(&query_embedding, limit * 2) // Get 2x for filtering
+        let results = index
+            .search(&query_embedding, limit * 2) // Get 2x for filtering
             .context("Vector search failed")?;
 
         // Map vector IDs to memory IDs
@@ -153,7 +157,8 @@ impl RetrievalEngine {
         let memory_ids: Vec<(MemoryId, f32)> = results
             .into_iter()
             .filter_map(|(vector_id, distance)| {
-                id_mapping.get_memory_id(vector_id)
+                id_mapping
+                    .get_memory_id(vector_id)
                     .map(|id| (id.clone(), distance))
             })
             .collect();
@@ -190,7 +195,8 @@ impl RetrievalEngine {
         let query_embedding = if let Some(embedding) = &query.query_embedding {
             embedding.clone()
         } else if let Some(query_text) = &query.query_text {
-            self.embedder.encode(query_text)
+            self.embedder
+                .encode(query_text)
                 .context("Failed to generate query embedding")?
         } else {
             return Ok(Vec::new());
@@ -198,7 +204,8 @@ impl RetrievalEngine {
 
         // Search Vamana index
         let index = self.vector_index.read();
-        let results = index.search(&query_embedding, limit * 2)
+        let results = index
+            .search(&query_embedding, limit * 2)
             .context("Vector search failed")?;
 
         // Map vector IDs to memory IDs and fetch memories
@@ -236,7 +243,8 @@ impl RetrievalEngine {
         // Experience type filter
         if let Some(types) = &query.experience_types {
             let matches_type = types.iter().any(|t| {
-                std::mem::discriminant(&memory.experience.experience_type) == std::mem::discriminant(t)
+                std::mem::discriminant(&memory.experience.experience_type)
+                    == std::mem::discriminant(t)
             });
             if !matches_type {
                 return false;
@@ -313,7 +321,9 @@ impl RetrievalEngine {
             SearchCriteria::ByDate { start, end }
         };
 
-        let mut memories: Vec<SharedMemory> = self.storage.search(criteria)?
+        let mut memories: Vec<SharedMemory> = self
+            .storage
+            .search(criteria)?
             .into_iter()
             .map(Arc::new)
             .collect();
@@ -395,10 +405,10 @@ impl RetrievalEngine {
 
         // Weight for each retrieval mode (tuned for robotics)
         let weights = [
-            (RetrievalMode::Similarity, 0.5),    // Higher weight for semantic
-            (RetrievalMode::Temporal, 0.2),       // Recent memories important
-            (RetrievalMode::Causal, 0.2),         // Context chains
-            (RetrievalMode::Associative, 0.1),    // Associations
+            (RetrievalMode::Similarity, 0.5),  // Higher weight for semantic
+            (RetrievalMode::Temporal, 0.2),    // Recent memories important
+            (RetrievalMode::Causal, 0.2),      // Context chains
+            (RetrievalMode::Associative, 0.1), // Associations
         ];
 
         for (mode, weight) in weights.iter() {
@@ -435,10 +445,7 @@ impl RetrievalEngine {
 
         sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(sorted.into_iter()
-            .take(limit)
-            .map(|(_, m)| m)
-            .collect())
+        Ok(sorted.into_iter().take(limit).map(|(_, m)| m).collect())
     }
 
     // ========================================================================
@@ -448,7 +455,9 @@ impl RetrievalEngine {
     /// Spatial search: Find memories within geographic radius
     /// Uses haversine distance for accurate earth-surface calculations
     fn spatial_search(&self, query: &Query, limit: usize) -> Result<Vec<SharedMemory>> {
-        let geo_filter = query.geo_filter.as_ref()
+        let geo_filter = query
+            .geo_filter
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Spatial search requires geo_filter"))?;
 
         let criteria = SearchCriteria::ByLocation {
@@ -457,7 +466,9 @@ impl RetrievalEngine {
             radius_meters: geo_filter.radius_meters,
         };
 
-        let mut memories: Vec<SharedMemory> = self.storage.search(criteria)?
+        let mut memories: Vec<SharedMemory> = self
+            .storage
+            .search(criteria)?
             .into_iter()
             .map(Arc::new)
             .collect();
@@ -475,7 +486,9 @@ impl RetrievalEngine {
                 Some(geo) => geo_filter.haversine_distance(geo[0], geo[1]),
                 None => f64::MAX,
             };
-            dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+            dist_a
+                .partial_cmp(&dist_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         memories.truncate(limit);
@@ -485,12 +498,16 @@ impl RetrievalEngine {
     /// Mission search: Retrieve all memories from a specific mission
     /// Useful for mission replay, analysis, and learning
     fn mission_search(&self, query: &Query, limit: usize) -> Result<Vec<SharedMemory>> {
-        let mission_id = query.mission_id.as_ref()
+        let mission_id = query
+            .mission_id
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Mission search requires mission_id"))?;
 
         let criteria = SearchCriteria::ByMission(mission_id.clone());
 
-        let mut memories: Vec<SharedMemory> = self.storage.search(criteria)?
+        let mut memories: Vec<SharedMemory> = self
+            .storage
+            .search(criteria)?
             .into_iter()
             .map(Arc::new)
             .collect();
@@ -516,7 +533,9 @@ impl RetrievalEngine {
             max: max_reward,
         };
 
-        let mut memories: Vec<SharedMemory> = self.storage.search(criteria)?
+        let mut memories: Vec<SharedMemory> = self
+            .storage
+            .search(criteria)?
             .into_iter()
             .map(Arc::new)
             .collect();
@@ -528,7 +547,9 @@ impl RetrievalEngine {
         memories.sort_by(|a, b| {
             let reward_a = a.experience.reward.unwrap_or(0.0);
             let reward_b = b.experience.reward.unwrap_or(0.0);
-            reward_b.partial_cmp(&reward_a).unwrap_or(std::cmp::Ordering::Equal)
+            reward_b
+                .partial_cmp(&reward_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         memories.truncate(limit);
@@ -569,7 +590,8 @@ impl RetrievalEngine {
     /// Save vector index to disk (for persistence)
     pub fn save_index(&self, path: &PathBuf) -> Result<()> {
         let index = self.vector_index.read();
-        index.save(path.as_path())
+        index
+            .save(path.as_path())
             .context("Failed to save vector index")?;
         Ok(())
     }
@@ -577,7 +599,8 @@ impl RetrievalEngine {
     /// Load vector index from disk
     pub fn load_index(&self, path: &PathBuf) -> Result<()> {
         let mut index = self.vector_index.write();
-        index.load(path.as_path())
+        index
+            .load(path.as_path())
             .context("Failed to load vector index")?;
         Ok(())
     }
@@ -602,11 +625,13 @@ impl MemoryGraph {
 
     /// Add edge between memories (bidirectional)
     fn add_edge(&mut self, from: &MemoryId, to: &MemoryId) {
-        self.adjacency.entry(from.clone())
+        self.adjacency
+            .entry(from.clone())
             .or_default()
             .insert(to.clone());
 
-        self.adjacency.entry(to.clone())
+        self.adjacency
+            .entry(to.clone())
             .or_default()
             .insert(from.clone());
     }

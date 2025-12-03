@@ -3,21 +3,37 @@
 
 #![allow(dead_code)]
 
+use crate::memory::{ExperienceType, Memory, MemoryId};
+use petgraph::dot::{Config, Dot};
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::dot::{Dot, Config};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
-use crate::memory::{Memory, MemoryId, ExperienceType};
 
 /// Node type in the memory graph
 #[derive(Debug, Clone)]
 pub enum MemoryNode {
-    WorkingMemory { id: MemoryId, importance: f32 },
-    SessionMemory { id: MemoryId, importance: f32 },
-    LongTermMemory { id: MemoryId, importance: f32, compressed: bool },
-    Experience { exp_type: ExperienceType, content: String },
-    Context { context_id: String, decay: f32 },
+    WorkingMemory {
+        id: MemoryId,
+        importance: f32,
+    },
+    SessionMemory {
+        id: MemoryId,
+        importance: f32,
+    },
+    LongTermMemory {
+        id: MemoryId,
+        importance: f32,
+        compressed: bool,
+    },
+    Experience {
+        exp_type: ExperienceType,
+        content: String,
+    },
+    Context {
+        context_id: String,
+        decay: f32,
+    },
 }
 
 impl fmt::Display for MemoryNode {
@@ -29,13 +45,25 @@ impl fmt::Display for MemoryNode {
             MemoryNode::SessionMemory { id: _, importance } => {
                 write!(f, "SM\\n{importance:.2}")
             }
-            MemoryNode::LongTermMemory { id: _, importance, compressed } => {
-                write!(f, "LTM\\n{:.2}{}", importance, if *compressed { "🗜️" } else { "" })
+            MemoryNode::LongTermMemory {
+                id: _,
+                importance,
+                compressed,
+            } => {
+                write!(
+                    f,
+                    "LTM\\n{:.2}{}",
+                    importance,
+                    if *compressed { "🗜️" } else { "" }
+                )
             }
             MemoryNode::Experience { exp_type, .. } => {
                 write!(f, "{exp_type:?}")
             }
-            MemoryNode::Context { context_id: _, decay } => {
+            MemoryNode::Context {
+                context_id: _,
+                decay,
+            } => {
                 write!(f, "CTX\\n{decay:.2}")
             }
         }
@@ -45,11 +73,11 @@ impl fmt::Display for MemoryNode {
 /// Edge type in the memory graph
 #[derive(Debug, Clone)]
 pub enum MemoryEdge {
-    Promotion,          // Working -> Session -> LongTerm
-    SemanticSimilarity(f32),  // Similarity score
-    TemporalSuccession, // A happened after B
-    CausalLink,        // A caused B
-    ContextRelation,   // Related through context
+    Promotion,               // Working -> Session -> LongTerm
+    SemanticSimilarity(f32), // Similarity score
+    TemporalSuccession,      // A happened after B
+    CausalLink,              // A caused B
+    ContextRelation,         // Related through context
 }
 
 impl fmt::Display for MemoryEdge {
@@ -152,15 +180,24 @@ impl MemoryGraph {
         let from_key = format!("{}_{}", from_tier, memory_id.0);
         let to_key = format!("{}_{}", to_tier, memory_id.0);
 
-        if let (Some(&from_idx), Some(&to_idx)) = (self.node_map.get(&from_key), self.node_map.get(&to_key)) {
+        if let (Some(&from_idx), Some(&to_idx)) =
+            (self.node_map.get(&from_key), self.node_map.get(&to_key))
+        {
             self.add_edge(from_idx, to_idx, MemoryEdge::Promotion);
-            println!("🧠 [GRAPH] {} → {}", from_tier.to_uppercase(), to_tier.to_uppercase());
+            println!(
+                "🧠 [GRAPH] {} → {}",
+                from_tier.to_uppercase(),
+                to_tier.to_uppercase()
+            );
         }
     }
 
     /// Export graph as DOT format for Graphviz
     pub fn to_dot(&self) -> String {
-        format!("{:?}", Dot::with_config(&self.graph, &[Config::EdgeNoLabel]))
+        format!(
+            "{:?}",
+            Dot::with_config(&self.graph, &[Config::EdgeNoLabel])
+        )
     }
 
     /// Get statistics about the graph
@@ -175,7 +212,8 @@ impl MemoryGraph {
     }
 
     fn count_tier(&self, tier: &str) -> usize {
-        self.node_map.keys()
+        self.node_map
+            .keys()
             .filter(|k| k.starts_with(&format!("{tier}_")))
             .count()
     }
@@ -190,9 +228,18 @@ impl MemoryGraph {
 
         println!("\n📊 Memory Tier Statistics:");
         println!("   ┌─────────────────────┬──────┐");
-        println!("   │ Working Memory      │ {:>4} │", stats.working_memory_count);
-        println!("   │ Session Memory      │ {:>4} │", stats.session_memory_count);
-        println!("   │ Long-term Memory    │ {:>4} │", stats.longterm_memory_count);
+        println!(
+            "   │ Working Memory      │ {:>4} │",
+            stats.working_memory_count
+        );
+        println!(
+            "   │ Session Memory      │ {:>4} │",
+            stats.session_memory_count
+        );
+        println!(
+            "   │ Long-term Memory    │ {:>4} │",
+            stats.longterm_memory_count
+        );
         println!("   ├─────────────────────┼──────┤");
         println!("   │ Total Nodes         │ {:>4} │", stats.total_nodes);
         println!("   │ Total Connections   │ {:>4} │", stats.total_edges);
@@ -214,7 +261,10 @@ impl MemoryGraph {
         println!("        │ Important memories (score > 0.6)");
         println!("        ▼");
         println!("   ┌──────────┐");
-        println!("   │ LONGTERM │  ({} memories)", stats.longterm_memory_count);
+        println!(
+            "   │ LONGTERM │  ({} memories)",
+            stats.longterm_memory_count
+        );
         println!("   │  MEMORY  │  Compressed, searchable");
         println!("   └──────────┘");
         println!();
@@ -247,59 +297,94 @@ impl MemoryLogger {
 
     /// Log memory creation
     pub fn log_created(&mut self, memory: &Memory, tier: &str) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
 
-        println!("🧠 [CREATE] {} memory: importance={:.2}, type={:?}",
-                 tier.to_uppercase(), memory.importance(), memory.experience.experience_type);
+        println!(
+            "🧠 [CREATE] {} memory: importance={:.2}, type={:?}",
+            tier.to_uppercase(),
+            memory.importance(),
+            memory.experience.experience_type
+        );
 
         self.graph.add_memory(memory, tier);
     }
 
     /// Log memory access
     pub fn log_accessed(&self, memory_id: &MemoryId, tier: &str) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
 
-        println!("🧠 [ACCESS] {} memory: id={}", tier.to_uppercase(), memory_id.0);
+        println!(
+            "🧠 [ACCESS] {} memory: id={}",
+            tier.to_uppercase(),
+            memory_id.0
+        );
     }
 
     /// Log memory promotion
     pub fn log_promoted(&mut self, memory_id: &MemoryId, from: &str, to: &str, count: usize) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
 
-        println!("🧠 [PROMOTE] {} → {}: {} memories",
-                 from.to_uppercase(), to.to_uppercase(), count);
+        println!(
+            "🧠 [PROMOTE] {} → {}: {} memories",
+            from.to_uppercase(),
+            to.to_uppercase(),
+            count
+        );
 
         self.graph.log_promotion(from, to, memory_id);
     }
 
     /// Log compression
-    pub fn log_compressed(&self, _memory_id: &MemoryId, original_size: usize, compressed_size: usize) {
-        if !self.enabled { return; }
+    pub fn log_compressed(
+        &self,
+        _memory_id: &MemoryId,
+        original_size: usize,
+        compressed_size: usize,
+    ) {
+        if !self.enabled {
+            return;
+        }
 
         let ratio = (compressed_size as f32 / original_size as f32 * 100.0) as usize;
-        println!("🧠 [COMPRESS] Memory compressed: {original_size} → {compressed_size} bytes ({ratio}%)");
+        println!(
+            "🧠 [COMPRESS] Memory compressed: {original_size} → {compressed_size} bytes ({ratio}%)"
+        );
     }
 
     /// Log retrieval
     pub fn log_retrieved(&self, query: &str, result_count: usize, sources: &[&str]) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
 
-        println!("🧠 [RETRIEVE] Query: '{}' → {} results from: {}",
-                 query.chars().take(50).collect::<String>(),
-                 result_count,
-                 sources.join(", "));
+        println!(
+            "🧠 [RETRIEVE] Query: '{}' → {} results from: {}",
+            query.chars().take(50).collect::<String>(),
+            result_count,
+            sources.join(", ")
+        );
     }
 
     /// Show visualization
     pub fn show_visualization(&self) {
-        if !self.enabled { return; }
+        if !self.enabled {
+            return;
+        }
 
         self.graph.print_ascii_visualization();
     }
 
     /// Export graph
     pub fn export_dot(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        if !self.enabled { return Ok(()); }
+        if !self.enabled {
+            return Ok(());
+        }
 
         let dot = self.graph.to_dot();
         std::fs::write(path, dot)?;
@@ -316,7 +401,7 @@ impl MemoryLogger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Memory, MemoryId, Experience, ExperienceType};
+    use crate::memory::{Experience, ExperienceType, Memory, MemoryId};
 
     fn create_test_memory() -> Memory {
         use std::collections::HashMap;
@@ -386,7 +471,7 @@ mod tests {
         match node {
             MemoryNode::WorkingMemory { .. } => {
                 // Success - defaulted to WorkingMemory
-            },
+            }
             _ => panic!("Expected WorkingMemory for invalid tier, got {node:?}"),
         }
     }
@@ -397,7 +482,15 @@ mod tests {
         let memory = create_test_memory();
 
         // Test various invalid tier names - none should panic
-        let invalid_tiers = vec!["", "Working", "WORKING", "long-term", "unknown", "123", "session_memory"];
+        let invalid_tiers = vec![
+            "",
+            "Working",
+            "WORKING",
+            "long-term",
+            "unknown",
+            "123",
+            "session_memory",
+        ];
 
         for tier in invalid_tiers {
             let _ = graph.add_memory(&memory, tier);

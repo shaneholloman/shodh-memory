@@ -8,12 +8,15 @@
 //! - Automated scheduling support
 
 use anyhow::{anyhow, Result};
-use rocksdb::{backup::{BackupEngine, BackupEngineOptions}, Env, DB};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::fs;
 use chrono::{DateTime, Utc};
-use sha2::{Sha256, Digest};
+use rocksdb::{
+    backup::{BackupEngine, BackupEngineOptions},
+    Env, DB,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Backup metadata for tracking and verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,11 +68,7 @@ impl ShodhBackupEngine {
     ///
     /// # Returns
     /// BackupMetadata with backup details
-    pub fn create_backup(
-        &self,
-        db: &DB,
-        user_id: &str,
-    ) -> Result<BackupMetadata> {
+    pub fn create_backup(&self, db: &DB, user_id: &str) -> Result<BackupMetadata> {
         let backup_dir = self.backup_path.join(user_id);
         fs::create_dir_all(&backup_dir)?;
 
@@ -83,7 +82,8 @@ impl ShodhBackupEngine {
         backup_engine.create_new_backup(db)?;
 
         let backup_info = backup_engine.get_backup_info();
-        let latest_backup = backup_info.last()
+        let latest_backup = backup_info
+            .last()
             .ok_or_else(|| anyhow!("No backup created"))?;
 
         let backup_id = latest_backup.backup_id;
@@ -254,7 +254,8 @@ impl ShodhBackupEngine {
     // ========================================================================
 
     fn save_metadata(&self, metadata: &BackupMetadata) -> Result<()> {
-        let metadata_path = self.backup_path
+        let metadata_path = self
+            .backup_path
             .join(&metadata.user_id)
             .join(format!("backup_{}.json", metadata.backup_id));
 
@@ -265,7 +266,8 @@ impl ShodhBackupEngine {
     }
 
     fn load_metadata(&self, user_id: &str, backup_id: u32) -> Result<BackupMetadata> {
-        let metadata_path = self.backup_path
+        let metadata_path = self
+            .backup_path
             .join(user_id)
             .join(format!("backup_{backup_id}.json"));
 

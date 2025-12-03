@@ -3,16 +3,16 @@
 //!
 //! Production implementation optimized for 8-16GB RAM laptops
 
-use anyhow::{Result, anyhow};
-use std::collections::{BinaryHeap, HashSet};
-use std::cmp::{Ordering, Reverse};
-use std::sync::Arc;
-use parking_lot::RwLock;
+use super::distance_inline::dot_product_inline;
+use anyhow::{anyhow, Result};
 use memmap2::MmapMut;
+use parking_lot::RwLock;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashSet};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::info;
-use super::distance_inline::dot_product_inline;
 
 /// Vamana configuration
 #[derive(Debug, Clone)]
@@ -36,11 +36,11 @@ pub struct VamanaConfig {
 impl Default for VamanaConfig {
     fn default() -> Self {
         Self {
-            max_degree: 32,           // R=32 for billion-scale
-            search_list_size: 75,     // L=75 during construction
-            alpha: 1.2,               // Standard α for pruning
-            dimension: 384,           // MiniLM dimension
-            use_mmap: true,           // Disk-based for large datasets
+            max_degree: 32,       // R=32 for billion-scale
+            search_list_size: 75, // L=75 during construction
+            alpha: 1.2,           // Standard α for pruning
+            dimension: 384,       // MiniLM dimension
+            use_mmap: true,       // Disk-based for large datasets
         }
     }
 }
@@ -143,11 +143,8 @@ impl VamanaIndex {
                 let query = self.get_vector(node_id as u32)?;
 
                 // Search for L nearest neighbors
-                let candidates = self.greedy_search(
-                    &query,
-                    self.config.search_list_size,
-                    *self.medoid.read(),
-                )?;
+                let candidates =
+                    self.greedy_search(&query, self.config.search_list_size, *self.medoid.read())?;
 
                 // Prune using α-RNG strategy
                 let pruned = self.robust_prune(node_id as u32, &candidates)?;
@@ -173,7 +170,9 @@ impl VamanaIndex {
                                 let _neighbor_vec = self.get_vector(neighbor)?;
                                 let pruned_neighbors = self.robust_prune(
                                     neighbor,
-                                    &neighbor_node.neighbors.iter()
+                                    &neighbor_node
+                                        .neighbors
+                                        .iter()
                                         .map(|&id| SearchCandidate { id, distance: 0.0 })
                                         .collect::<Vec<_>>(),
                                 )?;
@@ -205,9 +204,7 @@ impl VamanaIndex {
 
         for i in 0..n {
             // Create random edges
-            let mut neighbors: Vec<u32> = (0..n as u32)
-                .filter(|&j| j != i as u32)
-                .collect();
+            let mut neighbors: Vec<u32> = (0..n as u32).filter(|&j| j != i as u32).collect();
 
             neighbors.shuffle(&mut rng);
             neighbors.truncate(self.config.max_degree);
@@ -356,12 +353,13 @@ impl VamanaIndex {
         let storage = self.vectors.read();
 
         match &*storage {
-            VectorStorage::Memory(vecs) => {
-                Ok(vecs.get(id as usize)
-                    .ok_or_else(|| anyhow!("Vector {id} not found"))?
-                    .clone())
-            }
-            VectorStorage::Mmap { mmap, dimension, .. } => {
+            VectorStorage::Memory(vecs) => Ok(vecs
+                .get(id as usize)
+                .ok_or_else(|| anyhow!("Vector {id} not found"))?
+                .clone()),
+            VectorStorage::Mmap {
+                mmap, dimension, ..
+            } => {
                 let start = id as usize * dimension;
                 let end = start + dimension;
 
@@ -514,15 +512,15 @@ impl VamanaIndex {
 
         // Check if graph is built
         if self.graph.read().is_empty() {
-            return Err(anyhow!("Vamana graph not built. Call build() first or add more vectors."));
+            return Err(anyhow!(
+                "Vamana graph not built. Call build() first or add more vectors."
+            ));
         }
 
         let entry = *self.medoid.read();
         let candidates = self.greedy_search(query, k, entry)?;
 
-        Ok(candidates.into_iter()
-            .map(|c| (c.id, c.distance))
-            .collect())
+        Ok(candidates.into_iter().map(|c| (c.id, c.distance)).collect())
     }
 
     /// Add a single vector (incremental indexing) - OPTIMIZED
@@ -559,9 +557,11 @@ impl VamanaIndex {
             Vec::new()
         } else {
             // Just find k-nearest neighbors without expensive pruning
-            let candidates = self.greedy_search(&vector, self.config.max_degree, *self.medoid.read())?;
+            let candidates =
+                self.greedy_search(&vector, self.config.max_degree, *self.medoid.read())?;
             // Take top-k neighbors directly without robust_prune for speed
-            candidates.into_iter()
+            candidates
+                .into_iter()
                 .take(self.config.max_degree)
                 .map(|c| c.id)
                 .collect()
@@ -586,7 +586,9 @@ impl VamanaIndex {
             // Simple pruning - just keep first max_degree neighbors
             // Avoid expensive distance calculations during incremental adds
             if graph[neighbor_id as usize].neighbors.len() > self.config.max_degree {
-                graph[neighbor_id as usize].neighbors.truncate(self.config.max_degree);
+                graph[neighbor_id as usize]
+                    .neighbors
+                    .truncate(self.config.max_degree);
             }
         }
 
@@ -596,9 +598,9 @@ impl VamanaIndex {
 
     /// Save index to disk
     pub fn save(&self, path: &Path) -> Result<()> {
+        use serde::{Deserialize, Serialize};
         use std::fs::{create_dir_all, File};
         use std::io::BufWriter;
-        use serde::{Serialize, Deserialize};
 
         // Ensure directory exists
         create_dir_all(path)?;
@@ -614,17 +616,19 @@ impl VamanaIndex {
         // Collect vectors from storage
         let vectors = match &*self.vectors.read() {
             VectorStorage::Memory(vecs) => vecs.clone(),
-            VectorStorage::Mmap { mmap, dimension, num_vectors } => {
+            VectorStorage::Mmap {
+                mmap,
+                dimension,
+                num_vectors,
+            } => {
                 // Read vectors from mmap
                 let mut vecs = Vec::with_capacity(*num_vectors);
                 for i in 0..*num_vectors {
                     let offset = i * dimension * 4;
                     let bytes = &mmap[offset..offset + dimension * 4];
                     let vector = unsafe {
-                        std::slice::from_raw_parts(
-                            bytes.as_ptr() as *const f32,
-                            *dimension
-                        ).to_vec()
+                        std::slice::from_raw_parts(bytes.as_ptr() as *const f32, *dimension)
+                            .to_vec()
                     };
                     vecs.push(vector);
                 }
@@ -644,16 +648,19 @@ impl VamanaIndex {
         let file = File::create(&index_file)?;
         bincode::serialize_into(BufWriter::new(file), &data)?;
 
-        info!("Saved Vamana index with {} vectors to {:?}", self.num_vectors, index_file);
+        info!(
+            "Saved Vamana index with {} vectors to {:?}",
+            self.num_vectors, index_file
+        );
         Ok(())
     }
 
     /// Load index from disk
     /// Load index data into existing instance (dynamic method)
     pub fn load(&mut self, path: &Path) -> Result<()> {
+        use serde::{Deserialize, Serialize};
         use std::fs::File;
         use std::io::BufReader;
-        use serde::{Serialize, Deserialize};
 
         let index_file = path.join("vamana_index.bin");
         if !index_file.exists() {
@@ -694,7 +701,6 @@ impl VamanaIndex {
         info!("Loaded Vamana index with {} vectors", self.num_vectors);
         Ok(())
     }
-
 }
 
 /// Search candidate
@@ -724,7 +730,6 @@ impl Ord for SearchCandidate {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,7 +742,8 @@ mod tests {
             search_list_size: 10,
             alpha: 1.2,
             use_mmap: false,
-        }).unwrap();
+        })
+        .unwrap();
 
         let vectors = vec![
             vec![1.0, 0.0, 0.0, 0.0],

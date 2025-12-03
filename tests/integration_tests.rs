@@ -8,13 +8,13 @@
 //! Run with: cargo test --test integration_tests -- --nocapture
 
 use std::collections::HashMap;
-use std::time::Instant;
 use std::path::PathBuf;
+use std::time::Instant;
 use tempfile::TempDir;
 
 use shodh_memory::{
-    memory::{MemorySystem, MemoryConfig, Experience, Query, ExperienceType, RetrievalMode},
     memory::types::GeoFilter,
+    memory::{Experience, ExperienceType, MemoryConfig, MemorySystem, Query, RetrievalMode},
 };
 
 // ============================================================================
@@ -79,7 +79,11 @@ impl TestReporter {
         println!("  TEST SUITE SUMMARY: {}", self.test_name);
         println!("{}", "-".repeat(80));
         println!("  Total Tests:  {}", total);
-        println!("  Passed:       {} ({:.1}%)", passed, (passed as f64 / total as f64) * 100.0);
+        println!(
+            "  Passed:       {} ({:.1}%)",
+            passed,
+            (passed as f64 / total as f64) * 100.0
+        );
         println!("  Failed:       {}", failed);
         println!("  Duration:     {} ms", total_duration);
         println!("{}", "=".repeat(80));
@@ -87,7 +91,10 @@ impl TestReporter {
         if failed == 0 {
             println!("\n  [SUCCESS] All tests passed - System ready for production deployment\n");
         } else {
-            println!("\n  [WARNING] {} tests failed - Review before deployment\n", failed);
+            println!(
+                "\n  [WARNING] {} tests failed - Review before deployment\n",
+                failed
+            );
             for result in &self.results {
                 if !result.passed {
                     println!("    - {}: {}", result.name, result.details);
@@ -189,13 +196,21 @@ fn test_core_memory_operations() {
 
     let mut system = match system_result {
         Ok(s) => {
-            reporter.record("Initialize memory system", true, init_duration,
-                &format!("System initialized in {} ms", init_duration));
+            reporter.record(
+                "Initialize memory system",
+                true,
+                init_duration,
+                &format!("System initialized in {} ms", init_duration),
+            );
             s
         }
         Err(e) => {
-            reporter.record("Initialize memory system", false, init_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Initialize memory system",
+                false,
+                init_duration,
+                &format!("Failed: {}", e),
+            );
             reporter.report();
             panic!("Cannot continue without memory system");
         }
@@ -209,7 +224,11 @@ fn test_core_memory_operations() {
         experience_type: ExperienceType::Observation,
         content: "Robot arm successfully grasped object at position (10, 20, 5)".to_string(),
         context: None,
-        entities: vec!["robot_arm".to_string(), "grasp".to_string(), "object".to_string()],
+        entities: vec![
+            "robot_arm".to_string(),
+            "grasp".to_string(),
+            "object".to_string(),
+        ],
         metadata: HashMap::new(),
         embeddings: None,
         related_memories: Vec::new(),
@@ -230,12 +249,20 @@ fn test_core_memory_operations() {
 
     match record_result {
         Ok(memory_id) => {
-            reporter.record("Record experience", true, record_duration,
-                &format!("Memory ID: {}", memory_id.0));
+            reporter.record(
+                "Record experience",
+                true,
+                record_duration,
+                &format!("Memory ID: {}", memory_id.0),
+            );
         }
         Err(e) => {
-            reporter.record("Record experience", false, record_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Record experience",
+                false,
+                record_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -254,8 +281,16 @@ fn test_core_memory_operations() {
     }
     let batch_duration = start.elapsed().as_millis();
 
-    reporter.record("Batch record (10 memories)", success_count == 10, batch_duration,
-        &format!("{}/10 successful, avg {} ms/record", success_count, batch_duration / 10));
+    reporter.record(
+        "Batch record (10 memories)",
+        success_count == 10,
+        batch_duration,
+        &format!(
+            "{}/10 successful, avg {} ms/record",
+            success_count,
+            batch_duration / 10
+        ),
+    );
 
     reporter.section("Retrieval Operations");
 
@@ -272,12 +307,24 @@ fn test_core_memory_operations() {
 
     match retrieve_result {
         Ok(memories) => {
-            reporter.record("Semantic retrieval", !memories.is_empty(), retrieve_duration,
-                &format!("Retrieved {} memories in {} ms", memories.len(), retrieve_duration));
+            reporter.record(
+                "Semantic retrieval",
+                !memories.is_empty(),
+                retrieve_duration,
+                &format!(
+                    "Retrieved {} memories in {} ms",
+                    memories.len(),
+                    retrieve_duration
+                ),
+            );
         }
         Err(e) => {
-            reporter.record("Semantic retrieval", false, retrieve_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Semantic retrieval",
+                false,
+                retrieve_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -294,12 +341,20 @@ fn test_core_memory_operations() {
 
     match entity_result {
         Ok(memories) => {
-            reporter.record("Entity-based retrieval", true, entity_duration,
-                &format!("Found {} memories with sensor entity", memories.len()));
+            reporter.record(
+                "Entity-based retrieval",
+                true,
+                entity_duration,
+                &format!("Found {} memories with sensor entity", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("Entity-based retrieval", false, entity_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Entity-based retrieval",
+                false,
+                entity_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -323,18 +378,26 @@ fn test_robotics_scenarios() {
     // Test 1: Mission-based memory organization
     let start = Instant::now();
     let missions = vec![
-        ("mission_alpha", "patrol", vec![
-            "Started patrol route at sector A",
-            "Detected obstacle at coordinates (15, 30)",
-            "Rerouted around obstacle via waypoint B",
-            "Completed patrol - no anomalies detected",
-        ]),
-        ("mission_beta", "inspection", vec![
-            "Initiated inspection of equipment rack 1",
-            "Found rust damage on component C-15",
-            "Documented damage with visual capture",
-            "Flagged for maintenance priority HIGH",
-        ]),
+        (
+            "mission_alpha",
+            "patrol",
+            vec![
+                "Started patrol route at sector A",
+                "Detected obstacle at coordinates (15, 30)",
+                "Rerouted around obstacle via waypoint B",
+                "Completed patrol - no anomalies detected",
+            ],
+        ),
+        (
+            "mission_beta",
+            "inspection",
+            vec![
+                "Initiated inspection of equipment rack 1",
+                "Found rust damage on component C-15",
+                "Documented damage with visual capture",
+                "Flagged for maintenance priority HIGH",
+            ],
+        ),
     ];
 
     let mut mission_success = true;
@@ -366,8 +429,12 @@ fn test_robotics_scenarios() {
     }
     let mission_duration = start.elapsed().as_millis();
 
-    reporter.record("Mission memory tracking", mission_success, mission_duration,
-        "2 missions with 4 events each recorded");
+    reporter.record(
+        "Mission memory tracking",
+        mission_success,
+        mission_duration,
+        "2 missions with 4 events each recorded",
+    );
 
     // Test 2: Retrieve mission-specific memories
     let start = Instant::now();
@@ -383,12 +450,20 @@ fn test_robotics_scenarios() {
 
     match patrol_result {
         Ok(memories) => {
-            reporter.record("Mission-filtered retrieval", true, patrol_duration,
-                &format!("Found {} patrol memories", memories.len()));
+            reporter.record(
+                "Mission-filtered retrieval",
+                true,
+                patrol_duration,
+                &format!("Found {} patrol memories", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("Mission-filtered retrieval", false, patrol_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Mission-filtered retrieval",
+                false,
+                patrol_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -406,8 +481,10 @@ fn test_robotics_scenarios() {
     for (desc, pos) in obstacles {
         let exp = Experience {
             experience_type: ExperienceType::Discovery,
-            content: format!("Obstacle detected: {} at position ({}, {}, {})",
-                desc, pos[0], pos[1], pos[2]),
+            content: format!(
+                "Obstacle detected: {} at position ({}, {}, {})",
+                desc, pos[0], pos[1], pos[2]
+            ),
             context: None,
             entities: vec!["obstacle".to_string(), desc.to_lowercase()],
             metadata: HashMap::new(),
@@ -430,8 +507,12 @@ fn test_robotics_scenarios() {
     }
     let obstacle_duration = start.elapsed().as_millis();
 
-    reporter.record("Obstacle memory storage", obstacle_count == 3, obstacle_duration,
-        &format!("{}/3 obstacles recorded", obstacle_count));
+    reporter.record(
+        "Obstacle memory storage",
+        obstacle_count == 3,
+        obstacle_duration,
+        &format!("{}/3 obstacles recorded", obstacle_count),
+    );
 
     // Test 4: Query obstacles
     let start = Instant::now();
@@ -447,12 +528,20 @@ fn test_robotics_scenarios() {
 
     match obstacle_query_result {
         Ok(memories) => {
-            reporter.record("Obstacle memory retrieval", true, obstacle_query_duration,
-                &format!("Retrieved {} obstacle memories", memories.len()));
+            reporter.record(
+                "Obstacle memory retrieval",
+                true,
+                obstacle_query_duration,
+                &format!("Retrieved {} obstacle memories", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("Obstacle memory retrieval", false, obstacle_query_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Obstacle memory retrieval",
+                false,
+                obstacle_query_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -474,10 +563,16 @@ fn test_robotics_scenarios() {
 
         let exp = Experience {
             experience_type: ExperienceType::Pattern,
-            content: format!("Sensor {} calibration: accuracy {:.2}, status: {}",
-                sensor, accuracy, status),
+            content: format!(
+                "Sensor {} calibration: accuracy {:.2}, status: {}",
+                sensor, accuracy, status
+            ),
             context: None,
-            entities: vec!["sensor".to_string(), "calibration".to_string(), sensor.to_string()],
+            entities: vec![
+                "sensor".to_string(),
+                "calibration".to_string(),
+                sensor.to_string(),
+            ],
             metadata: HashMap::new(),
             embeddings: None,
             related_memories: Vec::new(),
@@ -498,8 +593,12 @@ fn test_robotics_scenarios() {
     }
     let calibration_duration = start.elapsed().as_millis();
 
-    reporter.record("Sensor calibration tracking", calibration_success, calibration_duration,
-        "4 sensor calibrations recorded");
+    reporter.record(
+        "Sensor calibration tracking",
+        calibration_success,
+        calibration_duration,
+        "4 sensor calibrations recorded",
+    );
 
     // Test 6: Find sensors needing recalibration
     let start = Instant::now();
@@ -514,12 +613,20 @@ fn test_robotics_scenarios() {
 
     match recal_result {
         Ok(memories) => {
-            reporter.record("Recalibration needs query", true, recal_duration,
-                &format!("Found {} sensors needing attention", memories.len()));
+            reporter.record(
+                "Recalibration needs query",
+                true,
+                recal_duration,
+                &format!("Found {} sensors needing attention", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("Recalibration needs query", false, recal_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Recalibration needs query",
+                false,
+                recal_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -550,7 +657,11 @@ fn test_drone_fleet_operations() {
         let lon = -122.4194 + (i as f64 * 0.001);
 
         let exp = create_drone_experience(
-            &format!("{} initiated surveillance sweep at sector {}", drone_id, i + 1),
+            &format!(
+                "{} initiated surveillance sweep at sector {}",
+                drone_id,
+                i + 1
+            ),
             drone_id,
             "surveillance_mission_001",
             Some([lat, lon, 100.0]),
@@ -562,15 +673,24 @@ fn test_drone_fleet_operations() {
     }
     let multi_drone_duration = start.elapsed().as_millis();
 
-    reporter.record("Multi-drone mission init", success_count == 3, multi_drone_duration,
-        &format!("{}/3 drones initialized", success_count));
+    reporter.record(
+        "Multi-drone mission init",
+        success_count == 3,
+        multi_drone_duration,
+        &format!("{}/3 drones initialized", success_count),
+    );
 
     reporter.section("Geo-Spatial Memory");
 
     // Test 2: Record geo-tagged events
     let start = Instant::now();
     let events = vec![
-        ("Target identified at construction site", 37.7749, -122.4194, 50.0),
+        (
+            "Target identified at construction site",
+            37.7749,
+            -122.4194,
+            50.0,
+        ),
         ("Weather station data collected", 37.7850, -122.4094, 75.0),
         ("Traffic monitoring complete", 37.7650, -122.4294, 100.0),
         ("Emergency vehicle detected", 37.7749, -122.4194, 60.0),
@@ -591,8 +711,12 @@ fn test_drone_fleet_operations() {
     }
     let geo_duration = start.elapsed().as_millis();
 
-    reporter.record("Geo-tagged event recording", geo_success == 4, geo_duration,
-        &format!("{}/4 geo-tagged events recorded", geo_success));
+    reporter.record(
+        "Geo-tagged event recording",
+        geo_success == 4,
+        geo_duration,
+        &format!("{}/4 geo-tagged events recorded", geo_success),
+    );
 
     // Test 3: Geo-spatial query
     let start = Instant::now();
@@ -608,12 +732,20 @@ fn test_drone_fleet_operations() {
 
     match geo_query_result {
         Ok(memories) => {
-            reporter.record("Geo-spatial retrieval", true, geo_query_duration,
-                &format!("Found {} memories within 1km radius", memories.len()));
+            reporter.record(
+                "Geo-spatial retrieval",
+                true,
+                geo_query_duration,
+                &format!("Found {} memories within 1km radius", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("Geo-spatial retrieval", false, geo_query_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Geo-spatial retrieval",
+                false,
+                geo_query_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -633,8 +765,12 @@ fn test_drone_fleet_operations() {
     for (i, (pos, heading)) in waypoints.iter().enumerate() {
         let exp = Experience {
             experience_type: ExperienceType::Task,
-            content: format!("Waypoint {} reached - altitude {}m, heading {}deg",
-                i + 1, pos[2], heading),
+            content: format!(
+                "Waypoint {} reached - altitude {}m, heading {}deg",
+                i + 1,
+                pos[2],
+                heading
+            ),
             context: None,
             entities: vec!["waypoint".to_string(), "flight_path".to_string()],
             metadata: HashMap::new(),
@@ -657,8 +793,12 @@ fn test_drone_fleet_operations() {
     }
     let path_duration = start.elapsed().as_millis();
 
-    reporter.record("Flight path recording", path_success == 5, path_duration,
-        &format!("{}/5 waypoints recorded", path_success));
+    reporter.record(
+        "Flight path recording",
+        path_success == 5,
+        path_duration,
+        &format!("{}/5 waypoints recorded", path_success),
+    );
 
     // Test 5: Query flight path
     let start = Instant::now();
@@ -675,12 +815,20 @@ fn test_drone_fleet_operations() {
 
     match path_query_result {
         Ok(memories) => {
-            reporter.record("Flight path retrieval", true, path_query_duration,
-                &format!("Retrieved {} waypoint memories", memories.len()));
+            reporter.record(
+                "Flight path retrieval",
+                true,
+                path_query_duration,
+                &format!("Retrieved {} waypoint memories", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("Flight path retrieval", false, path_query_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Flight path retrieval",
+                false,
+                path_query_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -704,8 +852,10 @@ fn test_drone_fleet_operations() {
 
         let exp = Experience {
             experience_type: ExperienceType::Pattern,
-            content: format!("Battery at {}% ({}) after {} minutes of flight",
-                level, status, flight_minutes),
+            content: format!(
+                "Battery at {}% ({}) after {} minutes of flight",
+                level, status, flight_minutes
+            ),
             context: None,
             entities: vec!["battery".to_string(), status.to_string()],
             metadata: HashMap::new(),
@@ -728,8 +878,12 @@ fn test_drone_fleet_operations() {
     }
     let battery_duration = start.elapsed().as_millis();
 
-    reporter.record("Battery telemetry tracking", battery_success == 5, battery_duration,
-        &format!("{}/5 battery readings recorded", battery_success));
+    reporter.record(
+        "Battery telemetry tracking",
+        battery_success == 5,
+        battery_duration,
+        &format!("{}/5 battery readings recorded", battery_success),
+    );
 
     // Test 7: Critical battery query
     let start = Instant::now();
@@ -744,12 +898,20 @@ fn test_drone_fleet_operations() {
 
     match critical_result {
         Ok(memories) => {
-            reporter.record("Critical status retrieval", true, critical_duration,
-                &format!("Found {} critical battery events", memories.len()));
+            reporter.record(
+                "Critical status retrieval",
+                true,
+                critical_duration,
+                &format!("Found {} critical battery events", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("Critical status retrieval", false, critical_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "Critical status retrieval",
+                false,
+                critical_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -779,7 +941,10 @@ fn test_performance_benchmarks() {
 
         for i in 0..batch_size {
             let exp = create_robotics_experience(
-                &format!("Performance test observation {} with sensor data and position tracking", i),
+                &format!(
+                    "Performance test observation {} with sensor data and position tracking",
+                    i
+                ),
                 &format!("perf_robot_{}", i % 5),
                 vec!["performance", "benchmark", "sensor"],
             );
@@ -789,15 +954,25 @@ fn test_performance_benchmarks() {
         }
 
         let duration = start.elapsed().as_millis();
-        let rate = if duration > 0 { (success as f64 / duration as f64) * 1000.0 } else { 0.0 };
+        let rate = if duration > 0 {
+            (success as f64 / duration as f64) * 1000.0
+        } else {
+            0.0
+        };
 
         reporter.record(
             &format!("Insert {} memories", batch_size),
             success == batch_size,
             duration,
-            &format!("{:.1} records/sec, avg {:.2} ms/record",
+            &format!(
+                "{:.1} records/sec, avg {:.2} ms/record",
                 rate,
-                if success > 0 { duration as f64 / success as f64 } else { 0.0 }),
+                if success > 0 {
+                    duration as f64 / success as f64
+                } else {
+                    0.0
+                }
+            ),
         );
     }
 
@@ -829,7 +1004,7 @@ fn test_performance_benchmarks() {
 
         reporter.record(
             &format!("{} query", name),
-            avg_duration < 500,  // Target: <500ms average
+            avg_duration < 500, // Target: <500ms average
             avg_duration,
             &format!("avg over {} iterations", iterations),
         );
@@ -842,12 +1017,18 @@ fn test_performance_benchmarks() {
     let stats = system.stats();
     let stats_duration = start.elapsed().as_millis();
 
-    reporter.record("Stats retrieval", true, stats_duration,
-        &format!("Total memories: {}, Working: {}, Session: {}, Long-term: {}",
+    reporter.record(
+        "Stats retrieval",
+        true,
+        stats_duration,
+        &format!(
+            "Total memories: {}, Working: {}, Session: {}, Long-term: {}",
             stats.total_memories,
             stats.working_memory_count,
             stats.session_memory_count,
-            stats.long_term_memory_count));
+            stats.long_term_memory_count
+        ),
+    );
 
     reporter.report();
 }
@@ -870,7 +1051,7 @@ fn test_reliability_and_edge_cases() {
     let start = Instant::now();
     let exp = Experience {
         experience_type: ExperienceType::Observation,
-        content: "".to_string(),  // Empty content
+        content: "".to_string(), // Empty content
         context: None,
         entities: Vec::new(),
         metadata: HashMap::new(),
@@ -892,12 +1073,16 @@ fn test_reliability_and_edge_cases() {
     let empty_duration = start.elapsed().as_millis();
 
     // Empty content should still be handled gracefully
-    reporter.record("Empty content handling", empty_result.is_ok(), empty_duration,
-        "System handles empty content gracefully");
+    reporter.record(
+        "Empty content handling",
+        empty_result.is_ok(),
+        empty_duration,
+        "System handles empty content gracefully",
+    );
 
     // Test 2: Very long content
     let start = Instant::now();
-    let long_content = "x".repeat(10000);  // 10KB of content
+    let long_content = "x".repeat(10000); // 10KB of content
     let exp = Experience {
         experience_type: ExperienceType::Observation,
         content: long_content,
@@ -921,8 +1106,12 @@ fn test_reliability_and_edge_cases() {
     let long_result = system.record(exp);
     let long_duration = start.elapsed().as_millis();
 
-    reporter.record("Large content handling (10KB)", long_result.is_ok(), long_duration,
-        &format!("Processed in {} ms", long_duration));
+    reporter.record(
+        "Large content handling (10KB)",
+        long_result.is_ok(),
+        long_duration,
+        &format!("Processed in {} ms", long_duration),
+    );
 
     // Test 3: Special characters in content
     let start = Instant::now();
@@ -950,8 +1139,12 @@ fn test_reliability_and_edge_cases() {
     let special_result = system.record(exp);
     let special_duration = start.elapsed().as_millis();
 
-    reporter.record("Special characters handling", special_result.is_ok(), special_duration,
-        "Unicode and special characters handled correctly");
+    reporter.record(
+        "Special characters handling",
+        special_result.is_ok(),
+        special_duration,
+        "Unicode and special characters handled correctly",
+    );
 
     reporter.section("Query Edge Cases");
 
@@ -966,8 +1159,12 @@ fn test_reliability_and_edge_cases() {
     let empty_query_result = system.retrieve(&query);
     let empty_query_duration = start.elapsed().as_millis();
 
-    reporter.record("Empty query handling", empty_query_result.is_ok(), empty_query_duration,
-        "Empty query handled gracefully");
+    reporter.record(
+        "Empty query handling",
+        empty_query_result.is_ok(),
+        empty_query_duration,
+        "Empty query handled gracefully",
+    );
 
     // Test 5: Query with no results
     let start = Instant::now();
@@ -982,12 +1179,20 @@ fn test_reliability_and_edge_cases() {
 
     match no_results {
         Ok(memories) => {
-            reporter.record("No-match query", true, no_results_duration,
-                &format!("Returned {} results (expected 0 or low)", memories.len()));
+            reporter.record(
+                "No-match query",
+                true,
+                no_results_duration,
+                &format!("Returned {} results (expected 0 or low)", memories.len()),
+            );
         }
         Err(e) => {
-            reporter.record("No-match query", false, no_results_duration,
-                &format!("Failed: {}", e));
+            reporter.record(
+                "No-match query",
+                false,
+                no_results_duration,
+                &format!("Failed: {}", e),
+            );
         }
     }
 
@@ -1021,8 +1226,12 @@ fn test_reliability_and_edge_cases() {
     }
     let concurrent_duration = start.elapsed().as_millis();
 
-    reporter.record("Rapid sequential ops (20)", ops_success == 20, concurrent_duration,
-        &format!("{}/20 operations successful", ops_success));
+    reporter.record(
+        "Rapid sequential ops (20)",
+        ops_success == 20,
+        concurrent_duration,
+        &format!("{}/20 operations successful", ops_success),
+    );
 
     reporter.section("Data Persistence");
 
@@ -1031,8 +1240,12 @@ fn test_reliability_and_edge_cases() {
     let flush_result = system.flush_storage();
     let flush_duration = start.elapsed().as_millis();
 
-    reporter.record("Storage flush", flush_result.is_ok(), flush_duration,
-        "Data persisted to disk");
+    reporter.record(
+        "Storage flush",
+        flush_result.is_ok(),
+        flush_duration,
+        "Data persisted to disk",
+    );
 
     reporter.report();
 }
@@ -1058,7 +1271,10 @@ fn test_stress_scenarios() {
 
     for i in 0..target {
         let exp = create_robotics_experience(
-            &format!("Stress test record {} - high frequency sensor data from multiple sources", i),
+            &format!(
+                "Stress test record {} - high frequency sensor data from multiple sources",
+                i
+            ),
             &format!("stress_robot_{}", i % 10),
             vec!["stress", "high_volume", "sensor"],
         );
@@ -1076,9 +1292,12 @@ fn test_stress_scenarios() {
 
     reporter.record(
         &format!("{} rapid insertions", target),
-        success >= (target * 95 / 100),  // 95% success threshold
+        success >= (target * 95 / 100), // 95% success threshold
         stress_duration,
-        &format!("{}/{} successful ({:.1} records/sec)", success, target, rate),
+        &format!(
+            "{}/{} successful ({:.1} records/sec)",
+            success, target, rate
+        ),
     );
 
     // Rapid queries after stress
@@ -1103,9 +1322,12 @@ fn test_stress_scenarios() {
         &format!("{} queries post-stress", query_count),
         query_success == query_count,
         query_duration,
-        &format!("{}/{} successful, avg {:.1} ms/query",
-            query_success, query_count,
-            query_duration as f64 / query_count as f64),
+        &format!(
+            "{}/{} successful, avg {:.1} ms/query",
+            query_success,
+            query_count,
+            query_duration as f64 / query_count as f64
+        ),
     );
 
     reporter.report();

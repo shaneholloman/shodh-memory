@@ -16,17 +16,17 @@
 //! - Full offline operation
 
 pub mod auth;
-pub mod memory;
-pub mod similarity;
-pub mod validation;
+pub mod backup;
+pub mod embeddings;
 pub mod errors;
 pub mod graph_memory;
-pub mod vector_db;
-pub mod embeddings;
+pub mod memory;
 pub mod metrics;
 pub mod middleware;
+pub mod similarity;
 pub mod tracing_setup;
-pub mod backup;
+pub mod validation;
+pub mod vector_db;
 
 #[cfg(feature = "python")]
 pub mod python;

@@ -33,7 +33,7 @@ pub fn dot_product_inline(a: &[f32], b: &[f32]) -> f32 {
 /// Inline AVX2 dot product - no function call overhead
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2", enable = "fma")]
-#[inline]  // Cannot use always with target_feature
+#[inline] // Cannot use always with target_feature
 unsafe fn dot_product_avx2_inline(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len();
     let simd_len = len & !7;
@@ -83,7 +83,7 @@ fn dot_product_scalar_inline(a: &[f32], b: &[f32]) -> f32 {
     // Unrolled by 4 for better performance
     let mut i = 0;
     while i < unroll_len {
-        sum += a[i] * b[i] + a[i+1] * b[i+1] + a[i+2] * b[i+2] + a[i+3] * b[i+3];
+        sum += a[i] * b[i] + a[i + 1] * b[i + 1] + a[i + 2] * b[i + 2] + a[i + 3] * b[i + 3];
         i += 4;
     }
 
@@ -113,7 +113,7 @@ pub fn euclidean_squared_inline(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-#[inline]  // Cannot use always with target_feature
+#[inline] // Cannot use always with target_feature
 unsafe fn euclidean_squared_avx2_inline(a: &[f32], b: &[f32]) -> f32 {
     let len = a.len();
     let simd_len = len & !7;

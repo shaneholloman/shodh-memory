@@ -11,20 +11,15 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-pub mod minilm;
 pub mod downloader;
+pub mod minilm;
 
 use anyhow::Result;
 
 // Re-export downloader functions for convenience
 pub use downloader::{
-    ensure_downloaded,
-    are_models_downloaded,
-    is_onnx_runtime_downloaded,
-    get_cache_dir,
-    get_models_dir,
-    get_onnx_runtime_path,
-    print_status,
+    are_models_downloaded, ensure_downloaded, get_cache_dir, get_models_dir, get_onnx_runtime_path,
+    is_onnx_runtime_downloaded, print_status,
 };
 
 /// Trait for embedding generation
@@ -37,8 +32,6 @@ pub trait Embedder: Send + Sync {
 
     /// Batch encode multiple texts
     fn encode_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        texts.iter()
-            .map(|text| self.encode(text))
-            .collect()
+        texts.iter().map(|text| self.encode(text)).collect()
     }
 }

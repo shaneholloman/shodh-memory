@@ -11,8 +11,8 @@
 
 use lazy_static::lazy_static;
 use prometheus::{
-    Histogram, HistogramOpts, HistogramVec,
-    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry,
 };
 
 lazy_static! {
@@ -256,13 +256,13 @@ pub fn register_metrics() -> Result<(), prometheus::Error> {
 
 /// Helper to time operations with histogram (RAII pattern)
 /// Usage: let _timer = Timer::new(SOME_HISTOGRAM.clone());
-#[allow(unused)]  // Public API utility for metrics consumers
+#[allow(unused)] // Public API utility for metrics consumers
 pub struct Timer {
     histogram: Histogram,
     start: std::time::Instant,
 }
 
-#[allow(unused)]  // Public API utility
+#[allow(unused)] // Public API utility
 impl Timer {
     /// Create timer that records duration to histogram on drop
     pub fn new(histogram: Histogram) -> Self {

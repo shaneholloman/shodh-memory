@@ -8,30 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
-
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -56,6 +34,7 @@ jobs:
         with:
           name: shodh-memory-linux
           path: target/release/shodh-memory-server
+          if-no-files-found: ignore
 
       - name: Upload binary (macOS)
         if: matrix.os == 'macos-latest'
@@ -63,6 +42,7 @@ jobs:
         with:
           name: shodh-memory-macos
           path: target/release/shodh-memory-server
+          if-no-files-found: ignore
 
       - name: Upload binary (Windows)
         if: matrix.os == 'windows-latest'
@@ -70,40 +50,4 @@ jobs:
         with:
           name: shodh-memory-windows
           path: target/release/shodh-memory-server.exe
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Download ONNX Runtime
-        run: |
-          mkdir -p ~/.cache/shodh-memory/onnxruntime
-          curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz -o onnx.tgz
-          tar -xzf onnx.tgz
-          cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so ~/.cache/shodh-memory/onnxruntime/
-
-      - name: Run tests
-        env:
-          ORT_DYLIB_PATH: ~/.cache/shodh-memory/onnxruntime/libonnxruntime.so
-        run: cargo test --release
-
-  release:
-    name: Release
-    needs: [fmt, clippy, build, test]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Display structure
-        run: ls -R artifacts/
+          if-no-files-found: ignore

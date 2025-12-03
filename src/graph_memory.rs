@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rocksdb::{DB, Options};
+use rocksdb::{Options, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -60,7 +60,7 @@ pub enum EntityLabel {
 
 impl EntityLabel {
     /// Get string representation of the entity label
-    #[allow(unused)]  // Public API for serialization/display
+    #[allow(unused)] // Public API for serialization/display
     pub fn as_str(&self) -> &str {
         match self {
             Self::Person => "Person",
@@ -152,7 +152,7 @@ pub enum RelationType {
 
 impl RelationType {
     /// Get string representation of the relation type
-    #[allow(unused)]  // Public API for serialization/display
+    #[allow(unused)] // Public API for serialization/display
     pub fn as_str(&self) -> &str {
         match self {
             Self::WorksWith => "WorksWith",
@@ -480,7 +480,11 @@ impl GraphMemory {
     }
 
     /// Traverse graph starting from an entity (breadth-first)
-    pub fn traverse_from_entity(&self, start_uuid: &Uuid, max_depth: usize) -> Result<GraphTraversal> {
+    pub fn traverse_from_entity(
+        &self,
+        start_uuid: &Uuid,
+        max_depth: usize,
+    ) -> Result<GraphTraversal> {
         let mut visited_entities = HashSet::new();
         let mut visited_edges = HashSet::new();
         let mut current_level = vec![*start_uuid];
@@ -632,26 +636,50 @@ pub struct EntityExtractor {
 
 impl EntityExtractor {
     pub fn new() -> Self {
-        let person_indicators: HashSet<String> = vec![
-            "mr", "mrs", "ms", "dr", "prof", "sir", "madam",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let person_indicators: HashSet<String> =
+            vec!["mr", "mrs", "ms", "dr", "prof", "sir", "madam"]
+                .into_iter()
+                .map(String::from)
+                .collect();
 
         let org_indicators: HashSet<String> = vec![
-            "inc", "corp", "ltd", "llc", "company", "corporation",
-            "university", "institute", "foundation",
+            "inc",
+            "corp",
+            "ltd",
+            "llc",
+            "company",
+            "corporation",
+            "university",
+            "institute",
+            "foundation",
         ]
         .into_iter()
         .map(String::from)
         .collect();
 
         let tech_keywords: HashSet<String> = vec![
-            "rust", "python", "java", "javascript", "typescript",
-            "react", "vue", "angular", "docker", "kubernetes",
-            "aws", "azure", "gcp", "sql", "nosql", "mongodb",
-            "postgresql", "redis", "kafka", "api", "rest", "graphql",
+            "rust",
+            "python",
+            "java",
+            "javascript",
+            "typescript",
+            "react",
+            "vue",
+            "angular",
+            "docker",
+            "kubernetes",
+            "aws",
+            "azure",
+            "gcp",
+            "sql",
+            "nosql",
+            "mongodb",
+            "postgresql",
+            "redis",
+            "kafka",
+            "api",
+            "rest",
+            "graphql",
         ]
         .into_iter()
         .map(String::from)
@@ -682,25 +710,39 @@ impl EntityExtractor {
             let lower = clean_word.to_lowercase();
 
             // Check for technology keywords
-            if self.tech_keywords.contains(&lower)
-                && !seen.contains(&lower) {
-                    entities.push((clean_word.to_string(), EntityLabel::Technology));
-                    seen.insert(lower.clone());
-                }
+            if self.tech_keywords.contains(&lower) && !seen.contains(&lower) {
+                entities.push((clean_word.to_string(), EntityLabel::Technology));
+                seen.insert(lower.clone());
+            }
 
             // Check for capitalized words (potential entities)
-            if clean_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if clean_word
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+            {
                 let mut entity_name = clean_word.to_string();
                 let mut entity_label = EntityLabel::Other("Unknown".to_string());
 
                 // Check for person indicators
-                if i > 0 && self.person_indicators.contains(&words[i - 1].to_lowercase()) {
+                if i > 0
+                    && self
+                        .person_indicators
+                        .contains(&words[i - 1].to_lowercase())
+                {
                     entity_label = EntityLabel::Person;
                 }
 
                 // Check for multi-word capitalized sequences
                 let mut j = i + 1;
-                while j < words.len() && words[j].chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                while j < words.len()
+                    && words[j]
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
+                {
                     let next_word = words[j].trim_matches(|c: char| !c.is_alphanumeric());
                     entity_name.push(' ');
                     entity_name.push_str(next_word);

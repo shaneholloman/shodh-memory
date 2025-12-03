@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Structured error response for API clients
@@ -31,14 +31,24 @@ pub struct ErrorResponse {
 #[derive(Debug)]
 pub enum AppError {
     // Validation Errors (400)
-    InvalidInput { field: String, reason: String },
+    InvalidInput {
+        field: String,
+        reason: String,
+    },
     InvalidUserId(String),
     InvalidMemoryId(String),
     InvalidEmbeddings(String),
-    ContentTooLarge { size: usize, max: usize },
+    ContentTooLarge {
+        size: usize,
+        max: usize,
+    },
 
     // Resource Limit Errors (429)
-    ResourceLimit { resource: String, current: usize, limit: usize },
+    ResourceLimit {
+        resource: String,
+        current: usize,
+        limit: usize,
+    },
 
     // Not Found Errors (404)
     MemoryNotFound(String),
@@ -54,8 +64,14 @@ pub enum AppError {
     ConcurrencyError(String),
 
     // Lock failures (500) - non-panicking lock handling
-    LockPoisoned { resource: String, details: String },
-    LockAcquisitionFailed { resource: String, reason: String },
+    LockPoisoned {
+        resource: String,
+        details: String,
+    },
+    LockAcquisitionFailed {
+        resource: String,
+        reason: String,
+    },
 
     // Service Errors (503)
     ServiceUnavailable(String),
@@ -115,8 +131,7 @@ impl AppError {
 
             Self::ResourceLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
 
-            Self::MemoryNotFound(_)
-            | Self::UserNotFound(_) => StatusCode::NOT_FOUND,
+            Self::MemoryNotFound(_) | Self::UserNotFound(_) => StatusCode::NOT_FOUND,
 
             Self::MemoryAlreadyExists(_) => StatusCode::CONFLICT,
 
@@ -144,7 +159,11 @@ impl AppError {
             Self::ContentTooLarge { size, max } => {
                 format!("Content too large: {size} bytes (max: {max} bytes)")
             }
-            Self::ResourceLimit { resource, current, limit } => {
+            Self::ResourceLimit {
+                resource,
+                current,
+                limit,
+            } => {
                 format!("Resource limit exceeded for {resource}: current={current} MB, limit={limit} MB")
             }
             Self::MemoryNotFound(id) => format!("Memory not found: {id}"),
@@ -171,7 +190,7 @@ impl AppError {
             code: self.code().to_string(),
             message: self.message(),
             details: None,
-            request_id: None,  // Can be set by middleware
+            request_id: None, // Can be set by middleware
         }
     }
 }
@@ -224,8 +243,14 @@ mod tests {
 
     #[test]
     fn test_error_codes() {
-        assert_eq!(AppError::InvalidUserId("test".to_string()).code(), "INVALID_USER_ID");
-        assert_eq!(AppError::MemoryNotFound("123".to_string()).code(), "MEMORY_NOT_FOUND");
+        assert_eq!(
+            AppError::InvalidUserId("test".to_string()).code(),
+            "INVALID_USER_ID"
+        );
+        assert_eq!(
+            AppError::MemoryNotFound("123".to_string()).code(),
+            "MEMORY_NOT_FOUND"
+        );
     }
 
     #[test]
