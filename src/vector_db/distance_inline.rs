@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 /// Inline dot product with compile-time SIMD selection

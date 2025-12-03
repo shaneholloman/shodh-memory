@@ -366,7 +366,7 @@ impl MiniLMEmbedder {
         let tokens: Vec<i64> = text
             .split_whitespace()
             .enumerate()
-            .map(|(i, _)| (i as i64 + 1000)) // Dummy token IDs
+            .map(|(i, _)| i as i64 + 1000) // Dummy token IDs
             .take(self.config.max_length)
             .collect();
 
