@@ -1,8 +1,8 @@
 # Shodh-Memory MCP Server
 
-Give Claude Code persistent memory using Shodh-Memory.
+Give Claude Code persistent memory using Shodh-Memory. Built with Bun.
 
-## Tools Available
+## Tools
 
 | Tool | Description |
 |------|-------------|
@@ -17,32 +17,26 @@ Give Claude Code persistent memory using Shodh-Memory.
 ### 1. Start shodh-memory server
 
 ```bash
-# Set environment variables
-export ORT_DYLIB_PATH="/path/to/onnxruntime.dll"
-export SHODH_MODEL_PATH="/path/to/minilm-l6"
-
-# Run server
 ./shodh-memory-server
 ```
 
-### 2. Install MCP server
+### 2. Install dependencies
 
 ```bash
 cd mcp-server
 bun install
-bun run build
 ```
 
 ### 3. Add to Claude Code config
 
-Edit `~/.claude/claude_desktop_config.json`:
+Edit `~/.claude.json`:
 
 ```json
 {
   "mcpServers": {
     "shodh-memory": {
       "command": "bun",
-      "args": ["run", "/path/to/shodh-memory/mcp-server/dist/index.js"],
+      "args": ["run", "/path/to/shodh-memory/mcp-server/index.ts"],
       "env": {
         "SHODH_API_URL": "http://127.0.0.1:3030",
         "SHODH_USER_ID": "claude-code"
@@ -52,33 +46,14 @@ Edit `~/.claude/claude_desktop_config.json`:
 }
 ```
 
-Or for production with npx:
+## Usage
 
-```json
-{
-  "mcpServers": {
-    "shodh-memory": {
-      "command": "npx",
-      "args": ["-y", "@shodh/memory-mcp"],
-      "env": {
-        "SHODH_API_URL": "http://127.0.0.1:3030"
-      }
-    }
-  }
-}
-```
-
-## Usage Examples
-
-Once configured, Claude can use these commands:
+Once configured, Claude can:
 
 ```
-"Remember that the user prefers TypeScript over JavaScript"
-
-"Recall what I learned about the user's coding preferences"
-
+"Remember that the user prefers Rust over Python"
+"Recall what I know about user preferences"
 "List all my memories"
-
 "Show memory stats"
 ```
 
@@ -87,5 +62,5 @@ Once configured, Claude can use these commands:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SHODH_API_URL` | `http://127.0.0.1:3030` | Shodh-Memory server URL |
-| `SHODH_API_KEY` | `shodh-dev-key...` | API key for authentication |
+| `SHODH_API_KEY` | `shodh-dev-key...` | API key |
 | `SHODH_USER_ID` | `claude-code` | User ID for memory isolation |
