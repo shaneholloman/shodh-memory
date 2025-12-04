@@ -2581,19 +2581,19 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    // P0.11: Wrap entire shutdown process with timeout for production resilience
-    let shutdown_future = async {
-        // Graceful shutdown with ConnectInfo for rate limiting (tower_governor requires SocketAddr)
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Run the server - it will wait until shutdown signal is received
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
-        info!("🔒 All requests completed, flushing databases...");
+    info!("🔒 Shutdown signal received, flushing databases...");
 
-        // P0.11: Flush RocksDB with timeout
+    // P0.11: Wrap cleanup process with timeout for production resilience
+    let cleanup_future = async {
+        // Flush RocksDB with timeout
         let flush_future = async { manager_for_shutdown.flush_all_databases() };
 
         match tokio::time::timeout(
@@ -2610,7 +2610,7 @@ async fn main() -> Result<()> {
             ),
         }
 
-        // P0.11: Save vector indices with timeout
+        // Save vector indices with timeout
         info!("💾 Persisting vector indices...");
         let save_future = async { manager_for_shutdown.save_all_vector_indices() };
 
@@ -2631,23 +2631,17 @@ async fn main() -> Result<()> {
         // P1.6: Shutdown tracing and flush remaining spans (optional, only with telemetry feature)
         #[cfg(feature = "telemetry")]
         tracing_setup::shutdown_tracing();
-
-        Ok::<(), anyhow::Error>(())
     };
 
-    // P0.11: Enforce overall shutdown timeout with force-kill fallback
+    // P0.11: Enforce overall cleanup timeout with force-kill fallback
     match tokio::time::timeout(
         std::time::Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
-        shutdown_future,
+        cleanup_future,
     )
     .await
     {
-        Ok(Ok(())) => {
+        Ok(()) => {
             info!("👋 Server shutdown complete");
-        }
-        Ok(Err(e)) => {
-            tracing::error!("❌ Shutdown error: {}", e);
-            std::process::exit(1);
         }
         Err(_) => {
             tracing::error!(

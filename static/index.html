@@ -3,613 +3,776 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shodh-Memory - Local Memory System</title>
-    <link rel="stylesheet" href="/static/dashboard.css">
+    <title>Shodh Memory</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: hsl(222, 84%, 5%);
+            --surface: hsl(217, 33%, 17%);
+            --border: hsl(217, 33%, 20%);
+            --text: hsl(210, 40%, 98%);
+            --text-muted: hsl(215, 20%, 65%);
+            --accent: hsl(0, 85%, 60%);
+            --accent-light: hsl(15, 90%, 55%);
+            --success: hsl(142, 71%, 45%);
+            --mono: 'JetBrains Mono', monospace;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Gradient mesh background like website */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background:
+                radial-gradient(at 27% 37%, hsla(215, 98%, 61%, 0.15) 0px, transparent 50%),
+                radial-gradient(at 97% 21%, hsla(125, 98%, 72%, 0.12) 0px, transparent 50%),
+                radial-gradient(at 52% 99%, hsla(354, 98%, 61%, 0.15) 0px, transparent 50%),
+                radial-gradient(at 10% 29%, hsla(256, 96%, 67%, 0.12) 0px, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .app {
+            display: grid;
+            grid-template-rows: 52px 1fr;
+            height: 100vh;
+            position: relative;
+            z-index: 1;
+        }
+
+        header {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .logo img {
+            height: 32px;
+            width: auto;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--success);
+        }
+
+        .status-dot.offline { background: hsl(0, 84%, 60%); }
+
+        main {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(8px);
+            border-right: 1px solid var(--border);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+
+        .section-title {
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+
+        .input-group {
+            margin-bottom: 12px;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        input, textarea {
+            width: 100%;
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 10px;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 12px;
+            transition: border-color 0.15s;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        textarea {
+            resize: none;
+            height: 60px;
+            font-family: var(--mono);
+            font-size: 11px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            margin-bottom: 6px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent-light));
+            color: white;
+        }
+
+        .btn-primary:hover {
+            filter: brightness(1.1);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: rgba(30, 41, 59, 0.8);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--surface);
+        }
+
+        .divider {
+            height: 1px;
+            background: var(--border);
+            margin: 14px 0;
+        }
+
+        .stats-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 14px;
+        }
+
+        .stat-box {
+            background: rgba(30, 41, 59, 0.6);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--accent-light);
+        }
+
+        .stat-label {
+            font-size: 9px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        /* Memory Cloud Canvas */
+        .canvas-container {
+            position: relative;
+            overflow: hidden;
+        }
+
+        #memoryCanvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Memory Detail Panel */
+        .detail-panel {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            width: 300px;
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            display: none;
+        }
+
+        .detail-panel.visible { display: block; }
+
+        .detail-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .detail-title {
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .detail-close {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 18px;
+            padding: 0;
+            width: 24px;
+            height: 24px;
+        }
+
+        .detail-content {
+            font-size: 13px;
+            line-height: 1.5;
+            margin-bottom: 12px;
+            color: var(--text);
+        }
+
+        .detail-meta {
+            font-size: 10px;
+            font-family: var(--mono);
+            color: var(--text-muted);
+        }
+
+        .detail-score {
+            display: inline-block;
+            padding: 2px 6px;
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
+        /* Legend */
+        .legend {
+            position: absolute;
+            bottom: 16px;
+            left: 16px;
+            display: flex;
+            gap: 16px;
+            font-size: 10px;
+            color: var(--text-muted);
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(8px);
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .legend-dot.high { background: var(--success); }
+        .legend-dot.medium { background: hsl(215, 90%, 60%); }
+        .legend-dot.low { background: hsl(215, 20%, 50%); }
+
+        /* Controls */
+        .canvas-controls {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            display: flex;
+            gap: 8px;
+        }
+
+        .canvas-btn {
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .canvas-btn:hover {
+            background: var(--surface);
+            border-color: var(--accent);
+        }
+
+        /* Console */
+        .console {
+            flex: 1;
+            min-height: 80px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px;
+            font-family: var(--mono);
+            font-size: 10px;
+            overflow-y: auto;
+            line-height: 1.5;
+        }
+
+        .console-line { color: var(--text-muted); }
+        .console-line.success { color: var(--success); }
+        .console-line.error { color: hsl(0, 84%, 60%); }
+        .console-line.info { color: hsl(215, 90%, 60%); }
+
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    </style>
 </head>
 <body>
-    <header>
-        <div class="header-content">
+    <div class="app">
+        <header>
             <div class="logo">
-                <div class="logo-icon">🧠</div>
-                <div class="logo-text">
-                    <h1>Shodh-Memory</h1>
-                    <p class="subtitle">Local Memory for AI Agents • Offline • Private</p>
-                </div>
+                <img src="/static/logo.png" alt="Shodh">
+                <span>Shodh Memory</span>
             </div>
-            <div class="header-status">
-                <span id="health-status" class="status-dot"></span>
-                <span id="health-text">Connecting...</span>
+            <div class="status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Connecting...</span>
             </div>
-        </div>
-    </header>
+        </header>
 
-    <div class="container">
-        <!-- Quick Test Section - THE MOST IMPORTANT PART -->
-        <div class="card">
-            <h2>⚡ Quick Test - See It Work</h2>
-            <p style="color: var(--text-muted); margin-bottom: 1.5rem;">
-                Test the memory system in 3 steps: Store → Search → See Results
-            </p>
+        <main>
+            <div class="sidebar">
+                <div class="section-title">Store</div>
+                <div class="input-group">
+                    <label>User ID</label>
+                    <input type="text" id="userId" value="robot_01">
+                </div>
+                <div class="input-group">
+                    <label>Memory</label>
+                    <textarea id="content" placeholder="Enter memory..."></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="storeMemory()">Store Memory</button>
 
-            <div class="stats-grid">
-                <!-- Step 1: Store -->
-                <div class="stat-card">
-                    <h3>1️⃣ Store Memory</h3>
-                    <div class="form-group">
-                        <label>User ID</label>
-                        <input type="text" id="quick-user" value="test_robot" placeholder="robot_id">
+                <div class="divider"></div>
+
+                <div class="section-title">Search</div>
+                <div class="input-group">
+                    <label>Query</label>
+                    <input type="text" id="query" placeholder="Search memories...">
+                </div>
+                <button class="btn btn-primary" onclick="searchMemories()">Search</button>
+                <button class="btn btn-secondary" onclick="loadAll()">Load All</button>
+
+                <div class="divider"></div>
+
+                <div class="section-title">Stats</div>
+                <div class="stats-row">
+                    <div class="stat-box">
+                        <div class="stat-value" id="totalMemories">0</div>
+                        <div class="stat-label">Memories</div>
                     </div>
-                    <div class="form-group">
-                        <label>Experience</label>
-                        <textarea id="quick-experience" placeholder="E.g., 'Detected obstacle at coordinates (10, 20). Stopped and waited 5 seconds.'"></textarea>
+                    <div class="stat-box">
+                        <div class="stat-value" id="lastLatency">--</div>
+                        <div class="stat-label">Latency</div>
                     </div>
-                    <button onclick="quickStore()" style="width: 100%;">💾 Store</button>
-                    <div id="store-result" style="margin-top: 1rem; font-size: 0.875rem;"></div>
                 </div>
 
-                <!-- Step 2: Search -->
-                <div class="stat-card">
-                    <h3>2️⃣ Search Memories</h3>
-                    <div class="form-group">
-                        <label>Search Query</label>
-                        <input type="text" id="quick-query" placeholder="E.g., 'obstacles' or 'coordinates'">
-                    </div>
-                    <div class="form-group">
-                        <label>Search Mode</label>
-                        <select id="quick-mode">
-                            <option value="Hybrid">Hybrid (Best)</option>
-                            <option value="SemanticSimilarity">Semantic</option>
-                            <option value="Temporal">Recent</option>
-                        </select>
-                    </div>
-                    <button onclick="quickSearch()" style="width: 100%;">🔍 Search</button>
-                </div>
-
-                <!-- Step 3: Results -->
-                <div class="stat-card">
-                    <h3>3️⃣ Results</h3>
-                    <div id="quick-results" style="max-height: 300px; overflow-y: auto;">
-                        <p style="color: var(--text-muted); font-size: 0.875rem;">
-                            Results will appear here after searching
-                        </p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Memory Explorer - See REAL stored memories -->
-        <div class="card">
-            <h2>📚 Memory Explorer</h2>
-            <div style="margin-bottom: 1rem;">
-                <button onclick="loadAllUsers()" class="secondary">👥 Load Users</button>
-                <button onclick="loadUserMemories()" class="secondary">🔍 Load Memories</button>
-                <button onclick="clearExplorer()">🗑️ Clear</button>
+                <div class="section-title">Console</div>
+                <div class="console" id="console"></div>
             </div>
 
-            <div class="stats-grid">
-                <div id="users-explorer" class="stat-card">
-                    <h3>Active Users</h3>
-                    <div id="users-list" style="max-height: 300px; overflow-y: auto;">
-                        <p style="color: var(--text-muted); font-size: 0.875rem;">
-                            Click "Load Users" to see active users
-                        </p>
-                    </div>
+            <div class="canvas-container">
+                <canvas id="memoryCanvas"></canvas>
+
+                <div class="canvas-controls">
+                    <button class="canvas-btn" onclick="resetView()">Reset</button>
+                    <button class="canvas-btn" onclick="toggleAnimation()">Pause</button>
                 </div>
 
-                <div id="memories-explorer" class="stat-card" style="grid-column: span 2;">
-                    <h3>Stored Memories</h3>
-                    <div class="form-group">
-                        <input type="text" id="explorer-user" placeholder="Enter user ID to view their memories">
+                <div class="detail-panel" id="detailPanel">
+                    <div class="detail-header">
+                        <span class="detail-title">Memory Details</span>
+                        <button class="detail-close" onclick="hideDetail()">&times;</button>
                     </div>
-                    <div id="memories-list" style="max-height: 400px; overflow-y: auto;">
-                        <p style="color: var(--text-muted); font-size: 0.875rem;">
-                            Enter a user ID and click "Load Memories" to see their stored experiences
-                        </p>
+                    <div class="detail-content" id="detailContent"></div>
+                    <div class="detail-meta" id="detailMeta"></div>
+                </div>
+
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-dot high"></div>
+                        <span>High</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot medium"></div>
+                        <span>Medium</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-dot low"></div>
+                        <span>Low</span>
                     </div>
                 </div>
             </div>
-        </div>
-
-        <!-- API Testing - Like Postman -->
-        <div class="card">
-            <h2>🧪 API Testing</h2>
-
-            <div class="form-group">
-                <label>API URL</label>
-                <input type="text" id="api-url" value="http://127.0.0.1:3030">
-            </div>
-
-            <div class="form-group">
-                <label>API Key</label>
-                <input type="password" id="api-key" value="shodh-dev-key-change-in-production">
-            </div>
-
-            <button onclick="saveConfig()">💾 Save Config</button>
-            <button onclick="testConnection()" class="secondary">🔗 Test Connection</button>
-
-            <div style="margin-top: 2rem;">
-                <h3>Performance Tests</h3>
-                <div class="stats-grid">
-                    <button onclick="testRecordSpeed()">⚡ Record Speed</button>
-                    <button onclick="testSearchSpeed()">⚡ Search Speed</button>
-                    <button onclick="testBulkInsert()">⚡ Bulk Insert</button>
-                </div>
-                <div id="test-results" style="margin-top: 1rem;"></div>
-            </div>
-        </div>
-
-        <!-- API Documentation - Complete Reference -->
-        <div class="card">
-            <h2>📖 API Documentation</h2>
-            <p style="color: var(--text-muted); margin-bottom: 2rem;">
-                Complete API reference with examples. All endpoints require X-API-Key header for authentication.
-            </p>
-
-            <!-- API Categories Navigation -->
-            <div class="api-nav">
-                <button class="api-nav-btn active" onclick="showApiCategory('core')">Core Operations</button>
-                <button class="api-nav-btn" onclick="showApiCategory('users')">User Management</button>
-                <button class="api-nav-btn" onclick="showApiCategory('memory')">Memory CRUD</button>
-                <button class="api-nav-btn" onclick="showApiCategory('search')">Advanced Search</button>
-                <button class="api-nav-btn" onclick="showApiCategory('storage')">Storage & Compression</button>
-                <button class="api-nav-btn" onclick="showApiCategory('forget')">Forgetting Operations</button>
-                <button class="api-nav-btn" onclick="showApiCategory('graph')">Knowledge Graph</button>
-            </div>
-
-            <!-- Core Operations -->
-            <div id="api-core" class="api-category">
-                <h3>Core Operations</h3>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/record</code>
-                    </div>
-                    <p>Record a new experience/memory for a user</p>
-                    <div class="code-example">
-                        <div class="code-tabs">
-                            <button class="code-tab active" onclick="showCodeTab(this, 'curl')">cURL</button>
-                            <button class="code-tab" onclick="showCodeTab(this, 'python')">Python</button>
-                            <button class="code-tab" onclick="showCodeTab(this, 'json')">Response</button>
-                        </div>
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/record \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "experience": {
-      "content": "Detected obstacle at (10, 20)",
-      "metadata": {"sensor": "lidar"}
-    }
-  }'
-
-# Minimal example - just content required
-curl -X POST http://127.0.0.1:3030/api/record \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "experience": {
-      "content": "Detected obstacle at (10, 20)"
-    }
-  }'</code></pre>
-                        <pre class="code-content python" style="display:none;"><code>import requests
-
-# Full example with metadata
-response = requests.post(
-    "http://127.0.0.1:3030/api/record",
-    headers={"X-API-Key": "your-api-key"},
-    json={
-        "user_id": "robot_001",
-        "experience": {
-            "content": "Detected obstacle at (10, 20)",
-            "metadata": {"sensor": "lidar"}
-        }
-    }
-)
-print(response.json())
-
-# Minimal example - just content required
-response = requests.post(
-    "http://127.0.0.1:3030/api/record",
-    headers={"X-API-Key": "your-api-key"},
-    json={
-        "user_id": "robot_001",
-        "experience": {
-            "content": "Detected obstacle at (10, 20)"
-        }
-    }
-)
-print(response.json())</code></pre>
-                        <pre class="code-content json" style="display:none;"><code>{
-  "memory_id": "123e4567-e89b-12d3-a456-426614174000",
-  "success": true
-}</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/retrieve</code>
-                    </div>
-                    <p>Retrieve memories using semantic search</p>
-                    <div class="code-example">
-                        <div class="code-tabs">
-                            <button class="code-tab active" onclick="showCodeTab(this, 'curl')">cURL</button>
-                            <button class="code-tab" onclick="showCodeTab(this, 'python')">Python</button>
-                        </div>
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/retrieve \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "query_text": "obstacles",
-    "max_results": 10,
-    "importance_threshold": 0.5
-  }'</code></pre>
-                        <pre class="code-content python" style="display:none;"><code>response = requests.post(
-    "http://127.0.0.1:3030/api/retrieve",
-    headers={"X-API-Key": "your-api-key"},
-    json={
-        "user_id": "robot_001",
-        "query_text": "obstacles",
-        "max_results": 10
-    }
-)
-memories = response.json()["memories"]</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method get">GET</span>
-                        <code>/health</code>
-                    </div>
-                    <p>Health check endpoint (no authentication required)</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl http://127.0.0.1:3030/health</code></pre>
-                    </div>
-                </div>
-            </div>
-
-            <!-- User Management -->
-            <div id="api-users" class="api-category" style="display:none;">
-                <h3>User Management</h3>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method get">GET</span>
-                        <code>/api/users</code>
-                    </div>
-                    <p>List all active users</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method get">GET</span>
-                        <code>/api/users/{user_id}/stats</code>
-                    </div>
-                    <p>Get statistics for a specific user (total memories, compressed count, etc.)</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method delete">DELETE</span>
-                        <code>/api/users/{user_id}</code>
-                    </div>
-                    <p>Delete all data for a user (GDPR compliance)</p>
-                </div>
-            </div>
-
-            <!-- Memory CRUD -->
-            <div id="api-memory" class="api-category" style="display:none;">
-                <h3>Memory CRUD Operations</h3>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/memories</code>
-                    </div>
-                    <p>Get all memories for a user</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/memories \
-  -H "X-API-Key: your-api-key" \
-  -d '{"user_id": "robot_001", "limit": 100}'</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method get">GET</span>
-                        <code>/api/memory/{memory_id}?user_id={user_id}</code>
-                    </div>
-                    <p>Get a specific memory by ID</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method put">PUT</span>
-                        <code>/api/memory/{memory_id}</code>
-                    </div>
-                    <p>Update a memory's content</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method delete">DELETE</span>
-                        <code>/api/memory/{memory_id}?user_id={user_id}</code>
-                    </div>
-                    <p>Delete a specific memory</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/memories/history</code>
-                    </div>
-                    <p>Get audit trail/history for memories (Enterprise feature)</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/memories/history \
-  -H "X-API-Key: your-api-key" \
-  -d '{"user_id": "robot_001", "memory_id": "optional-memory-id"}'</code></pre>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Advanced Search -->
-            <div id="api-search" class="api-category" style="display:none;">
-                <h3>Advanced Search</h3>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/search/multimodal</code>
-                    </div>
-                    <p>Multi-modal search with different retrieval modes</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/search/multimodal \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "query_text": "navigation errors",
-    "mode": "hybrid",
-    "limit": 10
-  }'
-
-# Available modes:
-# - similarity: Semantic similarity search
-# - temporal: Recent memories first
-# - causal: Causal relationships
-# - associative: Association-based
-# - hybrid: Combined approach (recommended)</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/search/advanced</code>
-                    </div>
-                    <p>Advanced search with entity, date, and importance filters</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/search/advanced \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "entity_name": "obstacle_detector",
-    "start_date": "2025-01-01T00:00:00Z",
-    "end_date": "2025-12-31T23:59:59Z",
-    "min_importance": 0.5,
-    "max_importance": 1.0
-  }'</code></pre>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Storage & Compression -->
-            <div id="api-storage" class="api-category" style="display:none;">
-                <h3>Storage & Compression</h3>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/storage/stats</code>
-                    </div>
-                    <p>Get storage statistics (total size, compression ratio, etc.)</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/memory/compress</code>
-                    </div>
-                    <p>Manually compress a specific memory</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/memory/decompress</code>
-                    </div>
-                    <p>Decompress a compressed memory</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/storage/uncompressed</code>
-                    </div>
-                    <p>Get uncompressed old memories (for compression review)</p>
-                </div>
-            </div>
-
-            <!-- Forgetting Operations -->
-            <div id="api-forget" class="api-category" style="display:none;">
-                <h3>Forgetting Operations</h3>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/forget/age</code>
-                    </div>
-                    <p>Forget memories older than specified days</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/forget/age \
-  -H "X-API-Key: your-api-key" \
-  -d '{"user_id": "robot_001", "days_old": 90}'</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/forget/importance</code>
-                    </div>
-                    <p>Forget memories below importance threshold</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/forget/importance \
-  -H "X-API-Key: your-api-key" \
-  -d '{"user_id": "robot_001", "threshold": 0.3}'</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/forget/pattern</code>
-                    </div>
-                    <p>Forget memories matching a text pattern</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/forget/pattern \
-  -H "X-API-Key: your-api-key" \
-  -d '{"user_id": "robot_001", "pattern": "test_"}'</code></pre>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Knowledge Graph -->
-            <div id="api-graph" class="api-category" style="display:none;">
-                <h3>Knowledge Graph Operations</h3>
-                <p style="color: var(--text-muted); margin-bottom: 1rem;">
-                    Automatic entity extraction and relationship building from memories
-                </p>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method get">GET</span>
-                        <code>/api/graph/{user_id}/stats</code>
-                    </div>
-                    <p>Get graph statistics (entity count, relationship count, etc.)</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/graph/entity/find</code>
-                    </div>
-                    <p>Find an entity by name</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/graph/entity/add</code>
-                    </div>
-                    <p>Manually add an entity to the graph</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/graph/entity/add \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "name": "Assembly Line A",
-    "label": "Location",
-    "attributes": {"zone": "manufacturing"}
-  }'
-
-# Available labels:
-# Person, Organization, Location, Technology,
-# Concept, Event, Date, Product, Skill</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/graph/entities/all</code>
-                    </div>
-                    <p>Get all entities in the graph</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/graph/relationship/add</code>
-                    </div>
-                    <p>Add a relationship between entities</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/graph/relationship/add \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "from_entity_name": "Robot A",
-    "to_entity_name": "Assembly Line A",
-    "relation_type": "WorksAt",
-    "strength": 0.9,
-    "context": "Primary work location"
-  }'
-
-# Relation types:
-# WorksWith, WorksAt, EmployedBy, PartOf, Contains,
-# OwnedBy, LocatedIn, LocatedAt, Uses, CreatedBy,
-# DevelopedBy, Causes, ResultsIn, Learned, Knows,
-# Teaches, RelatedTo, AssociatedWith</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/graph/traverse</code>
-                    </div>
-                    <p>Traverse the graph from an entity</p>
-                    <div class="code-example">
-                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/graph/traverse \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "robot_001",
-    "entity_name": "Robot A",
-    "max_depth": 2
-  }'</code></pre>
-                    </div>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/graph/relationship/invalidate</code>
-                    </div>
-                    <p>Invalidate a relationship (temporal edge invalidation)</p>
-                </div>
-
-                <div class="endpoint">
-                    <div class="endpoint-header">
-                        <span class="method post">POST</span>
-                        <code>/api/graph/episode/get</code>
-                    </div>
-                    <p>Get an episodic memory node by UUID</p>
-                </div>
-            </div>
-        </div>
-
-        <!-- Console - See what's happening -->
-        <div class="card">
-            <h2>📟 Console</h2>
-            <div id="console"></div>
-            <button onclick="clearConsole()" style="margin-top: 1rem;">🗑️ Clear Console</button>
-        </div>
+        </main>
     </div>
 
-    <script src="/static/dashboard.js"></script>
+    <script>
+        const API = 'http://127.0.0.1:3030';
+        const KEY = 'shodh-dev-key-change-in-production';
+
+        const canvas = document.getElementById('memoryCanvas');
+        const ctx = canvas.getContext('2d');
+        let memories = [];
+        let nodes = [];
+        let animating = true;
+        let hoveredNode = null;
+        let selectedNode = null;
+
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+        }
+
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        class MemoryNode {
+            constructor(memory, index, total) {
+                this.memory = memory;
+                this.content = memory.content || memory.experience?.content || '';
+                this.score = memory.score || memory.relevance || 0.5;
+                this.id = memory.memory_id || memory.id || '';
+
+                const angle = (index / total) * Math.PI * 2 + Math.random() * 0.3;
+                const radius = 100 + Math.random() * Math.min(canvas.width, canvas.height) * 0.3;
+                this.x = canvas.width / 2 + Math.cos(angle) * radius;
+                this.y = canvas.height / 2 + Math.sin(angle) * radius;
+
+                this.radius = 6 + this.score * 18;
+                this.vx = (Math.random() - 0.5) * 0.2;
+                this.vy = (Math.random() - 0.5) * 0.2;
+
+                if (this.score > 0.7) {
+                    this.color = 'hsl(142, 71%, 45%)';
+                    this.glowColor = 'hsla(142, 71%, 45%, 0.3)';
+                } else if (this.score > 0.4) {
+                    this.color = 'hsl(215, 90%, 60%)';
+                    this.glowColor = 'hsla(215, 90%, 60%, 0.3)';
+                } else {
+                    this.color = 'hsl(215, 20%, 50%)';
+                    this.glowColor = 'hsla(215, 20%, 50%, 0.2)';
+                }
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+
+                if (this.x < this.radius || this.x > canvas.width - this.radius) this.vx *= -1;
+                if (this.y < this.radius || this.y > canvas.height - this.radius) this.vy *= -1;
+
+                this.x = Math.max(this.radius, Math.min(canvas.width - this.radius, this.x));
+                this.y = Math.max(this.radius, Math.min(canvas.height - this.radius, this.y));
+            }
+
+            draw(isHovered, isSelected) {
+                if (isHovered || isSelected) {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.radius + 12, 0, Math.PI * 2);
+                    ctx.fillStyle = this.glowColor;
+                    ctx.fill();
+                }
+
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+
+                const gradient = ctx.createRadialGradient(
+                    this.x - this.radius/3, this.y - this.radius/3, 0,
+                    this.x, this.y, this.radius
+                );
+                gradient.addColorStop(0, this.color);
+                gradient.addColorStop(1, this.darken(this.color));
+                ctx.fillStyle = gradient;
+                ctx.fill();
+
+                ctx.strokeStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.2)';
+                ctx.lineWidth = isSelected ? 2 : 1;
+                ctx.stroke();
+
+                if (isHovered || isSelected) {
+                    const preview = this.content.slice(0, 25) + (this.content.length > 25 ? '...' : '');
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '11px Inter, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(preview, this.x, this.y + this.radius + 16);
+                }
+            }
+
+            darken(hsl) {
+                return hsl.replace(/(\d+)%\)$/, (m, l) => Math.max(0, parseInt(l) - 15) + '%)');
+            }
+
+            contains(x, y) {
+                const dx = x - this.x;
+                const dy = y - this.y;
+                return Math.sqrt(dx * dx + dy * dy) < this.radius + 5;
+            }
+        }
+
+        function drawConnections() {
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    const dx = nodes[i].x - nodes[j].x;
+                    const dy = nodes[i].y - nodes[j].y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < 180) {
+                        const alpha = (1 - dist / 180) * 0.12;
+                        ctx.strokeStyle = `rgba(100, 150, 255, ${alpha})`;
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(nodes[i].x, nodes[i].y);
+                        ctx.lineTo(nodes[j].x, nodes[j].y);
+                        ctx.stroke();
+                    }
+                }
+            }
+        }
+
+        function animate() {
+            ctx.fillStyle = 'hsl(222, 84%, 5%)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (nodes.length === 0) {
+                ctx.fillStyle = 'hsl(215, 20%, 50%)';
+                ctx.font = '14px Inter, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('No memories loaded', canvas.width / 2, canvas.height / 2);
+                ctx.font = '12px Inter, sans-serif';
+                ctx.fillStyle = 'hsl(215, 20%, 40%)';
+                ctx.fillText('Store or search to visualize', canvas.width / 2, canvas.height / 2 + 22);
+            } else {
+                drawConnections();
+                nodes.forEach(node => {
+                    if (animating) node.update();
+                    node.draw(node === hoveredNode, node === selectedNode);
+                });
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            hoveredNode = null;
+            for (const node of nodes) {
+                if (node.contains(x, y)) {
+                    hoveredNode = node;
+                    canvas.style.cursor = 'pointer';
+                    break;
+                }
+            }
+            if (!hoveredNode) canvas.style.cursor = 'default';
+        });
+
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            for (const node of nodes) {
+                if (node.contains(x, y)) {
+                    selectedNode = node;
+                    showDetail(node);
+                    return;
+                }
+            }
+            selectedNode = null;
+            hideDetail();
+        });
+
+        function showDetail(node) {
+            document.getElementById('detailContent').textContent = node.content;
+            document.getElementById('detailMeta').innerHTML =
+                `ID: ${node.id.slice(0, 12)}... <span class="detail-score">${(node.score * 100).toFixed(0)}%</span>`;
+            document.getElementById('detailPanel').classList.add('visible');
+        }
+
+        function hideDetail() {
+            document.getElementById('detailPanel').classList.remove('visible');
+            selectedNode = null;
+        }
+
+        function resetView() {
+            nodes.forEach((node, i) => {
+                const angle = (i / nodes.length) * Math.PI * 2;
+                const radius = 100 + Math.random() * Math.min(canvas.width, canvas.height) * 0.3;
+                node.x = canvas.width / 2 + Math.cos(angle) * radius;
+                node.y = canvas.height / 2 + Math.sin(angle) * radius;
+            });
+        }
+
+        function toggleAnimation() {
+            animating = !animating;
+            document.querySelector('.canvas-btn:nth-child(2)').textContent = animating ? 'Pause' : 'Play';
+        }
+
+        function createNodes(list) {
+            nodes = list.map((mem, i) => new MemoryNode(mem, i, list.length));
+        }
+
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${API}/health`);
+                document.getElementById('statusDot').className = res.ok ? 'status-dot' : 'status-dot offline';
+                document.getElementById('statusText').textContent = res.ok ? 'Connected' : 'Error';
+                if (res.ok) log('Connected', 'success');
+            } catch (e) {
+                document.getElementById('statusDot').className = 'status-dot offline';
+                document.getElementById('statusText').textContent = 'Offline';
+            }
+        }
+
+        async function storeMemory() {
+            const userId = document.getElementById('userId').value.trim();
+            const content = document.getElementById('content').value.trim();
+            if (!userId || !content) return log('Missing input', 'error');
+
+            const start = performance.now();
+            try {
+                const res = await fetch(`${API}/api/record`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },
+                    body: JSON.stringify({ user_id: userId, experience: { content } })
+                });
+                document.getElementById('lastLatency').textContent = (performance.now() - start).toFixed(0) + 'ms';
+                if (res.ok) {
+                    const data = await res.json();
+                    log(`Stored: ${data.memory_id.slice(0, 8)}...`, 'success');
+                    document.getElementById('content').value = '';
+                    loadAll();
+                } else log('Store failed', 'error');
+            } catch (e) { log('Error: ' + e.message, 'error'); }
+        }
+
+        async function searchMemories() {
+            const userId = document.getElementById('userId').value.trim();
+            const query = document.getElementById('query').value.trim();
+            if (!userId || !query) return log('Missing input', 'error');
+
+            const start = performance.now();
+            try {
+                const res = await fetch(`${API}/api/retrieve`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },
+                    body: JSON.stringify({ user_id: userId, query, limit: 50 })
+                });
+                document.getElementById('lastLatency').textContent = (performance.now() - start).toFixed(0) + 'ms';
+                if (res.ok) {
+                    const data = await res.json();
+                    memories = data.memories || [];
+                    createNodes(memories);
+                    log(`Found ${memories.length} results`, 'info');
+                } else log('Search failed', 'error');
+            } catch (e) { log('Error: ' + e.message, 'error'); }
+        }
+
+        async function loadAll() {
+            const userId = document.getElementById('userId').value.trim();
+            if (!userId) return log('Missing user ID', 'error');
+
+            const start = performance.now();
+            try {
+                const res = await fetch(`${API}/api/memories`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },
+                    body: JSON.stringify({ user_id: userId })
+                });
+                document.getElementById('lastLatency').textContent = (performance.now() - start).toFixed(0) + 'ms';
+                if (res.ok) {
+                    const data = await res.json();
+                    memories = data.memories || [];
+                    createNodes(memories);
+                    document.getElementById('totalMemories').textContent = memories.length;
+                    log(`Loaded ${memories.length} memories`, 'info');
+                } else log('Load failed', 'error');
+            } catch (e) { log('Error: ' + e.message, 'error'); }
+        }
+
+        function log(msg, type = '') {
+            const c = document.getElementById('console');
+            const line = document.createElement('div');
+            line.className = 'console-line ' + type;
+            line.textContent = `[${new Date().toLocaleTimeString('en-US', {hour12: false})}] ${msg}`;
+            c.appendChild(line);
+            c.scrollTop = c.scrollHeight;
+        }
+
+        checkHealth();
+        setInterval(checkHealth, 10000);
+
+        document.getElementById('content').addEventListener('keydown', e => {
+            if (e.key === 'Enter' && e.ctrlKey) storeMemory();
+        });
+        document.getElementById('query').addEventListener('keydown', e => {
+            if (e.key === 'Enter') searchMemories();
+        });
+    </script>
 </body>
 </html>

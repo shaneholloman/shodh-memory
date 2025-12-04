@@ -594,6 +594,58 @@ class Memory:
         _handle_response_error(response, context=f"delete user {self.user_id}")
         print(f"🧠 All memories deleted for user: {self.user_id}")
 
+    def visualize(self, open_browser: bool = True) -> str:
+        """Open memory visualization dashboard in browser
+
+        Args:
+            open_browser: Automatically open browser (default: True)
+
+        Returns:
+            URL of the visualization dashboard
+        """
+        url = f"{self.base_url}/static/index.html?user_id={self.user_id}"
+        if open_browser:
+            import webbrowser
+            webbrowser.open(url)
+        return url
+
+    def graph_stats(self) -> dict:
+        """Get memory graph statistics
+
+        Returns:
+            Dict with node/edge counts per memory tier
+        """
+        try:
+            response = self._session.get(
+                f"{self.base_url}/api/visualization/{self.user_id}/stats",
+                timeout=self.timeout
+            )
+        except requests.exceptions.ConnectionError as e:
+            raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
+
+        _handle_response_error(response, context="graph stats")
+        return response.json()
+
+    def export_graph(self, format: str = "dot") -> str:
+        """Export memory graph in specified format
+
+        Args:
+            format: Export format ('dot' for Graphviz)
+
+        Returns:
+            Graph data as string
+        """
+        try:
+            response = self._session.get(
+                f"{self.base_url}/api/visualization/{self.user_id}/dot",
+                timeout=self.timeout
+            )
+        except requests.exceptions.ConnectionError as e:
+            raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
+
+        _handle_response_error(response, context="export graph")
+        return response.text
+
     def __enter__(self):
         """Context manager support"""
         return self
