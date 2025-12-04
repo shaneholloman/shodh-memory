@@ -717,14 +717,54 @@ impl EntityExtractor {
 
         // Common words that are capitalized at sentence start but aren't entities
         let stop_words: HashSet<String> = vec![
-            "the", "a", "an", "this", "that", "these", "those",
-            "i", "we", "you", "he", "she", "it", "they",
-            "is", "are", "was", "were", "been", "being",
-            "have", "has", "had", "do", "does", "did",
-            "will", "would", "could", "should", "may", "might",
-            "if", "when", "where", "what", "why", "how",
-            "user", "error", "task", "code", "pattern", "search",
-            "discovered", "completed", "performed", "mentioned",
+            "the",
+            "a",
+            "an",
+            "this",
+            "that",
+            "these",
+            "those",
+            "i",
+            "we",
+            "you",
+            "he",
+            "she",
+            "it",
+            "they",
+            "is",
+            "are",
+            "was",
+            "were",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "could",
+            "should",
+            "may",
+            "might",
+            "if",
+            "when",
+            "where",
+            "what",
+            "why",
+            "how",
+            "user",
+            "error",
+            "task",
+            "code",
+            "pattern",
+            "search",
+            "discovered",
+            "completed",
+            "performed",
+            "mentioned",
         ]
         .into_iter()
         .map(String::from)
@@ -741,16 +781,16 @@ impl EntityExtractor {
     /// Calculate base salience for an entity based on its type and detection confidence
     fn calculate_base_salience(label: &EntityLabel, is_proper_noun: bool) -> f32 {
         let type_salience = match label {
-            EntityLabel::Person => 0.8,        // People are highly salient
-            EntityLabel::Organization => 0.7,  // Organizations are important
-            EntityLabel::Location => 0.6,      // Locations matter for context
-            EntityLabel::Technology => 0.6,    // Tech keywords matter for dev context
-            EntityLabel::Product => 0.7,       // Products are specific entities
-            EntityLabel::Event => 0.6,         // Events are temporal anchors
-            EntityLabel::Skill => 0.5,         // Skills are somewhat important
-            EntityLabel::Concept => 0.4,       // Concepts are more generic
-            EntityLabel::Date => 0.3,          // Dates are structural, not salient
-            EntityLabel::Other(_) => 0.3,      // Unknown types get low salience
+            EntityLabel::Person => 0.8,       // People are highly salient
+            EntityLabel::Organization => 0.7, // Organizations are important
+            EntityLabel::Location => 0.6,     // Locations matter for context
+            EntityLabel::Technology => 0.6,   // Tech keywords matter for dev context
+            EntityLabel::Product => 0.7,      // Products are specific entities
+            EntityLabel::Event => 0.6,        // Events are temporal anchors
+            EntityLabel::Skill => 0.5,        // Skills are somewhat important
+            EntityLabel::Concept => 0.4,      // Concepts are more generic
+            EntityLabel::Date => 0.3,         // Dates are structural, not salient
+            EntityLabel::Other(_) => 0.3,     // Unknown types get low salience
         };
 
         // Proper nouns get a 20% boost

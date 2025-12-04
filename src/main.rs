@@ -661,7 +661,9 @@ impl MultiUserMemoryManager {
         let graph_guard = graph.write();
 
         // Extract entities from the experience content with salience information
-        let extracted_entities = self.entity_extractor.extract_with_salience(&experience.content);
+        let extracted_entities = self
+            .entity_extractor
+            .extract_with_salience(&experience.content);
 
         let mut entity_uuids = Vec::new();
 
@@ -1060,22 +1062,30 @@ async fn retrieve_memories(
                         // For each query entity, find related memories through graph
                         // Use SALIENCE for boost - high-salience entities (gravitational wells) provide stronger boost
                         for (entity_name, _) in &query_entities {
-                            if let Ok(Some(entity_node)) = graph_guard.find_entity_by_name(entity_name) {
+                            if let Ok(Some(entity_node)) =
+                                graph_guard.find_entity_by_name(entity_name)
+                            {
                                 // Get episodes (memories) connected to this entity
-                                if let Ok(episodes) = graph_guard.get_episodes_by_entity(&entity_node.uuid) {
+                                if let Ok(episodes) =
+                                    graph_guard.get_episodes_by_entity(&entity_node.uuid)
+                                {
                                     for episode in episodes {
                                         // Boost = entity salience * 0.5 (high-salience entities give stronger boost)
                                         // A salience of 1.0 gives 50% boost, salience of 0.3 gives 15% boost
                                         let boost = entity_node.salience * 0.5;
-                                        *memory_graph_boosts.entry(episode.uuid).or_insert(0.0) += boost;
+                                        *memory_graph_boosts.entry(episode.uuid).or_insert(0.0) +=
+                                            boost;
                                     }
                                 }
 
                                 // Also traverse 1-hop relationships for indirect activation
                                 // Indirect connections are weighted by edge strength AND connected entity salience
-                                if let Ok(edges) = graph_guard.get_entity_relationships(&entity_node.uuid) {
+                                if let Ok(edges) =
+                                    graph_guard.get_entity_relationships(&entity_node.uuid)
+                                {
                                     for edge in edges {
-                                        let connected_uuid = if edge.from_entity == entity_node.uuid {
+                                        let connected_uuid = if edge.from_entity == entity_node.uuid
+                                        {
                                             edge.to_entity
                                         } else {
                                             edge.from_entity
@@ -1089,11 +1099,16 @@ async fn retrieve_memories(
                                             .map(|e| e.salience)
                                             .unwrap_or(0.3);
 
-                                        if let Ok(connected_episodes) = graph_guard.get_episodes_by_entity(&connected_uuid) {
+                                        if let Ok(connected_episodes) =
+                                            graph_guard.get_episodes_by_entity(&connected_uuid)
+                                        {
                                             for episode in connected_episodes {
                                                 // Decayed boost: edge_strength * connected_salience * decay_factor
-                                                let boost = edge.strength * connected_salience * 0.3;
-                                                *memory_graph_boosts.entry(episode.uuid).or_insert(0.0) += boost;
+                                                let boost =
+                                                    edge.strength * connected_salience * 0.3;
+                                                *memory_graph_boosts
+                                                    .entry(episode.uuid)
+                                                    .or_insert(0.0) += boost;
                                             }
                                         }
                                     }
@@ -1126,7 +1141,10 @@ async fn retrieve_memories(
 
                         // Get graph boost (if any)
                         let graph_boost = memory_graph_boosts
-                            .get(&uuid::Uuid::parse_str(&memory.id.0.to_string()).unwrap_or_default())
+                            .get(
+                                &uuid::Uuid::parse_str(&memory.id.0.to_string())
+                                    .unwrap_or_default(),
+                            )
                             .copied()
                             .unwrap_or(0.0)
                             .min(1.0); // Cap boost at 100%
@@ -2184,7 +2202,12 @@ async fn add_entity(
     };
 
     // Detect if proper noun (simple heuristic: first char is uppercase)
-    let is_proper_noun = req.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+    let is_proper_noun = req
+        .name
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false);
 
     // Calculate base salience based on entity type and proper noun status
     let type_salience = match &entity_label {
