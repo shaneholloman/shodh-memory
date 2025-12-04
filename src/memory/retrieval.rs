@@ -4,8 +4,11 @@
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::info;
 
 use super::storage::{MemoryStorage, SearchCriteria};
 use super::types::*;
@@ -19,9 +22,12 @@ pub struct RetrievalEngine {
     vector_index: Arc<RwLock<VamanaIndex>>,
     id_mapping: Arc<RwLock<IdMapping>>,
     graph: RwLock<MemoryGraph>, // Interior mutability for graph updates
+    /// Storage path for persisting vector index and ID mapping
+    storage_path: PathBuf,
 }
 
 /// Bidirectional mapping between memory IDs and vector IDs
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct IdMapping {
     memory_to_vector: HashMap<MemoryId, u32>,
     vector_to_memory: HashMap<u32, MemoryId>,
@@ -43,11 +49,21 @@ impl IdMapping {
     fn get_memory_id(&self, vector_id: u32) -> Option<&MemoryId> {
         self.vector_to_memory.get(&vector_id)
     }
+
+    fn len(&self) -> usize {
+        self.memory_to_vector.len()
+    }
 }
 
 impl RetrievalEngine {
     /// Create new retrieval engine with shared embedder (CRITICAL: embedder loaded only once)
+    ///
+    /// Automatically loads persisted vector index and ID mapping if they exist.
     pub fn new(storage: Arc<MemoryStorage>, embedder: Arc<MiniLMEmbedder>) -> Result<Self> {
+        // Get storage path from MemoryStorage for persistence
+        let storage_path = storage.path().to_path_buf();
+        let index_path = storage_path.join("vector_index");
+
         // Initialize Vamana index optimized for robotics (low memory)
         let vamana_config = VamanaConfig {
             dimension: 384,       // MiniLM dimension
@@ -57,15 +73,91 @@ impl RetrievalEngine {
             use_mmap: false, // Keep in memory for robotics
         };
 
-        let vector_index = Arc::new(RwLock::new(VamanaIndex::new(vamana_config)?));
+        let mut vector_index = VamanaIndex::new(vamana_config)?;
+        let mut id_mapping = IdMapping::new();
+
+        // Try to load persisted index and ID mapping
+        let index_file = index_path.join("vamana_index.bin");
+        let mapping_file = index_path.join("id_mapping.bin");
+
+        if index_file.exists() && mapping_file.exists() {
+            match vector_index.load(&index_path) {
+                Ok(_) => {
+                    // Load ID mapping
+                    match Self::load_id_mapping(&mapping_file) {
+                        Ok(mapping) => {
+                            id_mapping = mapping;
+                            info!(
+                                "Loaded persisted vector index with {} vectors and {} ID mappings",
+                                vector_index.len(),
+                                id_mapping.len()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load ID mapping, starting fresh: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load vector index, starting fresh: {}", e);
+                }
+            }
+        } else {
+            info!("No persisted vector index found, starting with empty index");
+        }
 
         Ok(Self {
             storage,
             embedder,
-            vector_index,
-            id_mapping: Arc::new(RwLock::new(IdMapping::new())),
+            vector_index: Arc::new(RwLock::new(vector_index)),
+            id_mapping: Arc::new(RwLock::new(id_mapping)),
             graph: RwLock::new(MemoryGraph::new()),
+            storage_path,
         })
+    }
+
+    /// Load ID mapping from file
+    fn load_id_mapping(path: &Path) -> Result<IdMapping> {
+        let file = File::open(path).context("Failed to open ID mapping file")?;
+        let reader = BufReader::new(file);
+        bincode::deserialize_from(reader).context("Failed to deserialize ID mapping")
+    }
+
+    /// Save vector index and ID mapping to disk
+    ///
+    /// Called during flush_storage to persist the index for restart recovery.
+    pub fn save(&self) -> Result<()> {
+        let index_path = self.storage_path.join("vector_index");
+        fs::create_dir_all(&index_path)?;
+
+        // Save Vamana index
+        let index = self.vector_index.read();
+        index.save(&index_path)?;
+
+        // Save ID mapping
+        let mapping_file = index_path.join("id_mapping.bin");
+        let id_mapping = self.id_mapping.read();
+        let file = File::create(&mapping_file).context("Failed to create ID mapping file")?;
+        let writer = BufWriter::new(file);
+        bincode::serialize_into(writer, &*id_mapping).context("Failed to serialize ID mapping")?;
+
+        info!(
+            "Saved vector index with {} vectors and {} ID mappings",
+            index.len(),
+            id_mapping.len()
+        );
+
+        Ok(())
+    }
+
+    /// Get number of vectors in the index
+    pub fn len(&self) -> usize {
+        self.id_mapping.read().len()
+    }
+
+    /// Check if index is empty
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Add memory to vector index (call when storing new memory)
@@ -230,7 +322,10 @@ impl RetrievalEngine {
     }
 
     /// Check if memory matches query filters
-    fn matches_filters(&self, memory: &Memory, query: &Query) -> bool {
+    ///
+    /// This is the CANONICAL filter implementation. All retrieval paths MUST use this
+    /// to ensure consistent filtering behavior (mission_id, robot_id, geo, etc.)
+    pub fn matches_filters(&self, memory: &Memory, query: &Query) -> bool {
         // === Standard Filters ===
 
         // Importance filter

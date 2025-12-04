@@ -841,7 +841,10 @@ fn test_long_term_potentiation_threshold() {
     let entity_b = Uuid::new_v4();
 
     let mut edge = create_relationship(entity_a, entity_b, RelationType::Knows, 0.5);
-    assert!(!edge.potentiated, "Edge should not be potentiated initially");
+    assert!(
+        !edge.potentiated,
+        "Edge should not be potentiated initially"
+    );
 
     // Strengthen 9 times (below threshold of 10)
     for _ in 0..9 {

@@ -9,7 +9,9 @@ license = "Apache-2.0"
 [lib]
 name = "shodh_memory"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]  # cdylib for Python, rlib for Rust
+# Use only rlib for normal builds (tests, benchmarks, etc)
+# For Python bindings, use: cargo build --features python (generates cdylib)
+crate-type = ["rlib"]
 
 [[bin]]
 name = "shodh-memory-server"
@@ -103,6 +105,10 @@ tempfile = "3.8"
 
 [[bench]]
 name = "memory_benchmarks"
+harness = false
+
+[[bench]]
+name = "graph_benchmarks"
 harness = false
 
 [profile.release]

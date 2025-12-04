@@ -109,6 +109,16 @@ impl VamanaIndex {
         })
     }
 
+    /// Get number of vectors in the index
+    pub fn len(&self) -> usize {
+        self.num_vectors
+    }
+
+    /// Check if index is empty
+    pub fn is_empty(&self) -> bool {
+        self.num_vectors == 0
+    }
+
     /// Build index from vectors using Vamana algorithm
     pub fn build(&mut self, vectors: Vec<Vec<f32>>) -> Result<()> {
         if vectors.is_empty() {

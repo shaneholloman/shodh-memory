@@ -3,9 +3,9 @@
 use anyhow::{anyhow, Context, Result};
 use bincode;
 use chrono::{DateTime, Utc};
-use rocksdb::{IteratorMode, Options, WriteBatch, DB};
+use rocksdb::{IteratorMode, Options, WriteBatch, WriteOptions, DB};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::types::*;
@@ -14,6 +14,8 @@ use super::types::*;
 pub struct MemoryStorage {
     db: Arc<DB>,
     index_db: Arc<DB>, // Secondary indices
+    /// Base storage path for all memory data
+    storage_path: PathBuf,
 }
 
 impl MemoryStorage {
@@ -21,26 +23,40 @@ impl MemoryStorage {
         // Create directories if they don't exist
         std::fs::create_dir_all(path)?;
 
-        // Configure RocksDB options for PRODUCTION performance
+        // Configure RocksDB options for PRODUCTION durability + performance
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
 
-        // Write performance optimizations
-        opts.set_max_write_buffer_number(6); // 2x increase for write-heavy workload
-        opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB write buffer
-        opts.set_level_zero_file_num_compaction_trigger(4); // Trigger compaction earlier
-        opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
-        opts.set_max_bytes_for_level_base(512 * 1024 * 1024); // 512MB base level
+        // ========================================================================
+        // DURABILITY SETTINGS - Critical for data persistence across restarts
+        // ========================================================================
+        //
+        // RocksDB data flow: Write → WAL → Memtable → SST files
+        // Without proper sync, data in memtable can be lost on crash/restart
+        //
+        // Our approach: Sync WAL on every write (most durable option)
+        // This ensures data survives even if process crashes before memtable flush
+        // ========================================================================
+
+        // WAL stays in default location (same as data dir) - avoids corruption issues
+        opts.set_manual_wal_flush(false); // Auto-flush WAL entries
+
+        // Write performance optimizations (balanced with durability)
+        opts.set_max_write_buffer_number(4);
+        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB write buffer
+        opts.set_level_zero_file_num_compaction_trigger(4);
+        opts.set_target_file_size_base(64 * 1024 * 1024);
+        opts.set_max_bytes_for_level_base(256 * 1024 * 1024);
         opts.set_max_background_jobs(4);
         opts.set_level_compaction_dynamic_level_bytes(true);
 
-        // Read performance optimizations (CRITICAL for retrieval speed)
+        // Read performance optimizations
         use rocksdb::{BlockBasedOptions, Cache};
         let mut block_opts = BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false); // 10 bits per key - MASSIVE read speedup
-        block_opts.set_block_cache(&Cache::new_lru_cache(256 * 1024 * 1024)); // 256MB block cache
-        block_opts.set_cache_index_and_filter_blocks(true); // Cache index/filter blocks
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_cache(&Cache::new_lru_cache(256 * 1024 * 1024));
+        block_opts.set_cache_index_and_filter_blocks(true);
         opts.set_block_based_table_factory(&block_opts);
 
         // Open main database
@@ -51,10 +67,23 @@ impl MemoryStorage {
         let index_path = path.join("memory_index");
         let index_db = Arc::new(DB::open(&opts, index_path)?);
 
-        Ok(Self { db, index_db })
+        Ok(Self {
+            db,
+            index_db,
+            storage_path: path.to_path_buf(),
+        })
     }
 
-    /// Store a memory
+    /// Get the base storage path
+    pub fn path(&self) -> &Path {
+        &self.storage_path
+    }
+
+    /// Store a memory with durable write (WAL sync)
+    ///
+    /// PRODUCTION: Uses sync writes to ensure data survives crashes/restarts.
+    /// The sync flag causes RocksDB to fsync() the WAL before returning,
+    /// guaranteeing the write is on stable storage.
     pub fn store(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();
 
@@ -62,12 +91,18 @@ impl MemoryStorage {
         let value = bincode::serialize(memory)
             .context(format!("Failed to serialize memory {}", memory.id.0))?;
 
-        // Store in main database
+        // DURABILITY: Use sync writes to ensure data persists across restarts
+        // This is the fundamental fix - without sync, data stays in OS page cache
+        // and can be lost if process exits before fsync
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(true); // fsync() WAL before returning
+
+        // Store in main database with sync
         self.db
-            .put(key, &value)
+            .put_opt(key, &value, &write_opts)
             .context(format!("Failed to put memory {} in RocksDB", memory.id.0))?;
 
-        // Update indices
+        // Update indices (also with sync for consistency)
         self.update_indices(memory)?;
 
         Ok(())
@@ -142,7 +177,10 @@ impl MemoryStorage {
             batch.put(reward_key.as_bytes(), b"1");
         }
 
-        self.index_db.write(batch)?;
+        // DURABILITY: Sync write for index consistency
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(true);
+        self.index_db.write_opt(batch, &write_opts)?;
         Ok(())
     }
 
@@ -166,11 +204,15 @@ impl MemoryStorage {
         self.store(memory)
     }
 
-    /// Delete a memory
+    /// Delete a memory with durable write
     #[allow(unused)] // Public API - available for memory management
     pub fn delete(&self, id: &MemoryId) -> Result<()> {
         let key = id.0.as_bytes();
-        self.db.delete(key)?;
+
+        // DURABILITY: Sync write for delete operations
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(true);
+        self.db.delete_opt(key, &write_opts)?;
 
         // Clean up indices
         self.remove_from_indices(id)?;
@@ -206,7 +248,10 @@ impl MemoryStorage {
             }
         }
 
-        self.index_db.write(batch)?;
+        // DURABILITY: Sync write for index consistency
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(true);
+        self.index_db.write_opt(batch, &write_opts)?;
         Ok(())
     }
 
@@ -565,9 +610,13 @@ impl MemoryStorage {
         Ok(memories)
     }
 
-    /// Mark memories as forgotten (soft delete)
+    /// Mark memories as forgotten (soft delete) with durable writes
     pub fn mark_forgotten_by_age(&self, cutoff: DateTime<Utc>) -> Result<usize> {
         let mut count = 0;
+
+        // DURABILITY: Sync write for data integrity
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(true);
 
         let iter = self.db.iterator(IteratorMode::Start);
         for (key, value) in iter.flatten() {
@@ -584,7 +633,7 @@ impl MemoryStorage {
                         .insert("forgotten_at".to_string(), Utc::now().to_rfc3339());
 
                     let updated_value = bincode::serialize(&memory)?;
-                    self.db.put(&key, updated_value)?;
+                    self.db.put_opt(&key, updated_value, &write_opts)?;
                     count += 1;
                 }
             }
@@ -593,9 +642,13 @@ impl MemoryStorage {
         Ok(count)
     }
 
-    /// Mark memories with low importance as forgotten
+    /// Mark memories with low importance as forgotten with durable writes
     pub fn mark_forgotten_by_importance(&self, threshold: f32) -> Result<usize> {
         let mut count = 0;
+
+        // DURABILITY: Sync write for data integrity
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(true);
 
         let iter = self.db.iterator(IteratorMode::Start);
         for (key, value) in iter.flatten() {
@@ -611,7 +664,7 @@ impl MemoryStorage {
                         .insert("forgotten_at".to_string(), Utc::now().to_rfc3339());
 
                     let updated_value = bincode::serialize(&memory)?;
-                    self.db.put(&key, updated_value)?;
+                    self.db.put_opt(&key, updated_value, &write_opts)?;
                     count += 1;
                 }
             }
@@ -620,7 +673,7 @@ impl MemoryStorage {
         Ok(count)
     }
 
-    /// Remove memories matching a pattern
+    /// Remove memories matching a pattern with durable writes
     pub fn remove_matching(&self, regex: &regex::Regex) -> Result<usize> {
         let mut count = 0;
         let mut to_delete = Vec::new();
@@ -635,8 +688,12 @@ impl MemoryStorage {
             }
         }
 
+        // DURABILITY: Sync write for delete operations
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(true);
+
         for key in to_delete {
-            self.db.delete(&key)?;
+            self.db.delete_opt(&key, &write_opts)?;
         }
 
         Ok(count)
@@ -657,18 +714,46 @@ impl MemoryStorage {
     /// Get statistics about stored memories
     pub fn get_stats(&self) -> Result<StorageStats> {
         let mut stats = StorageStats::default();
+        let mut raw_count = 0;
+        let mut deserialize_errors = 0;
 
         let iter = self.db.iterator(IteratorMode::Start);
-        for (_, value) in iter.flatten() {
-            if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
-                stats.total_count += 1;
-                stats.total_size_bytes += value.len();
-                if memory.compressed {
-                    stats.compressed_count += 1;
+        for item in iter {
+            match item {
+                Ok((key, value)) => {
+                    raw_count += 1;
+                    match bincode::deserialize::<Memory>(&value) {
+                        Ok(memory) => {
+                            stats.total_count += 1;
+                            stats.total_size_bytes += value.len();
+                            if memory.compressed {
+                                stats.compressed_count += 1;
+                            }
+                            stats.importance_sum += memory.importance();
+                        }
+                        Err(e) => {
+                            deserialize_errors += 1;
+                            tracing::warn!(
+                                "Failed to deserialize memory (key len: {}, value len: {}): {}",
+                                key.len(),
+                                value.len(),
+                                e
+                            );
+                        }
+                    }
                 }
-                stats.importance_sum += memory.importance();
+                Err(e) => {
+                    tracing::error!("Iterator error: {}", e);
+                }
             }
         }
+
+        tracing::debug!(
+            "get_stats: raw_count={}, deserialized={}, errors={}",
+            raw_count,
+            stats.total_count,
+            deserialize_errors
+        );
 
         if stats.total_count > 0 {
             stats.average_importance = stats.importance_sum / stats.total_count as f32;
@@ -679,14 +764,20 @@ impl MemoryStorage {
 
     /// Flush both databases to ensure all data is persisted (critical for graceful shutdown)
     pub fn flush(&self) -> Result<()> {
+        use rocksdb::FlushOptions;
+
+        // Create flush options with explicit wait
+        let mut flush_opts = FlushOptions::default();
+        flush_opts.set_wait(true); // Block until flush is complete
+
         // Flush main memory database
         self.db
-            .flush()
+            .flush_opt(&flush_opts)
             .map_err(|e| anyhow::anyhow!("Failed to flush main database: {e}"))?;
 
         // Flush index database
         self.index_db
-            .flush()
+            .flush_opt(&flush_opts)
             .map_err(|e| anyhow::anyhow!("Failed to flush index database: {e}"))?;
 
         Ok(())

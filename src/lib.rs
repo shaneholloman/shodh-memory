@@ -28,5 +28,8 @@ pub mod tracing_setup;
 pub mod validation;
 pub mod vector_db;
 
+// Re-export uuid to ensure tests use the same version
+pub use uuid;
+
 #[cfg(feature = "python")]
 pub mod python;
