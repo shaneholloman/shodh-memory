@@ -1,12 +1,13 @@
 {
-  "$schema": "https://registry.modelcontextprotocol.io/schema/server.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
   "name": "io.github.varun29ankuS/shodh-memory",
-  "description": "Persistent AI memory with semantic search. Store observations, decisions, learnings, and recall them across sessions using vector similarity.",
-  "version": "0.1.0",
+  "description": "Persistent AI memory with semantic search. Store and recall context across sessions.",
   "repository": {
     "url": "https://github.com/varun29ankuS/shodh-memory",
-    "source": "https://github.com/varun29ankuS/shodh-memory/tree/main/mcp-server"
+    "source": "github",
+    "subfolder": "mcp-server"
   },
+  "version": "0.1.0",
   "packages": [
     {
       "registryType": "npm",
@@ -14,35 +15,32 @@
       "version": "0.1.0",
       "transport": {
         "type": "stdio"
-      }
-    }
-  ],
-  "tools": [
-    {
-      "name": "remember",
-      "description": "Store a memory for future recall"
-    },
-    {
-      "name": "recall",
-      "description": "Semantic search to find relevant memories"
-    },
-    {
-      "name": "list_memories",
-      "description": "List all stored memories"
-    },
-    {
-      "name": "forget",
-      "description": "Delete a specific memory"
-    },
-    {
-      "name": "memory_stats",
-      "description": "Get memory statistics"
-    }
-  ],
-  "resources": [
-    {
-      "uriPattern": "memory://{memory_id}",
-      "description": "Individual memory entries"
+      },
+      "environmentVariables": [
+        {
+          "name": "SHODH_API_URL",
+          "description": "URL of the shodh-memory backend server",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "default": "http://127.0.0.1:3030"
+        },
+        {
+          "name": "SHODH_API_KEY",
+          "description": "API key for authentication",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "SHODH_USER_ID",
+          "description": "User ID for memory isolation",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "default": "default"
+        }
+      ]
     }
   ]
 }
