@@ -24,7 +24,9 @@ Shodh-Memory fixes that. It's a cognitive memory system—Hebbian learning, acti
 
 **How it works:**
 
-Experiences flow through three tiers based on Cowan's working memory model [1]. New information enters capacity-limited working memory, overflows into session storage, and consolidates into long-term memory based on importance. When memories are retrieved together successfully, their connections strengthen—classic Hebbian learning [2]. After enough co-activations, those connections become permanent. Unused memories naturally fade. The system learns what matters to *you*.
+Experiences flow through three tiers based on Cowan's working memory model
+[1]. New information enters capacity-limited working memory, overflows into session storage, and consolidates into long-term memory based on importance. When memories are retrieved together successfully, their connections strengthen—classic Hebbian learning
+[2]. After enough co-activations, those connections become permanent. Unused memories naturally fade. The system learns what matters to *you*.
 
 **What you get:**
 
