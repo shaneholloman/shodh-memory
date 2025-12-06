@@ -844,7 +844,11 @@ impl RetrievalEngine {
 
                         // PERSIST: Write access update to storage
                         if let Err(e) = self.storage.update(&memory) {
-                            tracing::warn!("Failed to persist access update for memory {}: {}", id.0, e);
+                            tracing::warn!(
+                                "Failed to persist access update for memory {}: {}",
+                                id.0,
+                                e
+                            );
                         }
                     }
                 }

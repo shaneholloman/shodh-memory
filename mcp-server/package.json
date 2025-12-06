@@ -1,30 +1,46 @@
 {
   "name": "@shodh/memory-mcp",
   "version": "0.1.0",
-  "description": "MCP server for Shodh-Memory - gives Claude persistent memory",
+  "mcpName": "io.github.varun29ankuS/shodh-memory",
+  "description": "MCP server for persistent AI memory - store and recall context across sessions",
   "type": "module",
-  "main": "index.ts",
+  "main": "dist/index.js",
   "bin": {
-    "shodh-memory-mcp": "./index.ts"
+    "shodh-memory-mcp": "./dist/index.js"
   },
   "scripts": {
-    "start": "bun run index.ts"
+    "start": "bun run index.ts",
+    "build": "bun build index.ts --outdir dist --target node",
+    "prepublishOnly": "npm run build"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.5.0"
   },
   "keywords": [
     "mcp",
-    "claude",
+    "model-context-protocol",
     "memory",
     "ai",
-    "shodh",
-    "bun"
+    "llm",
+    "persistent-memory",
+    "semantic-search",
+    "shodh"
   ],
   "author": "Shodh Team <29.varuns@gmail.com>",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/varun29ankuS/shodh-memory"
+  },
+  "homepage": "https://github.com/varun29ankuS/shodh-memory#readme",
+  "bugs": {
+    "url": "https://github.com/varun29ankuS/shodh-memory/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
