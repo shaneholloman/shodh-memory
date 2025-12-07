@@ -345,16 +345,24 @@ impl MemoryStorage {
             // === Compound Criteria ===
             SearchCriteria::Combined(criterias) => {
                 // Intersection of all criteria results
-                let mut result_sets: Vec<Vec<MemoryId>> = Vec::new();
+                // Use HashSet for O(1) lookups instead of O(n) Vec::contains
+                use std::collections::HashSet;
+                let mut result_sets: Vec<HashSet<MemoryId>> = Vec::new();
                 for c in criterias {
-                    result_sets.push(self.search(c)?.into_iter().map(|m| m.id).collect());
+                    result_sets.push(
+                        self.search(c)?
+                            .into_iter()
+                            .map(|m| m.id)
+                            .collect::<HashSet<_>>(),
+                    );
                 }
 
                 if !result_sets.is_empty() {
-                    memory_ids = result_sets[0].clone();
-                    for set in result_sets.iter().skip(1) {
-                        memory_ids.retain(|id| set.contains(id));
-                    }
+                    let first_set = result_sets.remove(0);
+                    memory_ids = first_set
+                        .into_iter()
+                        .filter(|id| result_sets.iter().all(|set| set.contains(id)))
+                        .collect();
                 }
             }
         }

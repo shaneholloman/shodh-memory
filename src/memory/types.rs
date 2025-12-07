@@ -1042,16 +1042,18 @@ pub fn geohash_encode(lat: f64, lon: f64, precision: usize) -> String {
 }
 
 /// Decode geohash to bounding box (min_lat, min_lon, max_lat, max_lon)
+/// Invalid characters are skipped to prevent silent data corruption
 pub fn geohash_decode(hash: &str) -> (f64, f64, f64, f64) {
     let mut lat_range = (-90.0, 90.0);
     let mut lon_range = (-180.0, 180.0);
     let mut is_lon = true;
 
     for c in hash.chars() {
-        let idx = GEOHASH_CHARS
-            .iter()
-            .position(|&x| x == c as u8)
-            .unwrap_or(0);
+        // Skip invalid characters instead of silently using index 0
+        let idx = match GEOHASH_CHARS.iter().position(|&x| x == c as u8) {
+            Some(i) => i,
+            None => continue, // Skip invalid characters
+        };
         for i in (0..5).rev() {
             let bit = (idx >> i) & 1;
             if is_lon {
@@ -1128,6 +1130,15 @@ fn wrap_longitude(lon: f64) -> f64 {
 /// Get optimal geohash precision for a given search radius
 /// Returns precision that gives cells roughly matching the radius
 pub fn geohash_precision_for_radius(radius_meters: f64) -> usize {
+    // Validate input - clamp to reasonable bounds
+    let radius = if !radius_meters.is_finite() || radius_meters <= 0.0 {
+        1.0 // Default to 1 meter if invalid
+    } else if radius_meters > 20_000_000.0 {
+        20_000_000.0 // Cap at half Earth circumference
+    } else {
+        radius_meters
+    };
+
     // Approximate cell sizes at equator (width in meters)
     const CELL_SIZES: [(usize, f64); 12] = [
         (1, 5_000_000.0),
@@ -1145,7 +1156,7 @@ pub fn geohash_precision_for_radius(radius_meters: f64) -> usize {
     ];
 
     for (precision, cell_size) in CELL_SIZES.iter() {
-        if *cell_size <= radius_meters * 2.0 {
+        if *cell_size <= radius * 2.0 {
             return *precision;
         }
     }
@@ -1155,6 +1166,17 @@ pub fn geohash_precision_for_radius(radius_meters: f64) -> usize {
 /// Get all geohash prefixes to scan for a radius search
 /// Returns the center hash and its neighbors at appropriate precision
 pub fn geohash_search_prefixes(lat: f64, lon: f64, radius_meters: f64) -> Vec<String> {
+    // Clamp coordinates to valid ranges
+    let lat = lat.clamp(-90.0, 90.0);
+    // Normalize longitude to [-180, 180]
+    let lon = if lon > 180.0 {
+        lon - 360.0
+    } else if lon < -180.0 {
+        lon + 360.0
+    } else {
+        lon
+    };
+
     let precision = geohash_precision_for_radius(radius_meters);
     let center = geohash_encode(lat, lon, precision);
     let mut prefixes = geohash_neighbors(&center);
