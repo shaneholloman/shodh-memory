@@ -460,9 +460,10 @@ impl RetrievalEngine {
                     // Rank score: higher rank = higher score
                     let score = weight * (1.0 / (rank as f32 + 1.0));
 
+                    // Clone ID before moving memory into HashMap to avoid double clone
                     let memory_id = memory.id.clone();
-                    all_results.insert(memory_id.clone(), memory);
-                    *scores.entry(memory_id).or_insert(0.0) += score;
+                    *scores.entry(memory_id.clone()).or_insert(0.0) += score;
+                    all_results.insert(memory_id, memory);
                 }
             }
         }
