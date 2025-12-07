@@ -65,10 +65,7 @@ fn test_whitespace_only_content() {
     };
 
     let result = system.record(exp);
-    assert!(
-        result.is_ok(),
-        "Whitespace-only content should be accepted"
-    );
+    assert!(result.is_ok(), "Whitespace-only content should be accepted");
 }
 
 #[test]
@@ -106,7 +103,9 @@ fn test_unicode_content() {
         ..Default::default()
     };
 
-    let memory_id = system.record(exp).expect("Failed to record unicode content");
+    let memory_id = system
+        .record(exp)
+        .expect("Failed to record unicode content");
 
     // Verify retrieval
     let query = Query {
@@ -116,10 +115,7 @@ fn test_unicode_content() {
     };
 
     let results = system.retrieve(&query).expect("Failed to retrieve");
-    assert!(
-        !results.is_empty(),
-        "Unicode content should be retrievable"
-    );
+    assert!(!results.is_empty(), "Unicode content should be retrievable");
     assert!(
         results[0].experience.content.contains("你好世界"),
         "Unicode should be preserved"
@@ -139,10 +135,7 @@ fn test_special_characters_content() {
     };
 
     let result = system.record(exp);
-    assert!(
-        result.is_ok(),
-        "Special characters should be accepted"
-    );
+    assert!(result.is_ok(), "Special characters should be accepted");
 }
 
 #[test]
@@ -158,10 +151,7 @@ fn test_null_bytes_content() {
     };
 
     let result = system.record(exp);
-    assert!(
-        result.is_ok(),
-        "Null bytes should be handled"
-    );
+    assert!(result.is_ok(), "Null bytes should be handled");
 }
 
 // ============================================================================
@@ -510,7 +500,17 @@ fn test_reward_boundary_values() {
     let config = create_test_config(&temp_dir);
     let system = MemorySystem::new(config).expect("Failed to create memory system");
 
-    let rewards = [-1.0, -0.5, 0.0, 0.5, 1.0, -1.1, 1.1, f32::NAN, f32::INFINITY];
+    let rewards = [
+        -1.0,
+        -0.5,
+        0.0,
+        0.5,
+        1.0,
+        -1.1,
+        1.1,
+        f32::NAN,
+        f32::INFINITY,
+    ];
 
     for reward in rewards {
         let exp = Experience {

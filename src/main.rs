@@ -4033,7 +4033,10 @@ async fn main() -> Result<()> {
         .route("/api/memory/{memory_id}", get(get_memory))
         .route("/api/memory/{memory_id}", axum::routing::put(update_memory))
         .route("/api/memory/{memory_id}", delete(delete_memory))
-        .route("/api/memory/{memory_id}", axum::routing::patch(patch_memory))
+        .route(
+            "/api/memory/{memory_id}",
+            axum::routing::patch(patch_memory),
+        )
         .route("/api/memories", post(get_all_memories))
         .route("/api/memories/history", post(get_history))
         .route("/api/memories/bulk", post(bulk_delete_memories))

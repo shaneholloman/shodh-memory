@@ -18,13 +18,13 @@ use shodh_memory::memory::{MemoryConfig, MemorySystem};
 // Note: These thresholds are set for debug builds. Release builds are ~10x faster.
 // ============================================================================
 
-const RECORD_P50_MS: u128 = 500;      // 500ms P50 for record (debug mode)
-const RECORD_P99_MS: u128 = 3000;     // 3s P99 for record (debug mode, first record loads model)
-const RETRIEVE_P50_MS: u128 = 200;    // 200ms P50 for retrieve (debug mode)
-const RETRIEVE_P99_MS: u128 = 1000;   // 1s P99 for retrieve (debug mode)
+const RECORD_P50_MS: u128 = 500; // 500ms P50 for record (debug mode)
+const RECORD_P99_MS: u128 = 3000; // 3s P99 for record (debug mode, first record loads model)
+const RETRIEVE_P50_MS: u128 = 200; // 200ms P50 for retrieve (debug mode)
+const RETRIEVE_P99_MS: u128 = 1000; // 1s P99 for retrieve (debug mode)
 const BATCH_100_MAX_MS: u128 = 60000; // 60s max for 100 records (debug mode)
-const INDEX_OP_MAX_MS: u128 = 10;     // 10ms max for single index op (debug mode)
-const STATS_MAX_MS: u128 = 50;        // 50ms max for stats (debug mode)
+const INDEX_OP_MAX_MS: u128 = 10; // 10ms max for single index op (debug mode)
+const STATS_MAX_MS: u128 = 50; // 50ms max for stats (debug mode)
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -443,8 +443,8 @@ fn test_sla_flush_latency() {
 
 #[test]
 fn test_sla_concurrent_access_latency() {
-    use std::thread;
     use std::sync::Arc;
+    use std::thread;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
@@ -524,7 +524,11 @@ fn test_sla_geo_filter_latency() {
     for i in 0..10 {
         let query = Query {
             query_text: Some("Geo location test".to_string()),
-            geo_filter: Some(GeoFilter::new(37.7749, -122.4194, 1000.0 * (i as f64 + 1.0))),
+            geo_filter: Some(GeoFilter::new(
+                37.7749,
+                -122.4194,
+                1000.0 * (i as f64 + 1.0),
+            )),
             max_results: 10,
             ..Default::default()
         };
@@ -604,9 +608,17 @@ fn test_performance_summary() {
     record_durations.sort();
 
     println!("RECORD Operations (30 samples):");
-    println!("  P50: {}ms (threshold: {}ms)", percentile(&record_durations, 50.0), RECORD_P50_MS);
+    println!(
+        "  P50: {}ms (threshold: {}ms)",
+        percentile(&record_durations, 50.0),
+        RECORD_P50_MS
+    );
     println!("  P90: {}ms", percentile(&record_durations, 90.0));
-    println!("  P99: {}ms (threshold: {}ms)", percentile(&record_durations, 99.0), RECORD_P99_MS);
+    println!(
+        "  P99: {}ms (threshold: {}ms)",
+        percentile(&record_durations, 99.0),
+        RECORD_P99_MS
+    );
 
     // Retrieve performance
     let mut retrieve_durations = Vec::with_capacity(30);
@@ -623,9 +635,17 @@ fn test_performance_summary() {
     retrieve_durations.sort();
 
     println!("\nRETRIEVE Operations (30 samples):");
-    println!("  P50: {}ms (threshold: {}ms)", percentile(&retrieve_durations, 50.0), RETRIEVE_P50_MS);
+    println!(
+        "  P50: {}ms (threshold: {}ms)",
+        percentile(&retrieve_durations, 50.0),
+        RETRIEVE_P50_MS
+    );
     println!("  P90: {}ms", percentile(&retrieve_durations, 90.0));
-    println!("  P99: {}ms (threshold: {}ms)", percentile(&retrieve_durations, 99.0), RETRIEVE_P99_MS);
+    println!(
+        "  P99: {}ms (threshold: {}ms)",
+        percentile(&retrieve_durations, 99.0),
+        RETRIEVE_P99_MS
+    );
 
     // Stats
     let stats = system.stats();

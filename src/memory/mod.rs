@@ -1120,10 +1120,9 @@ impl MemorySystem {
         }
 
         // Remove from long-term memory using storage search
-        let memories = self.long_term_memory.search(storage::SearchCriteria::ByDate {
-            start,
-            end,
-        })?;
+        let memories = self
+            .long_term_memory
+            .search(storage::SearchCriteria::ByDate { start, end })?;
         for memory in memories {
             self.long_term_memory.delete(&memory.id)?;
             count += 1;

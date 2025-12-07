@@ -320,7 +320,8 @@ fn test_bug009_geohash_empty_string() {
     assert!(
         lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0,
         "BUG-009: Empty geohash should decode to valid coordinates, got ({}, {})",
-        lat, lon
+        lat,
+        lon
     );
 }
 
@@ -407,13 +408,13 @@ fn test_bug010_radius_huge_handled() {
 fn test_bug010_radius_normal_values() {
     // Test normal radius values produce expected precisions
     let test_cases = [
-        (1.0, 12),       // 1m -> highest precision
-        (10.0, 10),      // 10m
-        (100.0, 8),      // 100m
-        (1000.0, 6),     // 1km
-        (10000.0, 5),    // 10km
-        (100000.0, 4),   // 100km
-        (1000000.0, 2),  // 1000km
+        (1.0, 12),      // 1m -> highest precision
+        (10.0, 10),     // 10m
+        (100.0, 8),     // 100m
+        (1000.0, 6),    // 1km
+        (10000.0, 5),   // 10km
+        (100000.0, 4),  // 100km
+        (1000000.0, 2), // 1000km
     ];
 
     for (radius, expected_min_precision) in test_cases {
@@ -421,7 +422,8 @@ fn test_bug010_radius_normal_values() {
         assert!(
             precision >= 1 && precision <= 12,
             "Radius {} produced invalid precision {}",
-            radius, precision
+            radius,
+            precision
         );
     }
 }
@@ -454,16 +456,23 @@ fn test_algo004_importance_index_updates_after_change() {
         ..Default::default()
     };
     let initial_results = system.retrieve(&query).expect("Failed to retrieve");
-    assert!(!initial_results.is_empty(), "Memory should be retrievable initially");
+    assert!(
+        !initial_results.is_empty(),
+        "Memory should be retrievable initially"
+    );
 
     // Simulate Hebbian reinforcement by retrieving with positive outcome
     // (In real usage, this would be done via reinforce_retrieval)
     let memory_ids = vec![memory_id.clone()];
     let outcome = shodh_memory::memory::RetrievalOutcome::Helpful;
-    system.reinforce_retrieval(&memory_ids, outcome).expect("Failed to reinforce");
+    system
+        .reinforce_retrieval(&memory_ids, outcome)
+        .expect("Failed to reinforce");
 
     // Retrieve again - should still find the memory
-    let after_results = system.retrieve(&query).expect("Failed to retrieve after reinforce");
+    let after_results = system
+        .retrieve(&query)
+        .expect("Failed to retrieve after reinforce");
     assert!(
         !after_results.is_empty(),
         "ALGO-004 REGRESSION: Memory not found after importance change. \
@@ -529,11 +538,19 @@ fn test_bug004_vamana_maintains_recall_after_inserts() {
     let system = MemorySystem::new(config).expect("Failed to create memory system");
 
     // Insert a batch of semantically similar memories
-    let topics = ["machine learning", "deep learning", "neural networks", "AI models"];
+    let topics = [
+        "machine learning",
+        "deep learning",
+        "neural networks",
+        "AI models",
+    ];
     for i in 0..20 {
         let topic = topics[i % topics.len()];
         let exp = Experience {
-            content: format!("{} research paper {} about transformers and attention", topic, i),
+            content: format!(
+                "{} research paper {} about transformers and attention",
+                topic, i
+            ),
             experience_type: ExperienceType::Learning,
             entities: vec![topic.to_string()],
             ..Default::default()
@@ -600,9 +617,9 @@ fn test_geo_filter_retrieval() {
     // Record memories at different locations
     let locations = [
         ("San Francisco downtown", 37.7749, -122.4194),
-        ("San Francisco near", 37.7750, -122.4195),      // ~10m away
-        ("Oakland", 37.8044, -122.2712),                  // ~15km away
-        ("Los Angeles", 34.0522, -118.2437),              // ~600km away
+        ("San Francisco near", 37.7750, -122.4195), // ~10m away
+        ("Oakland", 37.8044, -122.2712),            // ~15km away
+        ("Los Angeles", 34.0522, -118.2437),        // ~600km away
     ];
 
     for (name, lat, lon) in locations {
