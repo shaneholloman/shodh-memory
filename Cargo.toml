@@ -1,6 +1,6 @@
 [package]
 name = "shodh-memory"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Shodh Team <29.varuns@gmail.com>"]
 description = "Cognitive memory system for AI agents - Hebbian learning, activation decay, semantic consolidation in a single binary"
