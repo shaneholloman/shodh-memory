@@ -24,7 +24,7 @@ except ImportError:
     print("WARNING: Native shodh_memory not available. Install with: pip install shodh-memory")
 
 # Configuration
-REST_BASE_URL = os.environ.get("SHODH_REST_URL", "http://localhost:3030")
+REST_BASE_URL = os.environ.get("SHODH_REST_URL", "http://127.0.0.1:3030")  # IPv4 to avoid Windows IPv6 delay
 API_KEY = os.environ.get("SHODH_API_KEY", "sk-shodh-dev-4f8b2c1d9e3a7f5b6d2c8e4a1b9f7d3c")
 USER_ID = "benchmark-user"
 NUM_ITERATIONS = 5

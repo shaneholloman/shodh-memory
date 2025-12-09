@@ -13,7 +13,9 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::memory::types::{Experience, ExperienceType, ForgetCriteria, GeoFilter, Memory, MemoryId};
+use crate::memory::types::{
+    Experience, ExperienceType, ForgetCriteria, GeoFilter, Memory, MemoryId,
+};
 use crate::memory::{MemoryConfig, MemorySystem, Query, RetrievalMode};
 use chrono::{DateTime, Utc};
 
@@ -996,10 +998,7 @@ impl PyMemorySystem {
             mut items: Vec<(String, String, f32, String)>,
             max: usize,
         ) -> Vec<(String, String, f32, String)> {
-            items.sort_by(|a, b| {
-                b.2.partial_cmp(&a.2)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            items.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
             items.truncate(max);
             items
         }
@@ -1144,10 +1143,10 @@ impl PyMemorySystem {
         let filtered: Vec<_> = all_memories
             .into_iter()
             .filter(|m| {
-                m.experience
-                    .tags
-                    .iter()
-                    .any(|t| tags.iter().any(|search_tag| t.eq_ignore_ascii_case(search_tag)))
+                m.experience.tags.iter().any(|t| {
+                    tags.iter()
+                        .any(|search_tag| t.eq_ignore_ascii_case(search_tag))
+                })
             })
             .take(limit)
             .collect();
@@ -1250,9 +1249,7 @@ impl PyMemorySystem {
     fn forget_by_importance(&self, threshold: f32) -> PyResult<usize> {
         self.inner
             .forget(ForgetCriteria::LowImportance(threshold))
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to forget by importance: {}", e))
-            })
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to forget by importance: {}", e)))
     }
 
     /// Delete memories matching regex pattern
@@ -1313,7 +1310,9 @@ impl PyMemorySystem {
         let longterm_memories = self
             .inner
             .get_longterm_memories(longterm_limit)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to get longterm memories: {}", e)))?;
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!("Failed to get longterm memories: {}", e))
+            })?;
 
         let working_count = working_memories.len();
         let session_count = session_memories.len();
@@ -1335,13 +1334,24 @@ impl PyMemorySystem {
                     neuron.insert("id".to_string(), m.id.0.to_string().into_py(py));
                     neuron.insert(
                         "content_preview".to_string(),
-                        m.experience.content.chars().take(100).collect::<String>().into_py(py),
+                        m.experience
+                            .content
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                            .into_py(py),
                     );
                     neuron.insert("activation".to_string(), m.activation().into_py(py));
                     neuron.insert("importance".to_string(), m.importance().into_py(py));
                     neuron.insert("tier".to_string(), "working".into_py(py));
-                    neuron.insert("access_count".to_string(), m.metadata_snapshot().access_count.into_py(py));
-                    neuron.insert("created_at".to_string(), m.created_at.to_rfc3339().into_py(py));
+                    neuron.insert(
+                        "access_count".to_string(),
+                        m.metadata_snapshot().access_count.into_py(py),
+                    );
+                    neuron.insert(
+                        "created_at".to_string(),
+                        m.created_at.to_rfc3339().into_py(py),
+                    );
                     neuron
                 })
                 .collect();
@@ -1356,13 +1366,24 @@ impl PyMemorySystem {
                     neuron.insert("id".to_string(), m.id.0.to_string().into_py(py));
                     neuron.insert(
                         "content_preview".to_string(),
-                        m.experience.content.chars().take(100).collect::<String>().into_py(py),
+                        m.experience
+                            .content
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                            .into_py(py),
                     );
                     neuron.insert("activation".to_string(), m.activation().into_py(py));
                     neuron.insert("importance".to_string(), m.importance().into_py(py));
                     neuron.insert("tier".to_string(), "session".into_py(py));
-                    neuron.insert("access_count".to_string(), m.metadata_snapshot().access_count.into_py(py));
-                    neuron.insert("created_at".to_string(), m.created_at.to_rfc3339().into_py(py));
+                    neuron.insert(
+                        "access_count".to_string(),
+                        m.metadata_snapshot().access_count.into_py(py),
+                    );
+                    neuron.insert(
+                        "created_at".to_string(),
+                        m.created_at.to_rfc3339().into_py(py),
+                    );
                     neuron
                 })
                 .collect();
@@ -1377,13 +1398,24 @@ impl PyMemorySystem {
                     neuron.insert("id".to_string(), m.id.0.to_string().into_py(py));
                     neuron.insert(
                         "content_preview".to_string(),
-                        m.experience.content.chars().take(100).collect::<String>().into_py(py),
+                        m.experience
+                            .content
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                            .into_py(py),
                     );
                     neuron.insert("activation".to_string(), m.activation().into_py(py));
                     neuron.insert("importance".to_string(), m.importance().into_py(py));
                     neuron.insert("tier".to_string(), "longterm".into_py(py));
-                    neuron.insert("access_count".to_string(), m.metadata_snapshot().access_count.into_py(py));
-                    neuron.insert("created_at".to_string(), m.created_at.to_rfc3339().into_py(py));
+                    neuron.insert(
+                        "access_count".to_string(),
+                        m.metadata_snapshot().access_count.into_py(py),
+                    );
+                    neuron.insert(
+                        "created_at".to_string(),
+                        m.created_at.to_rfc3339().into_py(py),
+                    );
                     neuron
                 })
                 .collect();

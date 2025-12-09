@@ -4,6 +4,13 @@ Shodh-Memory: AI Memory System for Autonomous Robots & Drones
 Native Python bindings for high-performance memory operations
 optimized for robotics, drones, and offline AI applications.
 
+Usage:
+    from shodh_memory import Memory  # or MemorySystem (same class)
+
+    memory = Memory(storage_path="./my_data")
+    memory.remember("Important fact", memory_type="Context")
+    results = memory.recall("query", limit=5)
+
 Features:
 - Position(x, y, z) - Local robot coordinates in meters
 - GeoLocation(lat, lon, alt) - GPS for drones & outdoor robots
@@ -31,8 +38,12 @@ from .shodh_memory import (
     __version__,
 )
 
+# Alias for simpler API - Memory and MemorySystem are identical
+Memory = MemorySystem
+
 __all__ = [
-    # Core
+    # Core - both names export the same class
+    "Memory",
     "MemorySystem",
     # Location types
     "Position",

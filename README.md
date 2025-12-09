@@ -170,7 +170,7 @@ cargo build --release
 ```python
 from shodh_memory import Memory
 
-memory = Memory(user_id="my-agent")
+memory = Memory(storage_path="./my_data")
 
 # Store
 memory.remember("User prefers dark mode", memory_type="Decision")
@@ -179,28 +179,21 @@ memory.remember("JWT tokens expire after 24h", memory_type="Learning")
 # Search
 results = memory.recall("user preferences", limit=5)
 
-# Session bootstrap - get categorized context
-summary = memory.context_summary()
-# Returns: decisions, learnings, patterns, errors
+# Get memory statistics
+stats = memory.get_stats()
 ```
 
 **REST API**
 
-```
+```bash
 # Store
-curl -X POST http://localhost:3030/api/record \
+curl -X POST http://localhost:3030/api/remember \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
-  -d '{
-    "user_id": "agent-1",
-    "experience": {
-      "content": "Deployment requires Docker 24+",
-      "experience_type": "Learning"
-    }
-  }'
+  -d '{"user_id": "agent-1", "content": "Deployment requires Docker 24+", "tags": ["deployment"]}'
 
 # Search
-curl -X POST http://localhost:3030/api/retrieve \
+curl -X POST http://localhost:3030/api/recall \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-key" \
   -d '{"user_id": "agent-1", "query": "deployment requirements", "limit": 5}'
@@ -221,16 +214,28 @@ Importance also increases with: content length, entity density, technical terms,
 
 ### API reference
 
-**Python client**
+**Python client** (API parity with REST)
 
 | Method | What it does |
 |--------|--------------|
-| `remember(content, memory_type, tags)` | Store a memory |
-| `recall(query, limit)` | Semantic search |
-| `context_summary()` | Categorized context for session start |
-| `brain_state()` | 3-tier visualization data |
-| `stats()` | Memory statistics |
-| `delete(memory_id)` | Remove a memory |
+| **Core Memory** ||
+| `remember(content, memory_type, tags, ...)` | Store a memory |
+| `recall(query, limit, mode, ...)` | Semantic search |
+| `list_memories(limit, memory_type)` | List all memories |
+| `get_memory(memory_id)` | Get single memory by ID |
+| `get_stats()` | Memory statistics |
+| **Forget Operations** ||
+| `forget(memory_id)` | Delete single memory by ID |
+| `forget_by_age(days)` | Delete memories older than N days |
+| `forget_by_importance(threshold)` | Delete low-importance memories |
+| `forget_by_pattern(regex)` | Delete memories matching pattern |
+| `forget_by_tags(tags)` | Delete memories by tags |
+| `forget_by_date(start, end)` | Delete memories in date range |
+| `forget_all()` | Delete ALL memories (GDPR) |
+| **Context & Introspection** ||
+| `context_summary(max_items, ...)` | Categorized context for LLM bootstrap |
+| `brain_state(longterm_limit)` | 3-tier memory visualization |
+| `flush()` | Flush data to disk |
 
 **REST endpoints**
 
@@ -242,7 +247,7 @@ All protected endpoints require `X-API-Key` header.
 | `/api/remember` | POST | Store memory (embedding + NER) | 55ms |
 | `/api/recall` | POST | Semantic search | 45ms |
 | `/api/recall/tags` | POST | Tag-based search (no embedding) | 1ms |
-| `/api/recall/entities` | POST | Entity-based retrieval (NER) | 10ms |
+| `/api/recall/date` | POST | Date-range search | 5ms |
 | `/api/list/{user_id}` | GET | List all memories | 1ms |
 | `/api/context_summary` | POST | Categorized context for session bootstrap | 15ms |
 | **Forget Operations** ||||

@@ -28,9 +28,9 @@ exclude = [
 [lib]
 name = "shodh_memory"
 path = "src/lib.rs"
-# Use only rlib for normal builds (tests, benchmarks, etc)
-# For Python bindings, use: cargo build --features python (generates cdylib)
-crate-type = ["rlib"]
+# rlib: for Rust library usage (tests, benchmarks, binary)
+# cdylib: for Python bindings (PyO3/maturin needs shared library)
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "shodh-memory-server"
