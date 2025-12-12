@@ -2203,6 +2203,344 @@ async fn linear_sync(
     }))
 }
 
+/// GitHub webhook receiver - processes Issue and PR events
+///
+/// Transforms GitHub webhook payloads into memory upserts with external_id linking.
+/// Supports signature verification via GITHUB_WEBHOOK_SECRET env var.
+///
+/// Supported events:
+/// - Issues: opened, edited, closed, reopened, labeled, unlabeled
+/// - Pull Requests: opened, edited, closed, merged, synchronize
+#[tracing::instrument(skip(state, body, headers))]
+async fn github_webhook(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use integrations::github::GitHubWebhook;
+
+    // Get webhook secret from env (optional but recommended)
+    let webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET").ok();
+    let webhook = GitHubWebhook::new(webhook_secret);
+
+    // Verify signature if present
+    if let Some(signature) = headers
+        .get("x-hub-signature-256")
+        .and_then(|h| h.to_str().ok())
+    {
+        if !webhook
+            .verify_signature(&body, signature)
+            .map_err(|e| AppError::Internal(e))?
+        {
+            return Err(AppError::InvalidInput {
+                field: "signature".to_string(),
+                reason: "Invalid webhook signature".to_string(),
+            });
+        }
+    }
+
+    // Get event type from header
+    let event_type = headers
+        .get("x-github-event")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("unknown");
+
+    // Only process issues and pull_request events
+    if event_type != "issues" && event_type != "pull_request" {
+        tracing::debug!(event_type = %event_type, "Ignoring non-issue/PR GitHub event");
+        return Ok(Json(serde_json::json!({
+            "status": "ignored",
+            "reason": format!("Only issues and pull_request events are processed, got: {}", event_type)
+        })));
+    }
+
+    // Parse payload
+    let payload = webhook
+        .parse_payload(&body)
+        .map_err(|e| AppError::Internal(e))?;
+
+    // Determine user_id
+    let user_id =
+        std::env::var("GITHUB_SYNC_USER_ID").unwrap_or_else(|_| "github-sync".to_string());
+
+    // Process based on event type
+    let (external_id, content, tags, change_type) = if let Some(issue) = &payload.issue {
+        // Issue event
+        let ext_id = GitHubWebhook::issue_external_id(&payload.repository, issue.number);
+        let content = GitHubWebhook::issue_to_content(issue, &payload.repository);
+        let tags = GitHubWebhook::issue_to_tags(issue, &payload.repository);
+        let ct = GitHubWebhook::determine_change_type(&payload.action, false);
+        (ext_id, content, tags, ct)
+    } else if let Some(pr) = &payload.pull_request {
+        // PR event
+        let ext_id = GitHubWebhook::pr_external_id(&payload.repository, pr.number);
+        let content = GitHubWebhook::pr_to_content(pr, &payload.repository);
+        let tags = GitHubWebhook::pr_to_tags(pr, &payload.repository);
+        let ct = GitHubWebhook::determine_change_type(&payload.action, true);
+        (ext_id, content, tags, ct)
+    } else {
+        return Ok(Json(serde_json::json!({
+            "status": "ignored",
+            "reason": "No issue or pull_request data in payload"
+        })));
+    };
+
+    // Build experience
+    let experience = Experience {
+        content: content.clone(),
+        experience_type: ExperienceType::Task,
+        entities: tags.clone(),
+        ..Default::default()
+    };
+
+    // Parse change type
+    let change_type_enum = match change_type.as_str() {
+        "created" => memory::types::ChangeType::Created,
+        "status_changed" => memory::types::ChangeType::StatusChanged,
+        "tags_updated" => memory::types::ChangeType::TagsUpdated,
+        _ => memory::types::ChangeType::ContentUpdated,
+    };
+
+    // Get memory system
+    let memory_system = state
+        .get_user_memory(&user_id)
+        .map_err(AppError::Internal)?;
+
+    // Perform upsert
+    let (memory_id, was_update) = {
+        let memory = memory_system.clone();
+        let ext_id = external_id.clone();
+        let exp = experience.clone();
+        let ct = change_type_enum;
+        let actor_name = payload
+            .sender
+            .as_ref()
+            .map(|s| s.login.clone())
+            .unwrap_or_else(|| "github-webhook".to_string());
+
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            memory_guard.upsert(ext_id, exp, ct, Some(actor_name), None)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        .map_err(AppError::Internal)?
+    };
+
+    tracing::info!(
+        external_id = %external_id,
+        memory_id = %memory_id.0,
+        was_update = was_update,
+        action = %payload.action,
+        event_type = %event_type,
+        "GitHub webhook processed"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "memory_id": memory_id.0.to_string(),
+        "external_id": external_id,
+        "was_update": was_update,
+        "action": payload.action,
+        "event_type": event_type
+    })))
+}
+
+/// Bulk sync GitHub issues and PRs to Shodh memory
+///
+/// Fetches issues and/or PRs from GitHub API and upserts them as memories.
+///
+/// Example: POST /api/sync/github {
+///   "user_id": "github-sync",
+///   "token": "ghp_...",
+///   "owner": "varun29ankuS",
+///   "repo": "shodh-memory",
+///   "sync_issues": true,
+///   "sync_prs": true,
+///   "state": "all",
+///   "limit": 100
+/// }
+#[tracing::instrument(skip(state, req), fields(user_id = %req.user_id, repo = %format!("{}/{}", req.owner, req.repo)))]
+async fn github_sync(
+    State(state): State<AppState>,
+    Json(req): Json<integrations::github::GitHubSyncRequest>,
+) -> Result<Json<integrations::github::GitHubSyncResponse>, AppError> {
+    use integrations::github::{GitHubClient, GitHubSyncResponse, GitHubWebhook};
+
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    // Validate token
+    if req.token.is_empty() {
+        return Err(AppError::InvalidInput {
+            field: "token".to_string(),
+            reason: "GitHub token is required".to_string(),
+        });
+    }
+
+    // Create GitHub client
+    let client = GitHubClient::new(req.token.clone());
+
+    // Get repository info first
+    let repo_info = client
+        .get_repository(&req.owner, &req.repo)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to get repository: {}", e)))?;
+
+    let mut issues_synced = 0;
+    let mut prs_synced = 0;
+    let mut created_count = 0;
+    let mut updated_count = 0;
+    let mut error_count = 0;
+    let mut errors = Vec::new();
+
+    // Get memory system
+    let memory_system = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    // Sync issues if requested
+    if req.sync_issues {
+        let issues = client
+            .fetch_issues(&req.owner, &req.repo, &req.state, req.limit)
+            .await
+            .map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Failed to fetch GitHub issues: {}", e))
+            })?;
+
+        for issue in issues {
+            let external_id = GitHubWebhook::issue_external_id(&repo_info, issue.number);
+            let content = GitHubWebhook::issue_to_content(&issue, &repo_info);
+            let tags = GitHubWebhook::issue_to_tags(&issue, &repo_info);
+
+            let experience = Experience {
+                content,
+                experience_type: ExperienceType::Task,
+                entities: tags,
+                ..Default::default()
+            };
+
+            let result = {
+                let memory = memory_system.clone();
+                let ext_id = external_id.clone();
+                let exp = experience;
+
+                tokio::task::spawn_blocking(move || {
+                    let memory_guard = memory.read();
+                    memory_guard.upsert(
+                        ext_id,
+                        exp,
+                        memory::types::ChangeType::ContentUpdated,
+                        Some("github-bulk-sync".to_string()),
+                        None,
+                    )
+                })
+                .await
+            };
+
+            match result {
+                Ok(Ok((_, was_update))) => {
+                    issues_synced += 1;
+                    if was_update {
+                        updated_count += 1;
+                    } else {
+                        created_count += 1;
+                    }
+                }
+                Ok(Err(e)) => {
+                    error_count += 1;
+                    errors.push(format!("{}: {}", external_id, e));
+                }
+                Err(e) => {
+                    error_count += 1;
+                    errors.push(format!("{}: Task panicked: {}", external_id, e));
+                }
+            }
+        }
+    }
+
+    // Sync PRs if requested
+    if req.sync_prs {
+        let prs = client
+            .fetch_pull_requests(&req.owner, &req.repo, &req.state, req.limit)
+            .await
+            .map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Failed to fetch GitHub PRs: {}", e))
+            })?;
+
+        for pr in prs {
+            let external_id = GitHubWebhook::pr_external_id(&repo_info, pr.number);
+            let content = GitHubWebhook::pr_to_content(&pr, &repo_info);
+            let tags = GitHubWebhook::pr_to_tags(&pr, &repo_info);
+
+            let experience = Experience {
+                content,
+                experience_type: ExperienceType::Task,
+                entities: tags,
+                ..Default::default()
+            };
+
+            let result = {
+                let memory = memory_system.clone();
+                let ext_id = external_id.clone();
+                let exp = experience;
+
+                tokio::task::spawn_blocking(move || {
+                    let memory_guard = memory.read();
+                    memory_guard.upsert(
+                        ext_id,
+                        exp,
+                        memory::types::ChangeType::ContentUpdated,
+                        Some("github-bulk-sync".to_string()),
+                        None,
+                    )
+                })
+                .await
+            };
+
+            match result {
+                Ok(Ok((_, was_update))) => {
+                    prs_synced += 1;
+                    if was_update {
+                        updated_count += 1;
+                    } else {
+                        created_count += 1;
+                    }
+                }
+                Ok(Err(e)) => {
+                    error_count += 1;
+                    errors.push(format!("{}: {}", external_id, e));
+                }
+                Err(e) => {
+                    error_count += 1;
+                    errors.push(format!("{}: Task panicked: {}", external_id, e));
+                }
+            }
+        }
+    }
+
+    let total = issues_synced + prs_synced;
+
+    tracing::info!(
+        total = total,
+        issues = issues_synced,
+        prs = prs_synced,
+        created = created_count,
+        updated = updated_count,
+        errors = error_count,
+        "GitHub bulk sync completed"
+    );
+
+    Ok(Json(GitHubSyncResponse {
+        synced_count: total,
+        issues_synced,
+        prs_synced,
+        created_count,
+        updated_count,
+        error_count,
+        errors,
+    }))
+}
+
 /// LLM-friendly /api/recall - hybrid retrieval combining semantic search + graph spreading activation
 /// Example: POST /api/recall { "user_id": "agent-1", "query": "What does user like?" }
 ///
@@ -5822,9 +6160,11 @@ async fn main() -> Result<()> {
         // Mutable memories with external linking (SHO-39)
         .route("/api/upsert", post(upsert_memory))
         .route("/api/memory/history", post(get_memory_history))
-        // External integrations (SHO-40)
+        // External integrations (SHO-40, SHO-41)
         .route("/webhook/linear", post(linear_webhook))
         .route("/api/sync/linear", post(linear_sync))
+        .route("/webhook/github", post(github_webhook))
+        .route("/api/sync/github", post(github_sync))
         // Hebbian Feedback Loop - Wire up learning from task outcomes
         .route("/api/retrieve/tracked", post(retrieve_tracked))
         .route("/api/reinforce", post(reinforce_feedback))
