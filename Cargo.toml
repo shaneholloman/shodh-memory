@@ -165,6 +165,10 @@ harness = false
 name = "relevance_benchmarks"
 harness = false
 
+[[bench]]
+name = "integration_benchmarks"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

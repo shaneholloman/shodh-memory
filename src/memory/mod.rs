@@ -1079,8 +1079,9 @@ impl MemorySystem {
 
         // Only record event if activation actually changed
         if (activation_after - activation_before).abs() > f32::EPSILON {
-            let content_preview = if memory.experience.content.len() > 50 {
-                format!("{}...", &memory.experience.content[..50])
+            let content_preview = if memory.experience.content.chars().count() > 50 {
+                let truncated: String = memory.experience.content.chars().take(50).collect();
+                format!("{}...", truncated)
             } else {
                 memory.experience.content.clone()
             };
