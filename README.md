@@ -22,7 +22,7 @@
 
 ---
 
-> **For AI Agents** — Claude, GPT, LangChain, AutoGPT, robotic systems, or your custom agents.
+> **For AI Agents** — Claude, Cursor, GPT, LangChain, AutoGPT, robotic systems, or your custom agents.
 > Give them memory that persists across sessions, learns from experience, and runs entirely on your hardware.
 
 ---
@@ -114,9 +114,9 @@ Measured on Intel i7-1355U (10 cores, 1.7GHz), release build.
 
 ### Installation
 
-**Claude Code / Claude Desktop:**
+**Claude Code / Claude Desktop / Cursor:**
 
-Add to your `claude_desktop_config.json`:
+Add to your MCP config file:
 ```json
 {
   "mcpServers": {
@@ -130,9 +130,12 @@ Add to your `claude_desktop_config.json`:
 
 Config file locations:
 
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-- Linux: `~/.config/Claude/claude_desktop_config.json`
+| Editor | Config Path |
+|--------|-------------|
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Claude Desktop (Linux) | `~/.config/Claude/claude_desktop_config.json` |
+| Cursor | `~/.cursor/mcp.json` |
 
 **Python:**
 ```
