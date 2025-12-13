@@ -57,16 +57,17 @@ async function connectStream(): Promise<void> {
   streamHandshakeComplete = false;
 
   try {
-    streamSocket = new WebSocket(WS_URL, {
-      headers: { "X-API-Key": API_KEY },
-    } as unknown as string[]);
+    // Note: /api/stream is public (no auth required), so no headers needed
+    // Bun supports headers via: new WebSocket(url, { headers: {...} })
+    streamSocket = new WebSocket(WS_URL);
 
     streamSocket.onopen = () => {
       streamConnecting = false;
+      console.error("[Stream] WebSocket connected to", WS_URL);
       // Send handshake first - server expects StreamHandshake as first message
       const handshake = JSON.stringify({
         user_id: USER_ID,
-        mode: "Conversation",
+        mode: "conversation",
         extraction_config: {
           checkpoint_interval_ms: 5000,
           max_buffer_size: 50,
@@ -75,20 +76,26 @@ async function connectStream(): Promise<void> {
         },
       });
       streamSocket?.send(handshake);
+      console.error("[Stream] Sent handshake for user:", USER_ID);
     };
 
     streamSocket.onmessage = (event) => {
       try {
         const response = JSON.parse(event.data as string);
-        // Check for handshake ACK
-        if (response.Ack && response.Ack.message_type === "handshake") {
+        // Check for handshake ACK (server uses serde tag format: { "type": "ack", ... })
+        if (response.type === "ack" && response.message_type === "handshake") {
           streamHandshakeComplete = true;
+          console.error("[Stream] Handshake ACK received, streaming ready");
           // Now flush buffered messages
+          const bufferedCount = streamBuffer.length;
           while (streamBuffer.length > 0) {
             const msg = streamBuffer.shift();
             if (msg && streamSocket?.readyState === WebSocket.OPEN) {
               streamSocket.send(msg);
             }
+          }
+          if (bufferedCount > 0) {
+            console.error(`[Stream] Flushed ${bufferedCount} buffered messages`);
           }
         }
       } catch {
@@ -96,7 +103,8 @@ async function connectStream(): Promise<void> {
       }
     };
 
-    streamSocket.onclose = () => {
+    streamSocket.onclose = (event) => {
+      console.error("[Stream] WebSocket closed:", event.code, event.reason || "(no reason)");
       streamSocket = null;
       streamConnecting = false;
       streamHandshakeComplete = false;
@@ -104,15 +112,18 @@ async function connectStream(): Promise<void> {
       if (STREAM_ENABLED && !streamReconnectTimer) {
         streamReconnectTimer = setTimeout(() => {
           streamReconnectTimer = null;
+          console.error("[Stream] Attempting reconnect...");
           connectStream().catch(() => {});
         }, 5000);
       }
     };
 
-    streamSocket.onerror = () => {
+    streamSocket.onerror = (error) => {
+      console.error("[Stream] WebSocket error:", error);
       // Error handler - close will be called after
     };
-  } catch {
+  } catch (err) {
+    console.error("[Stream] Failed to create WebSocket:", err);
     streamConnecting = false;
   }
 }
@@ -121,29 +132,42 @@ async function connectStream(): Promise<void> {
 function streamMemory(content: string, tags: string[] = [], source: string = "assistant"): void {
   if (!STREAM_ENABLED || content.length < STREAM_MIN_CONTENT_LENGTH) return;
 
-  // Server expects StreamMessage::Content enum format
+  // Server expects serde tag format: { "type": "content", ... }
   const message = JSON.stringify({
-    Content: {
-      content: content.slice(0, 4000),
-      source: source,
-      tags: ["stream", ...tags],
-      metadata: {},
-    },
+    type: "content",
+    content: content.slice(0, 4000),
+    source: source,
+    tags: ["stream", ...tags],
+    metadata: {},
   });
 
   if (streamSocket?.readyState === WebSocket.OPEN && streamHandshakeComplete) {
     streamSocket.send(message);
+    console.error(`[Stream] Sent memory (${content.length} chars) with tags:`, tags);
   } else {
     // Buffer message and try to reconnect
     if (streamBuffer.length < MAX_BUFFER_SIZE) {
       streamBuffer.push(message);
+      console.error(`[Stream] Buffered memory (socket not ready, buffer size: ${streamBuffer.length})`);
     }
     connectStream().catch(() => {});
   }
 }
 
+// Flush buffered stream messages immediately (triggers extraction on server)
+function streamFlush(): void {
+  if (!STREAM_ENABLED) return;
+
+  if (streamSocket?.readyState === WebSocket.OPEN && streamHandshakeComplete) {
+    streamSocket.send(JSON.stringify({ type: "flush" }));
+  }
+}
+
 // Initialize stream connection on server start
-connectStream().catch(() => {});
+console.error("[Stream] Initializing connection to", WS_URL);
+connectStream().catch((err) => {
+  console.error("[Stream] Initial connection failed:", err);
+});
 
 // Types matching the Rust API response structure
 interface Experience {
@@ -549,6 +573,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["context"],
         },
       },
+      {
+        name: "streaming_status",
+        description: "Check the status of WebSocket streaming connection. Use this to diagnose if streaming memory ingestion is working.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
     ],
   };
 });
@@ -556,7 +588,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 // Auto-stream context from tool arguments (captures conversation intent)
 function autoStreamContext(toolName: string, args: Record<string, unknown>): void {
   // Skip tools that already handle their own streaming
-  if (["proactive_context"].includes(toolName)) return;
+  if (["proactive_context", "streaming_status"].includes(toolName)) return;
 
   // Extract meaningful context from tool arguments
   let context = "";
@@ -577,6 +609,11 @@ function autoStreamContext(toolName: string, args: Record<string, unknown>): voi
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+
+  // Ensure streaming is connected (lazy reconnect on tool calls)
+  if (STREAM_ENABLED && (!streamSocket || streamSocket.readyState !== WebSocket.OPEN)) {
+    connectStream().catch(() => {});
+  }
 
   // Auto-capture context from tool arguments (non-blocking)
   autoStreamContext(name, args as Record<string, unknown>);
@@ -1075,6 +1112,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Stream context to memory (non-blocking, uses WebSocket)
         if (auto_ingest && context.length > 100) {
           streamMemory(context.slice(0, 2000), ["proactive-context"]);
+          // Flush immediately to ensure context is persisted (don't wait for checkpoint)
+          streamFlush();
         }
 
         interface DetectedEntity {
@@ -1175,6 +1214,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: "text",
               text: `Surfaced ${memories.length} relevant memories:\n\n${formatted}${entitySummary}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`,
+            },
+          ],
+        };
+      }
+
+
+      case "streaming_status": {
+        const wsState = streamSocket?.readyState;
+        const stateNames = ["CONNECTING", "OPEN", "CLOSING", "CLOSED"];
+        const stateName = wsState !== undefined ? stateNames[wsState] || "UNKNOWN" : "NULL";
+
+        const status = {
+          enabled: STREAM_ENABLED,
+          ws_url: WS_URL,
+          socket_state: stateName,
+          handshake_complete: streamHandshakeComplete,
+          buffer_size: streamBuffer.length,
+          connecting: streamConnecting,
+          reconnect_pending: streamReconnectTimer !== null,
+        };
+
+        // Try to reconnect if not connected
+        if (!streamSocket || streamSocket.readyState !== WebSocket.OPEN) {
+          connectStream().catch(() => {});
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Streaming Status:\n\n` +
+                `Enabled: ${status.enabled}\n` +
+                `WebSocket URL: ${status.ws_url}\n` +
+                `Socket State: ${status.socket_state}\n` +
+                `Handshake Complete: ${status.handshake_complete}\n` +
+                `Buffer Size: ${status.buffer_size}\n` +
+                `Currently Connecting: ${status.connecting}\n` +
+                `Reconnect Pending: ${status.reconnect_pending}\n\n` +
+                (status.handshake_complete ? "✓ Streaming is ACTIVE" : "✗ Streaming is NOT ACTIVE - attempting reconnect..."),
             },
           ],
         };

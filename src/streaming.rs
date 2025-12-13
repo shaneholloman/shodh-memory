@@ -39,7 +39,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::embeddings::{NerEntity, NerEntityType, NeuralNer};
+use crate::embeddings::{NerEntity, NeuralNer};
 use crate::memory::{Experience, ExperienceType, MemorySystem};
 
 /// Case-insensitive substring search without allocation.
@@ -825,30 +825,31 @@ impl StreamingMemoryExtractor {
             for (k, v) in msg.metadata {
                 string_metadata.insert(k, v.to_string());
             }
+            // Clone tags before they're consumed (needed for Experience.tags)
+            let tags: Vec<String> = msg.tags.clone();
+
             // Add tags as metadata
-            for tag in &msg.tags {
+            for tag in &tags {
                 string_metadata.insert(format!("tag:{}", tag), "true".to_string());
             }
 
             // Merge entities from NER with tags (tags can serve as entity hints)
             let mut all_entity_names: Vec<String> =
                 entities.iter().map(|e| e.text.clone()).collect();
-            for tag in msg.tags {
-                if !all_entity_names
-                    .iter()
-                    .any(|e| e.eq_ignore_ascii_case(&tag))
-                {
-                    all_entity_names.push(tag);
+            for tag in &tags {
+                if !all_entity_names.iter().any(|e| e.eq_ignore_ascii_case(tag)) {
+                    all_entity_names.push(tag.clone());
                 }
             }
 
-            // Create experience with proper fields
+            // Create experience with proper fields including tags
             let experience = Experience {
                 content: msg.content,
                 experience_type,
                 entities: all_entity_names,
                 metadata: string_metadata,
                 embeddings: None, // Will be computed by MemorySystem
+                tags,
                 ..Default::default()
             };
 
