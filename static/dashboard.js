@@ -1,6 +1,7 @@
 // Configuration
+// API key must be set - either via localStorage or the config panel
 let apiUrl = 'http://127.0.0.1:3030';
-let apiKey = 'shodh-dev-key-change-in-production';
+let apiKey = '';
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {

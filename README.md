@@ -122,11 +122,16 @@ Add to your MCP config file:
   "mcpServers": {
     "shodh-memory": {
       "command": "npx",
-      "args": ["-y", "@shodh/memory-mcp"]
+      "args": ["-y", "@shodh/memory-mcp"],
+      "env": {
+        "SHODH_API_KEY": "your-api-key"
+      }
     }
   }
 }
 ```
+
+Use the same API key you set for the server (see [Authentication](#authentication) below).
 
 Config file locations:
 
@@ -155,6 +160,11 @@ cargo build --release
 ```python
 from shodh_memory import Memory
 
+# Option 1: Pass API key directly
+memory = Memory(api_key="your-api-key", storage_path="./my_data")
+
+# Option 2: Use environment variable (recommended)
+# export SHODH_API_KEY=your-api-key
 memory = Memory(storage_path="./my_data")
 
 # Store
@@ -260,16 +270,22 @@ All protected endpoints require `X-API-Key` header.
 
 **Authentication**
 
+Server and clients must use the same API key. Set once and use everywhere.
+
 ```bash
-# Development: Set your own dev key
-export SHODH_DEV_API_KEY="my-dev-key"
+# Development: Pick any key for local development
+export SHODH_DEV_API_KEY="my-dev-key"   # Server uses this
+export SHODH_API_KEY="my-dev-key"       # Clients use this (same value!)
+
+# Then use with curl:
 curl -H "X-API-Key: my-dev-key" ...
 
-# Production: Set API keys and environment
+# Production: Set multiple keys (comma-separated)
 export SHODH_API_KEYS="your-secure-key-1,your-secure-key-2"
 export SHODH_ENV=production
-curl -H "X-API-Key: your-secure-key-1" ...
 ```
+
+For MCP integrations, add `SHODH_API_KEY` to the `env` section of your config (see Installation above).
 
 ### Configuration
 
@@ -281,9 +297,12 @@ SHODH_PORT=3030                    # Default: 3030
 SHODH_MEMORY_PATH=./data           # Default: ./shodh_memory_data
 SHODH_ENV=production               # Set for production mode
 
-# Authentication
+# Authentication (Server)
 SHODH_API_KEYS=key1,key2           # Required in production (comma-separated)
 SHODH_DEV_API_KEY=my-dev-key       # For development (if SHODH_API_KEYS not set)
+
+# Authentication (Clients - Python, MCP, REST)
+SHODH_API_KEY=my-dev-key           # Must match server's accepted keys
 
 # Cognitive Parameters
 SHODH_MAINTENANCE_INTERVAL=300     # Decay cycle in seconds (default: 300)

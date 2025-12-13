@@ -182,8 +182,16 @@ class Memory:
         self.port = port
         self.base_url = f"http://localhost:{port}"
         self.storage_path = storage_path or "./shodh_memory_data"
-        self.api_key = api_key or os.environ.get("SHODH_API_KEY", "shodh-dev-key-change-in-production")
         self.timeout = timeout
+
+        # API Key - required for authentication
+        self.api_key = api_key or os.environ.get("SHODH_API_KEY")
+        if not self.api_key:
+            raise ShodhAuthenticationError(
+                "SHODH_API_KEY not set. "
+                "Pass api_key parameter or set SHODH_API_KEY environment variable. "
+                "For local development, use the same key set in SHODH_DEV_API_KEY on the server."
+            )
 
         self._server_process = None
 

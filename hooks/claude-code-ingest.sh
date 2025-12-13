@@ -28,8 +28,14 @@
 set -e
 
 API_URL="${SHODH_API_URL:-http://127.0.0.1:3030}"
-API_KEY="${SHODH_API_KEY:-sk-shodh-dev-4f8b2c1d9e3a7f5b6d2c8e4a1b9f7d3c}"
 USER_ID="${SHODH_USER_ID:-claude-code}"
+
+# API Key - required (no hardcoded fallback for security)
+if [ -z "$SHODH_API_KEY" ]; then
+    echo "ERROR: SHODH_API_KEY environment variable not set" >&2
+    exit 1
+fi
+API_KEY="$SHODH_API_KEY"
 
 # Read hook input from stdin
 INPUT=$(cat)

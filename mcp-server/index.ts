@@ -24,8 +24,23 @@ import {
 // Configuration
 const API_URL = process.env.SHODH_API_URL || "http://127.0.0.1:3030";
 const WS_URL = API_URL.replace(/^http/, "ws") + "/api/stream";
-const API_KEY = process.env.SHODH_API_KEY || "sk-shodh-dev-4f8b2c1d9e3a7f5b6d2c8e4a1b9f7d3c";
 const USER_ID = process.env.SHODH_USER_ID || "claude-code";
+
+// API Key - required for authentication
+// Set via SHODH_API_KEY env var, or configure in MCP settings
+const API_KEY = process.env.SHODH_API_KEY;
+if (!API_KEY) {
+  console.error("ERROR: SHODH_API_KEY environment variable not set.");
+  console.error("");
+  console.error("To fix, add to your MCP config (claude_desktop_config.json or mcp.json):");
+  console.error(`  "env": { "SHODH_API_KEY": "your-api-key" }`);
+  console.error("");
+  console.error("Or set in your shell:");
+  console.error("  export SHODH_API_KEY=your-api-key");
+  console.error("");
+  console.error("For local development, use the same key set in SHODH_DEV_API_KEY on the server.");
+  process.exit(1);
+}
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
 const REQUEST_TIMEOUT_MS = 10000;

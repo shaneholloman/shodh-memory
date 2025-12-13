@@ -25,8 +25,14 @@ except ImportError:
 
 # Configuration
 REST_BASE_URL = os.environ.get("SHODH_REST_URL", "http://127.0.0.1:3030")  # IPv4 to avoid Windows IPv6 delay
-API_KEY = os.environ.get("SHODH_API_KEY", "sk-shodh-dev-4f8b2c1d9e3a7f5b6d2c8e4a1b9f7d3c")
 USER_ID = "benchmark-user"
+
+# API Key - required (no hardcoded fallback for security)
+API_KEY = os.environ.get("SHODH_API_KEY")
+if not API_KEY:
+    print("ERROR: SHODH_API_KEY environment variable not set")
+    print("Set it with: export SHODH_API_KEY=your-api-key")
+    sys.exit(1)
 NUM_ITERATIONS = 5
 
 class BenchmarkResult:

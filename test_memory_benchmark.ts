@@ -11,9 +11,16 @@
  * 6. Memory stats
  */
 
-const API_URL = "http://127.0.0.1:3030";
-const API_KEY = "shodh-dev-key-change-in-production";
+const API_URL = process.env.SHODH_API_URL || "http://127.0.0.1:3030";
 const USER_ID = "benchmark-test";
+
+// API Key - required (no hardcoded fallback for security)
+const API_KEY = process.env.SHODH_API_KEY;
+if (!API_KEY) {
+  console.error("ERROR: SHODH_API_KEY environment variable not set");
+  console.error("Set it with: export SHODH_API_KEY=your-api-key");
+  process.exit(1);
+}
 
 interface TestResult {
   test: string;

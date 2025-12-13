@@ -553,7 +553,9 @@
 
     <script>
         const API = 'http://127.0.0.1:3030';
-        const KEY = 'shodh-dev-key-change-in-production';
+        // API key must be set via environment variable SHODH_API_KEY
+        // For browser testing, update this value or load from server config
+        const KEY = localStorage.getItem('apiKey') || '';
 
         // State
         let eventSource = null;
