@@ -4092,8 +4092,8 @@ async fn delete_memory(
     let memory_guard = memory.read();
 
     // Parse UUID and delete by ID directly (not by pattern matching)
-    let uuid = uuid::Uuid::parse_str(&memory_id)
-        .map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
+    let uuid =
+        uuid::Uuid::parse_str(&memory_id).map_err(|e| AppError::InvalidMemoryId(e.to_string()))?;
     memory_guard
         .forget(memory::ForgetCriteria::ById(memory::MemoryId(uuid)))
         .map_err(AppError::Internal)?;

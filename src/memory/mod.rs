@@ -1254,7 +1254,9 @@ impl MemorySystem {
             stats.total_memories = stats.total_memories.saturating_sub(count);
             stats.working_memory_count = stats.working_memory_count.saturating_sub(working_removed);
             stats.session_memory_count = stats.session_memory_count.saturating_sub(session_removed);
-            stats.long_term_memory_count = stats.long_term_memory_count.saturating_sub(long_term_removed);
+            stats.long_term_memory_count = stats
+                .long_term_memory_count
+                .saturating_sub(long_term_removed);
             stats.vector_index_count = stats.vector_index_count.saturating_sub(count);
         }
 
@@ -1321,7 +1323,9 @@ impl MemorySystem {
             stats.total_memories = stats.total_memories.saturating_sub(count);
             stats.working_memory_count = stats.working_memory_count.saturating_sub(working_removed);
             stats.session_memory_count = stats.session_memory_count.saturating_sub(session_removed);
-            stats.long_term_memory_count = stats.long_term_memory_count.saturating_sub(long_term_removed);
+            stats.long_term_memory_count = stats
+                .long_term_memory_count
+                .saturating_sub(long_term_removed);
             stats.vector_index_count = stats.vector_index_count.saturating_sub(count);
         }
 
@@ -1392,7 +1396,9 @@ impl MemorySystem {
             stats.total_memories = stats.total_memories.saturating_sub(count);
             stats.working_memory_count = stats.working_memory_count.saturating_sub(working_removed);
             stats.session_memory_count = stats.session_memory_count.saturating_sub(session_removed);
-            stats.long_term_memory_count = stats.long_term_memory_count.saturating_sub(long_term_removed);
+            stats.long_term_memory_count = stats
+                .long_term_memory_count
+                .saturating_sub(long_term_removed);
             stats.vector_index_count = stats.vector_index_count.saturating_sub(count);
         }
 
@@ -1459,7 +1465,9 @@ impl MemorySystem {
             stats.total_memories = stats.total_memories.saturating_sub(count);
             stats.working_memory_count = stats.working_memory_count.saturating_sub(working_removed);
             stats.session_memory_count = stats.session_memory_count.saturating_sub(session_removed);
-            stats.long_term_memory_count = stats.long_term_memory_count.saturating_sub(long_term_removed);
+            stats.long_term_memory_count = stats
+                .long_term_memory_count
+                .saturating_sub(long_term_removed);
             stats.vector_index_count = stats.vector_index_count.saturating_sub(count);
         }
 
@@ -1476,7 +1484,11 @@ impl MemorySystem {
         // Collect all IDs from working memory and clear
         let working_ids: Vec<MemoryId> = {
             let working = self.working_memory.read();
-            working.all_memories().iter().map(|m| m.id.clone()).collect()
+            working
+                .all_memories()
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
         };
         let working_count = working_ids.len();
         for id in &working_ids {
@@ -1491,7 +1503,11 @@ impl MemorySystem {
         // Collect all IDs from session memory and clear
         let session_ids: Vec<MemoryId> = {
             let session = self.session_memory.read();
-            session.all_memories().iter().map(|m| m.id.clone()).collect()
+            session
+                .all_memories()
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
         };
         let session_count = session_ids.len();
         for id in &session_ids {

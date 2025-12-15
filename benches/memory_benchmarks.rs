@@ -989,10 +989,7 @@ fn bench_stats_accuracy(c: &mut Criterion) {
         b.iter(|| {
             let stats = memory_system.stats();
             // Verify stats are accurate
-            assert!(
-                stats.total_memories > 0,
-                "Should have recorded memories"
-            );
+            assert!(stats.total_memories > 0, "Should have recorded memories");
             // Note: tier counts should now be accurate per SHO-50 fix
         });
     });

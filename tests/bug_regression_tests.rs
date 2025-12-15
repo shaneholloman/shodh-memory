@@ -700,7 +700,9 @@ fn test_sho48_forget_removes_from_semantic_search() {
 
     // Forget the memory
     let forget_result = system
-        .forget(shodh_memory::memory::ForgetCriteria::ById(memory_id.clone()))
+        .forget(shodh_memory::memory::ForgetCriteria::ById(
+            memory_id.clone(),
+        ))
         .expect("Failed to forget");
     assert_eq!(forget_result, 1, "Should have forgotten 1 memory");
 
