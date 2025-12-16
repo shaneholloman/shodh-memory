@@ -2036,7 +2036,8 @@ impl SessionMemory {
             }
             if let Some(entry) = self.memories.remove(&id) {
                 // Use stored insertion_size for accurate tracking (not re-serialized size)
-                self.current_size_bytes = self.current_size_bytes.saturating_sub(entry.insertion_size);
+                self.current_size_bytes =
+                    self.current_size_bytes.saturating_sub(entry.insertion_size);
             }
         }
         Ok(())
@@ -2169,7 +2170,10 @@ impl SessionMemory {
 
     /// Get all memories (for semantic search across all tiers)
     pub fn all_memories(&self) -> Vec<SharedMemory> {
-        self.memories.values().map(|entry| entry.memory.clone()).collect()
+        self.memories
+            .values()
+            .map(|entry| entry.memory.clone())
+            .collect()
     }
 }
 

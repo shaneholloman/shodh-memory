@@ -3907,8 +3907,11 @@ async fn batch_remember(
     let user_id = req.user_id.clone();
 
     // Build experiences with optional NER extraction
-    let mut experiences_with_index: Vec<(usize, Experience, Option<chrono::DateTime<chrono::Utc>>)> =
-        Vec::with_capacity(valid_items.len());
+    let mut experiences_with_index: Vec<(
+        usize,
+        Experience,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = Vec::with_capacity(valid_items.len());
 
     for (index, item) in valid_items {
         let experience_type = item
@@ -3967,7 +3970,8 @@ async fn batch_remember(
         let experiences = experiences_with_index.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
-            let mut results: Vec<(usize, String, Experience)> = Vec::with_capacity(experiences.len());
+            let mut results: Vec<(usize, String, Experience)> =
+                Vec::with_capacity(experiences.len());
             let mut errors: Vec<BatchErrorItem> = Vec::new();
 
             for (index, experience, created_at) in experiences {
