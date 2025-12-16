@@ -1968,11 +1968,19 @@ impl WorkingMemory {
     }
 }
 
+/// Entry in session memory - tracks size at insertion time
+struct SessionMemoryEntry {
+    memory: SharedMemory,
+    /// Size in bytes when inserted (used for accurate size tracking)
+    insertion_size: usize,
+}
+
 /// Session memory - medium-term storage
 ///
 /// Now uses Arc<Memory> for zero-copy shared ownership.
+/// Tracks insertion size separately to avoid overflow when memory is modified after insertion.
 pub struct SessionMemory {
-    memories: HashMap<MemoryId, SharedMemory>,
+    memories: HashMap<MemoryId, SessionMemoryEntry>,
     max_size_mb: usize,
     current_size_bytes: usize,
 }
@@ -2001,7 +2009,14 @@ impl SessionMemory {
             self.evict_to_make_space(memory_size)?;
         }
 
-        self.memories.insert(memory.id.clone(), memory);
+        let id = memory.id.clone();
+        self.memories.insert(
+            id,
+            SessionMemoryEntry {
+                memory,
+                insertion_size: memory_size,
+            },
+        );
         self.current_size_bytes += memory_size;
         Ok(())
     }
@@ -2010,7 +2025,7 @@ impl SessionMemory {
         let mut sorted: Vec<(MemoryId, f32)> = self
             .memories
             .iter()
-            .map(|(id, m)| (id.clone(), m.importance()))
+            .map(|(id, entry)| (id.clone(), entry.memory.importance()))
             .collect();
 
         sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -2019,9 +2034,9 @@ impl SessionMemory {
             if self.current_size_bytes + needed_bytes <= self.max_size_mb * 1024 * 1024 {
                 break;
             }
-            if let Some(memory) = self.memories.remove(&id) {
-                let size = bincode::serialize(&*memory)?.len();
-                self.current_size_bytes -= size;
+            if let Some(entry) = self.memories.remove(&id) {
+                // Use stored insertion_size for accurate tracking (not re-serialized size)
+                self.current_size_bytes = self.current_size_bytes.saturating_sub(entry.insertion_size);
             }
         }
         Ok(())
@@ -2034,6 +2049,7 @@ impl SessionMemory {
         let mut results: Vec<SharedMemory> = self
             .memories
             .values()
+            .map(|entry| &entry.memory)
             .filter(|m| query.matches(m))
             .cloned() // Arc::clone is cheap
             .collect();
@@ -2073,13 +2089,13 @@ impl SessionMemory {
 
     /// Get memory by ID (zero-copy Arc clone)
     pub fn get(&self, id: &MemoryId) -> Option<SharedMemory> {
-        self.memories.get(id).map(Arc::clone)
+        self.memories.get(id).map(|entry| Arc::clone(&entry.memory))
     }
 
     pub fn update_access(&mut self, id: &MemoryId) -> anyhow::Result<()> {
-        if let Some(shared_memory) = self.memories.get(id) {
+        if let Some(entry) = self.memories.get(id) {
             // ZERO-COPY: Update metadata through Arc without cloning Experience/embeddings
-            shared_memory.update_access();
+            entry.memory.update_access();
         }
         Ok(())
     }
@@ -2089,15 +2105,16 @@ impl SessionMemory {
         Ok(self
             .memories
             .values()
+            .map(|entry| &entry.memory)
             .filter(|m| m.importance() >= threshold)
             .cloned() // Arc::clone is cheap
             .collect())
     }
 
     pub fn remove(&mut self, id: &MemoryId) -> anyhow::Result<()> {
-        if let Some(memory) = self.memories.remove(id) {
-            let size = bincode::serialize(&*memory)?.len();
-            self.current_size_bytes -= size;
+        if let Some(entry) = self.memories.remove(id) {
+            // Use stored insertion_size for accurate tracking (avoids overflow)
+            self.current_size_bytes = self.current_size_bytes.saturating_sub(entry.insertion_size);
         }
         Ok(())
     }
@@ -2106,7 +2123,7 @@ impl SessionMemory {
         let to_remove: Vec<MemoryId> = self
             .memories
             .iter()
-            .filter(|(_, m)| m.created_at < cutoff)
+            .filter(|(_, entry)| entry.memory.created_at < cutoff)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -2120,7 +2137,7 @@ impl SessionMemory {
         let to_remove: Vec<MemoryId> = self
             .memories
             .iter()
-            .filter(|(_, m)| m.importance() < threshold)
+            .filter(|(_, entry)| entry.memory.importance() < threshold)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -2134,7 +2151,7 @@ impl SessionMemory {
         let to_remove: Vec<MemoryId> = self
             .memories
             .iter()
-            .filter(|(_, m)| regex.is_match(&m.experience.content))
+            .filter(|(_, entry)| regex.is_match(&entry.memory.experience.content))
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -2145,9 +2162,14 @@ impl SessionMemory {
         Ok(count)
     }
 
+    /// Iterate over all memories for access statistics
+    pub fn iter(&self) -> impl Iterator<Item = (&MemoryId, &SharedMemory)> {
+        self.memories.iter().map(|(id, entry)| (id, &entry.memory))
+    }
+
     /// Get all memories (for semantic search across all tiers)
     pub fn all_memories(&self) -> Vec<SharedMemory> {
-        self.memories.values().cloned().collect()
+        self.memories.values().map(|entry| entry.memory.clone()).collect()
     }
 }
 

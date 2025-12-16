@@ -19,8 +19,8 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
     let config = MemoryConfig {
         storage_path: temp_dir.path().to_path_buf(),
         working_memory_size: 100,
-        session_memory_size_mb: 50,
-        max_heap_per_user_mb: 200,
+        session_memory_size_mb: 2048,   // 2GB session memory for benchmarks
+        max_heap_per_user_mb: 4096,     // 4GB heap limit for extensive benchmarking
         auto_compress: false, // Disable for consistent benchmarks
         compression_age_days: 30,
         importance_threshold: 0.7,

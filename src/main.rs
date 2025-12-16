@@ -973,27 +973,67 @@ struct RecallExperience {
     tags: Vec<String>,
 }
 
-/// Batch remember request for bulk inserts
+/// Batch remember request for bulk inserts (SHO-83)
 #[derive(Debug, Deserialize)]
 struct BatchRememberRequest {
     user_id: String,
     memories: Vec<BatchMemoryItem>,
+    /// Options for batch processing
+    #[serde(default)]
+    options: BatchRememberOptions,
 }
 
-#[derive(Debug, Deserialize)]
+/// Options for batch remember operation
+#[derive(Debug, Deserialize, Clone)]
+struct BatchRememberOptions {
+    /// Whether to extract entities using NER (default: true)
+    #[serde(default = "default_true")]
+    extract_entities: bool,
+    /// Whether to create knowledge graph edges (default: true)
+    #[serde(default = "default_true")]
+    create_edges: bool,
+}
+
+impl Default for BatchRememberOptions {
+    fn default() -> Self {
+        Self {
+            extract_entities: true,
+            create_edges: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
 struct BatchMemoryItem {
     content: String,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default, alias = "experience_type")]
     memory_type: Option<String>,
+    /// Optional timestamp for the memory
+    #[serde(default)]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Error detail for a single item in batch
+#[derive(Debug, Serialize)]
+struct BatchErrorItem {
+    /// Index of the failed item in the request array
+    index: usize,
+    /// Error message describing why this item failed
+    error: String,
 }
 
 #[derive(Debug, Serialize)]
 struct BatchRememberResponse {
-    ids: Vec<String>,
-    success_count: usize,
-    error_count: usize,
+    /// Number of successfully created memories
+    created: usize,
+    /// Number of failed memories
+    failed: usize,
+    /// IDs of successfully created memories (in order)
+    memory_ids: Vec<String>,
+    /// Details of failed items with index and error
+    errors: Vec<BatchErrorItem>,
 }
 
 /// Upsert request - create or update memory with external linking
@@ -3807,8 +3847,13 @@ async fn consolidate_memories(
     }))
 }
 
-/// Batch /api/batch_remember - store multiple memories at once (efficient for bulk)
-/// Example: POST /api/batch_remember { "user_id": "agent-1", "memories": [{"content": "..."}, ...] }
+/// Batch /api/remember/batch - store multiple memories at once (SHO-83)
+/// Efficient bulk ingestion with NER extraction and knowledge graph edges.
+/// Example: POST /api/remember/batch {
+///   "user_id": "agent-1",
+///   "memories": [{"content": "...", "memory_type": "Observation"}, ...],
+///   "options": {"extract_entities": true, "create_edges": true}
+/// }
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id, count = req.memories.len()))]
 async fn batch_remember(
     State(state): State<AppState>,
@@ -3821,9 +3866,10 @@ async fn batch_remember(
 
     if req.memories.is_empty() {
         return Ok(Json(BatchRememberResponse {
-            ids: vec![],
-            success_count: 0,
-            error_count: 0,
+            created: 0,
+            failed: 0,
+            memory_ids: vec![],
+            errors: vec![],
         }));
     }
 
@@ -3834,74 +3880,157 @@ async fn batch_remember(
         });
     }
 
+    // Pre-validate all items and collect validation errors
+    let mut validation_errors: Vec<BatchErrorItem> = Vec::new();
+    let mut valid_items: Vec<(usize, BatchMemoryItem)> = Vec::new();
+
+    for (index, item) in req.memories.into_iter().enumerate() {
+        // Validate content
+        if let Err(e) = validation::validate_content(&item.content, false) {
+            validation_errors.push(BatchErrorItem {
+                index,
+                error: e.to_string(),
+            });
+            continue;
+        }
+        valid_items.push((index, item));
+    }
+
     let memory = state
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
-    let items = req.memories;
-    let (ids, error_count) = {
-        let memory = memory.clone();
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-            let mut ids = Vec::with_capacity(items.len());
-            let mut errors = 0usize;
+    // Process valid items with NER extraction if enabled
+    let extract_entities = req.options.extract_entities;
+    let create_edges = req.options.create_edges;
+    let neural_ner = state.neural_ner.clone();
+    let user_id = req.user_id.clone();
 
-            for item in items {
-                let experience_type = item
-                    .memory_type
-                    .as_ref()
-                    .and_then(|s| match s.to_lowercase().as_str() {
-                        "task" => Some(ExperienceType::Task),
-                        "learning" => Some(ExperienceType::Learning),
-                        "decision" => Some(ExperienceType::Decision),
-                        "error" => Some(ExperienceType::Error),
-                        "pattern" => Some(ExperienceType::Pattern),
-                        "conversation" => Some(ExperienceType::Conversation),
-                        "discovery" => Some(ExperienceType::Discovery),
-                        _ => None,
-                    })
-                    .unwrap_or(ExperienceType::Context);
+    // Build experiences with optional NER extraction
+    let mut experiences_with_index: Vec<(usize, Experience, Option<chrono::DateTime<chrono::Utc>>)> =
+        Vec::with_capacity(valid_items.len());
 
-                let experience = Experience {
-                    content: item.content,
-                    experience_type,
-                    entities: item.tags,
-                    ..Default::default()
-                };
+    for (index, item) in valid_items {
+        let experience_type = item
+            .memory_type
+            .as_ref()
+            .and_then(|s| match s.to_lowercase().as_str() {
+                "task" => Some(ExperienceType::Task),
+                "learning" => Some(ExperienceType::Learning),
+                "decision" => Some(ExperienceType::Decision),
+                "error" => Some(ExperienceType::Error),
+                "pattern" => Some(ExperienceType::Pattern),
+                "conversation" => Some(ExperienceType::Conversation),
+                "discovery" => Some(ExperienceType::Discovery),
+                "observation" => Some(ExperienceType::Context), // Map Observation to Context
+                "context" => Some(ExperienceType::Context),
+                _ => None,
+            })
+            .unwrap_or(ExperienceType::Context);
 
-                match memory_guard.record(experience, None) {
-                    Ok(id) => ids.push(id.0.to_string()),
-                    Err(_) => errors += 1,
+        // Extract entities via NER if enabled
+        let merged_entities = if extract_entities {
+            let extracted_names: Vec<String> = match neural_ner.extract(&item.content) {
+                Ok(entities) => entities.into_iter().map(|e| e.text).collect(),
+                Err(e) => {
+                    tracing::debug!("NER extraction failed for batch item {}: {}", index, e);
+                    Vec::new()
+                }
+            };
+
+            // Merge user tags with NER-extracted entities (deduplicated)
+            let mut merged: Vec<String> = item.tags.clone();
+            for entity_name in extracted_names {
+                if !merged.iter().any(|t| t.eq_ignore_ascii_case(&entity_name)) {
+                    merged.push(entity_name);
                 }
             }
-            (ids, errors)
+            merged
+        } else {
+            item.tags.clone()
+        };
+
+        let experience = Experience {
+            content: item.content,
+            experience_type,
+            entities: merged_entities,
+            tags: item.tags,
+            ..Default::default()
+        };
+
+        experiences_with_index.push((index, experience, item.created_at));
+    }
+
+    // Store memories in blocking task
+    let (memory_results, storage_errors) = {
+        let memory = memory.clone();
+        let experiences = experiences_with_index.clone();
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            let mut results: Vec<(usize, String, Experience)> = Vec::with_capacity(experiences.len());
+            let mut errors: Vec<BatchErrorItem> = Vec::new();
+
+            for (index, experience, created_at) in experiences {
+                match memory_guard.record(experience.clone(), created_at) {
+                    Ok(id) => {
+                        results.push((index, id.0.to_string(), experience));
+                    }
+                    Err(e) => {
+                        errors.push(BatchErrorItem {
+                            index,
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+            (results, errors)
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
     };
 
-    let success_count = ids.len();
+    // Process into knowledge graph if enabled
+    if create_edges {
+        for (_, memory_id, experience) in &memory_results {
+            let mem_id = MemoryId(uuid::Uuid::parse_str(memory_id).unwrap_or_default());
+            if let Err(e) = state.process_experience_into_graph(&user_id, experience, &mem_id) {
+                tracing::debug!("Graph processing failed for memory {}: {}", memory_id, e);
+                // Don't fail the batch if graph processing fails
+            }
+        }
+    }
+
+    // Collect results
+    let memory_ids: Vec<String> = memory_results.iter().map(|(_, id, _)| id.clone()).collect();
+    let created = memory_ids.len();
+
+    // Merge all errors
+    let mut all_errors = validation_errors;
+    all_errors.extend(storage_errors);
+    all_errors.sort_by_key(|e| e.index);
+    let failed = all_errors.len();
 
     // Record metrics
     let duration = op_start.elapsed().as_secs_f64();
     metrics::BATCH_STORE_DURATION.observe(duration);
     metrics::BATCH_STORE_SIZE.observe(batch_size as f64);
     // Also record individual store metrics
-    for _ in 0..success_count {
+    for _ in 0..created {
         metrics::MEMORY_STORE_TOTAL
             .with_label_values(&["success"])
             .inc();
     }
-    for _ in 0..error_count {
+    for _ in 0..failed {
         metrics::MEMORY_STORE_TOTAL
             .with_label_values(&["error"])
             .inc();
     }
 
     Ok(Json(BatchRememberResponse {
-        ids,
-        success_count,
-        error_count,
+        created,
+        failed,
+        memory_ids,
+        errors: all_errors,
     }))
 }
 
@@ -6059,6 +6188,8 @@ async fn main() -> Result<()> {
         // Simplified LLM-friendly endpoints (effortless API)
         .route("/api/remember", post(remember))
         .route("/api/recall", post(recall))
+        // Batch insert (SHO-83) - both paths for compatibility
+        .route("/api/remember/batch", post(batch_remember))
         .route("/api/batch_remember", post(batch_remember))
         // Mutable memories with external linking (SHO-39)
         .route("/api/upsert", post(upsert_memory))

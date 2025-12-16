@@ -745,18 +745,30 @@ class Memory:
 
     def batch_remember(
         self,
-        memories: List[Dict[str, any]]
+        memories: List[Dict[str, any]],
+        extract_entities: bool = True,
+        create_edges: bool = True
     ) -> Dict[str, any]:
-        """Store multiple memories in a single request
+        """Store multiple memories in a single request (SHO-83)
+
+        Efficient bulk ingestion with NER extraction and knowledge graph edges.
+        Supports partial success - some memories can fail while others succeed.
 
         Args:
             memories: List of memory dicts, each with:
                 - content (str, required): The content to remember
-                - memory_type (str, optional): Type (Decision, Learning, etc.)
+                - memory_type (str, optional): Type (Decision, Learning, Observation, etc.)
                 - tags (list, optional): Tags for categorization
+                - created_at (str, optional): ISO 8601 timestamp
+            extract_entities: Whether to extract entities using NER (default: True)
+            create_edges: Whether to create knowledge graph edges (default: True)
 
         Returns:
-            Dict with ids (list of created IDs), success_count, error_count
+            Dict with:
+                - created (int): Number of successfully created memories
+                - failed (int): Number of failed memories
+                - memory_ids (list): IDs of successfully created memories
+                - errors (list): Details of failed items [{index, error}, ...]
 
         Examples:
             result = memory.batch_remember([
@@ -764,12 +776,25 @@ class Memory:
                 {"content": "API rate limit is 100/min", "memory_type": "Learning"},
                 {"content": "Meeting at 3pm", "tags": ["calendar"]}
             ])
-            print(f"Created {result['success_count']} memories")
+            print(f"Created {result['created']} memories")
+            if result['errors']:
+                for err in result['errors']:
+                    print(f"  Failed item {err['index']}: {err['error']}")
+
+            # Disable entity extraction for faster bulk import
+            result = memory.batch_remember(memories, extract_entities=False)
         """
         try:
             response = self._session.post(
-                f"{self.base_url}/api/batch_remember",
-                json={"user_id": self.user_id, "memories": memories},
+                f"{self.base_url}/api/remember/batch",
+                json={
+                    "user_id": self.user_id,
+                    "memories": memories,
+                    "options": {
+                        "extract_entities": extract_entities,
+                        "create_edges": create_edges
+                    }
+                },
                 timeout=self.timeout * 2  # Double timeout for batch
             )
         except requests.exceptions.ConnectionError as e:

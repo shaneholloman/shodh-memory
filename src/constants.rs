@@ -135,20 +135,22 @@ pub const COMPRESSION_ACCESS_THRESHOLD: u32 = 10;
 
 /// Estimated bytes per memory entry
 ///
-/// Used for resource limit calculations. Intentionally conservative.
+/// Used for resource limit calculations. Uses 2x safety margin.
 ///
 /// Breakdown:
 /// - Experience content: ~2-5KB (text, metadata)
-/// - Embeddings (384 dims): 1.5KB
+/// - Embeddings (384 dims): 1.5KB (384 * 4 bytes)
 /// - Memory struct overhead: ~500 bytes
 /// - Serialization overhead: ~200 bytes
 /// - Buffer for large experiences: ~4KB
 ///
-/// Total conservative estimate: 8-10KB average
-/// We use 250KB as a 25x safety margin for edge cases and future growth.
+/// Total realistic estimate: 8-10KB average
+/// We use 20KB (2x safety margin) to prevent false positive resource limits
+/// while still protecting against runaway memory usage.
 ///
-/// Note: This is intentionally high. Real-world measurements should tune this.
-pub const ESTIMATED_BYTES_PER_MEMORY: usize = 250 * 1024;
+/// Math: 500MB default limit / 20KB = ~25,000 memories per user
+/// This is sufficient for most use cases while preventing OOM.
+pub const ESTIMATED_BYTES_PER_MEMORY: usize = 20 * 1024;
 
 /// Vector search candidate multiplier
 ///
