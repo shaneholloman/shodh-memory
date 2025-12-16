@@ -528,6 +528,19 @@ impl StreamSession {
         self.last_extraction = Utc::now();
         self.buffer.drain(..).collect()
     }
+
+    /// Update last activity timestamp
+    fn touch(&mut self) {
+        self.last_activity = Utc::now();
+    }
+
+    /// Check if session is stale (no activity for SESSION_TIMEOUT_SECS)
+    fn is_stale(&self) -> bool {
+        let elapsed = Utc::now()
+            .signed_duration_since(self.last_activity)
+            .num_seconds();
+        elapsed > SESSION_TIMEOUT_SECS
+    }
 }
 
 /// Streaming Memory Extractor - core processing engine
@@ -548,14 +561,44 @@ impl StreamingMemoryExtractor {
     }
 
     /// Create a new streaming session
-    pub async fn create_session(&self, handshake: StreamHandshake) -> String {
-        let session = StreamSession::new(handshake);
-        let session_id = session.session_id.clone();
+    pub async fn create_session(&self, handshake: StreamHandshake) -> Result<String, String> {
+        // Cleanup stale sessions first
+        self.cleanup_stale_sessions().await;
 
         let mut sessions = self.sessions.write().await;
+
+        // Check max concurrent sessions limit
+        if sessions.len() >= MAX_CONCURRENT_SESSIONS {
+            return Err(format!(
+                "Maximum concurrent sessions ({}) reached. Try again later.",
+                MAX_CONCURRENT_SESSIONS
+            ));
+        }
+
+        let session = StreamSession::new(handshake);
+        let session_id = session.session_id.clone();
         sessions.insert(session_id.clone(), session);
 
-        session_id
+        Ok(session_id)
+    }
+
+    /// Remove stale sessions that have been inactive for too long
+    pub async fn cleanup_stale_sessions(&self) -> usize {
+        let mut sessions = self.sessions.write().await;
+        let before_count = sessions.len();
+
+        sessions.retain(|_id, session| !session.is_stale());
+
+        let removed = before_count - sessions.len();
+        if removed > 0 {
+            tracing::info!("Cleaned up {} stale streaming sessions", removed);
+        }
+        removed
+    }
+
+    /// Get current session count
+    pub async fn session_count(&self) -> usize {
+        self.sessions.read().await.len()
     }
 
     /// Process incoming message
@@ -578,6 +621,9 @@ impl StreamingMemoryExtractor {
                 }
             }
         };
+
+        // Update activity timestamp to prevent stale session cleanup
+        session.touch();
 
         match message {
             StreamMessage::Content {

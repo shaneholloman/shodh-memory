@@ -725,16 +725,10 @@ fn test_hebbian_graph_persists_across_restart() {
         let mut memory = MemorySystem::new(config.clone()).expect("Failed to create system");
 
         id1 = memory
-            .record(
-                create_experience("Hebbian persistence test memory A"),
-                None,
-            )
+            .record(create_experience("Hebbian persistence test memory A"), None)
             .unwrap();
         id2 = memory
-            .record(
-                create_experience("Hebbian persistence test memory B"),
-                None,
-            )
+            .record(create_experience("Hebbian persistence test memory B"), None)
             .unwrap();
 
         // Strengthen association by co-retrieval

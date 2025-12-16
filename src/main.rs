@@ -1447,10 +1447,25 @@ async fn handle_streaming_socket(socket: axum::extract::ws::WebSocket, state: Ap
         }
 
         // Create session
-        let id = state
+        let id = match state
             .streaming_extractor
             .create_session(handshake.clone())
-            .await;
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                let error = streaming::ExtractionResult::Error {
+                    code: "SESSION_LIMIT_REACHED".to_string(),
+                    message: e,
+                    fatal: true,
+                    timestamp: chrono::Utc::now(),
+                };
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&error).unwrap().into()))
+                    .await;
+                return;
+            }
+        };
         session_id = Some(id.clone());
 
         // Send acknowledgement
