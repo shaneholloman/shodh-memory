@@ -132,6 +132,7 @@ impl RetrievalEngine {
         // Try to load persisted index and ID mapping
         let index_file = index_path.join("vamana_index.bin");
         let mapping_file = index_path.join("id_mapping.bin");
+        let graph_file = index_path.join("memory_graph.bin");
 
         if index_file.exists() && mapping_file.exists() {
             match vector_index.load(&index_path) {
@@ -159,12 +160,33 @@ impl RetrievalEngine {
             info!("No persisted vector index found, starting with empty index");
         }
 
+        // Load memory graph (Hebbian associations)
+        let graph = if graph_file.exists() {
+            match MemoryGraph::load(&graph_file) {
+                Ok(loaded_graph) => {
+                    let stats = loaded_graph.stats();
+                    info!(
+                        "Loaded persisted memory graph with {} nodes and {} edges",
+                        stats.node_count, stats.edge_count
+                    );
+                    loaded_graph
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load memory graph, starting fresh: {}", e);
+                    MemoryGraph::new()
+                }
+            }
+        } else {
+            info!("No persisted memory graph found, starting with empty graph");
+            MemoryGraph::new()
+        };
+
         Ok(Self {
             storage,
             embedder,
             vector_index: Arc::new(RwLock::new(vector_index)),
             id_mapping: Arc::new(RwLock::new(id_mapping)),
-            graph: RwLock::new(MemoryGraph::new()),
+            graph: RwLock::new(graph),
             storage_path,
             consolidation_events,
         })
@@ -189,9 +211,10 @@ impl RetrievalEngine {
         bincode::deserialize_from(reader).context("Failed to deserialize ID mapping")
     }
 
-    /// Save vector index and ID mapping to disk
+    /// Save vector index, ID mapping, and memory graph to disk
     ///
     /// Called during flush_storage to persist the index for restart recovery.
+    /// Now also persists the Hebbian association graph to preserve learned relationships.
     pub fn save(&self) -> Result<()> {
         let index_path = self.storage_path.join("vector_index");
         fs::create_dir_all(&index_path)?;
@@ -207,10 +230,18 @@ impl RetrievalEngine {
         let writer = BufWriter::new(file);
         bincode::serialize_into(writer, &*id_mapping).context("Failed to serialize ID mapping")?;
 
+        // Save memory graph (Hebbian associations)
+        let graph_file = index_path.join("memory_graph.bin");
+        let graph = self.graph.read();
+        graph.save(&graph_file)?;
+        let graph_stats = graph.stats();
+
         info!(
-            "Saved vector index with {} vectors and {} ID mappings",
+            "Saved vector index with {} vectors, {} ID mappings, and memory graph with {} nodes/{} edges",
             index.len(),
-            id_mapping.len()
+            id_mapping.len(),
+            graph_stats.node_count,
+            graph_stats.edge_count
         );
 
         Ok(())
@@ -1120,13 +1151,14 @@ impl Default for RetrievalOutcome {
 /// - Edge strength increases with co-access (Hebbian strengthening)
 /// - Edges decay over time without use
 /// - Strong edges are prioritized in traversal
+#[derive(Serialize, Deserialize)]
 pub(crate) struct MemoryGraph {
     /// Adjacency with edge weights (strength 0.0-1.0)
     adjacency: HashMap<MemoryId, HashMap<MemoryId, EdgeWeight>>,
 }
 
 /// Edge weight with Hebbian learning properties
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct EdgeWeight {
     /// Current strength (0.0 to 1.0)
     strength: f32,
@@ -1239,6 +1271,26 @@ impl MemoryGraph {
         Self {
             adjacency: HashMap::new(),
         }
+    }
+
+    /// Save the memory graph to disk
+    ///
+    /// Uses bincode serialization for efficient binary format.
+    /// Called during RetrievalEngine::save() to persist learned associations.
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
+        let file = File::create(path).context("Failed to create memory graph file")?;
+        let writer = BufWriter::new(file);
+        bincode::serialize_into(writer, self).context("Failed to serialize memory graph")?;
+        Ok(())
+    }
+
+    /// Load the memory graph from disk
+    ///
+    /// Returns a new MemoryGraph if file doesn't exist or fails to load.
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let file = File::open(path).context("Failed to open memory graph file")?;
+        let reader = BufReader::new(file);
+        bincode::deserialize_from(reader).context("Failed to deserialize memory graph")
     }
 
     /// Add edge between memories (bidirectional) with initial weight
