@@ -120,8 +120,8 @@ pub struct VamanaIndex {
     /// Medoid/centroid as entry point
     pub(crate) medoid: Arc<RwLock<u32>>,
 
-    /// Number of vectors
-    pub(crate) num_vectors: usize,
+    /// Number of vectors (atomic for lock-free reads during background rebuild)
+    pub(crate) num_vectors: std::sync::atomic::AtomicUsize,
 
     /// Storage path for mmap files (unique per index instance)
     storage_path: Option<PathBuf>,
@@ -152,6 +152,12 @@ pub(crate) enum VectorStorage {
     },
 }
 
+impl Default for VectorStorage {
+    fn default() -> Self {
+        VectorStorage::Memory(Vec::new())
+    }
+}
+
 impl VamanaIndex {
     /// Create new Vamana index
     pub fn new(config: VamanaConfig) -> Result<Self> {
@@ -165,7 +171,7 @@ impl VamanaIndex {
             graph: Arc::new(RwLock::new(Vec::new())),
             vectors: Arc::new(RwLock::new(VectorStorage::Memory(Vec::new()))),
             medoid: Arc::new(RwLock::new(0)),
-            num_vectors: 0,
+            num_vectors: std::sync::atomic::AtomicUsize::new(0),
             storage_path,
             incremental_inserts: std::sync::atomic::AtomicUsize::new(0),
             rebuilding: std::sync::atomic::AtomicBool::new(false),
@@ -175,12 +181,12 @@ impl VamanaIndex {
 
     /// Get number of vectors in the index
     pub fn len(&self) -> usize {
-        self.num_vectors
+        self.num_vectors.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Check if index is empty
     pub fn is_empty(&self) -> bool {
-        self.num_vectors == 0
+        self.num_vectors.load(std::sync::atomic::Ordering::Acquire) == 0
     }
 
     /// Build index from vectors using Vamana algorithm
@@ -190,7 +196,7 @@ impl VamanaIndex {
         }
 
         let n = vectors.len();
-        self.num_vectors = n;
+        self.num_vectors.store(n, std::sync::atomic::Ordering::Release);
 
         info!("Building Vamana index with {} vectors", n);
 
@@ -386,7 +392,7 @@ impl VamanaIndex {
 
     /// Find medoid (closest point to centroid)
     fn find_medoid(&mut self) -> Result<()> {
-        let n = self.num_vectors;
+        let n = self.num_vectors.load(std::sync::atomic::Ordering::Acquire);
         if n == 0 {
             return Ok(());
         }
@@ -707,7 +713,7 @@ impl VamanaIndex {
     /// Search for k nearest neighbors (excludes soft-deleted vectors)
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u32, f32)>> {
         // Check if index is empty
-        if self.num_vectors == 0 {
+        if self.num_vectors.load(std::sync::atomic::Ordering::Acquire) == 0 {
             return Ok(Vec::new());
         }
 
@@ -746,7 +752,7 @@ impl VamanaIndex {
     /// The vector remains in the graph but is excluded from search results.
     /// It will be physically removed on the next rebuild.
     pub fn mark_deleted(&self, vector_id: u32) -> bool {
-        if (vector_id as usize) < self.num_vectors {
+        if (vector_id as usize) < self.num_vectors.load(std::sync::atomic::Ordering::Acquire) {
             self.deleted_ids.write().insert(vector_id);
             true
         } else {
@@ -767,10 +773,11 @@ impl VamanaIndex {
     /// Get the deletion ratio (deleted / total vectors)
     /// Returns 0.0 if index is empty
     pub fn deletion_ratio(&self) -> f32 {
-        if self.num_vectors == 0 {
+        let n = self.num_vectors.load(std::sync::atomic::Ordering::Acquire);
+        if n == 0 {
             return 0.0;
         }
-        self.deleted_count() as f32 / self.num_vectors as f32
+        self.deleted_count() as f32 / n as f32
     }
 
     /// Check if compaction is needed based on deletion ratio
@@ -785,7 +792,8 @@ impl VamanaIndex {
 
     /// Add a single vector (incremental indexing) - OPTIMIZED
     pub fn add_vector(&mut self, vector: Vec<f32>) -> Result<u32> {
-        let id = self.num_vectors as u32;
+        let current_count = self.num_vectors.load(std::sync::atomic::Ordering::Acquire);
+        let id = current_count as u32;
 
         // Add to storage
         let mut storage = self.vectors.write();
@@ -800,14 +808,14 @@ impl VamanaIndex {
         drop(storage);
 
         // For the first vector, just create a node with no neighbors
-        if self.num_vectors == 0 {
+        if current_count == 0 {
             let mut graph = self.graph.write();
             graph.push(VamanaNode {
                 id,
                 neighbors: Vec::new(),
             });
             *self.medoid.write() = 0;
-            self.num_vectors += 1;
+            self.num_vectors.fetch_add(1, std::sync::atomic::Ordering::Release);
             return Ok(id);
         }
 
@@ -879,7 +887,7 @@ impl VamanaIndex {
         }
         drop(vectors);
 
-        self.num_vectors += 1;
+        self.num_vectors.fetch_add(1, std::sync::atomic::Ordering::Release);
         self.incremental_inserts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(id)
@@ -1009,7 +1017,7 @@ impl VamanaIndex {
         // Clear current state
         self.graph.write().clear();
         *self.vectors.write() = VectorStorage::Memory(Vec::new());
-        self.num_vectors = 0;
+        self.num_vectors.store(0, std::sync::atomic::Ordering::Release);
 
         // Full rebuild with robust_prune
         self.build(vectors)?;
@@ -1021,14 +1029,30 @@ impl VamanaIndex {
         Ok(())
     }
 
-    /// Perform automatic rebuild if threshold exceeded
+    /// Perform automatic rebuild if threshold exceeded (non-blocking)
     ///
-    /// Thread-safe method that checks if rebuild is needed and performs it atomically.
+    /// Thread-safe method that checks if rebuild is needed and performs it without
+    /// blocking concurrent reads or writes. Uses a background build followed by
+    /// atomic swap of index internals.
+    ///
     /// Returns true if rebuild was performed, false if not needed or already in progress.
+    ///
+    /// ## Concurrency Model
+    ///
+    /// - **Reads**: Continue uninterrupted on the old index during rebuild
+    /// - **Writes**: Continue on the old index but will be lost when swap occurs
+    /// - **Swap**: Brief write locks acquired only during the final atomic swap
     ///
     /// Uses compare-and-swap to ensure only one rebuild occurs even with concurrent calls.
     /// Compacts deleted vectors by extracting only live vectors.
-    pub fn auto_rebuild_if_needed(&mut self) -> Result<bool> {
+    ///
+    /// ## Note on Write Handling
+    ///
+    /// Any vectors added between `extract_live_vectors()` and the final swap will be
+    /// lost. This is acceptable for periodic maintenance rebuilds. For write-intensive
+    /// workloads, consider using `rebuild_from_vectors()` which takes `&mut self` and
+    /// blocks writes during rebuild.
+    pub fn auto_rebuild_if_needed(&self) -> Result<bool> {
         if !self.needs_rebuild() {
             return Ok(false);
         }
@@ -1052,30 +1076,71 @@ impl VamanaIndex {
         // Log reason for rebuild
         let deleted_count = self.deleted_count();
         let deletion_ratio = self.deletion_ratio();
+        let total_vectors = self.num_vectors.load(std::sync::atomic::Ordering::Acquire);
         if deletion_ratio >= DELETION_RATIO_THRESHOLD {
             info!(
                 "Compacting index: {} deleted vectors ({:.1}% of {})",
                 deleted_count,
                 deletion_ratio * 100.0,
-                self.num_vectors
+                total_vectors
             );
         }
 
-        // We acquired the rebuild lock - perform rebuild
-        // Use extract_live_vectors to compact deleted entries
+        // We acquired the rebuild lock - perform background rebuild with atomic swap
         let result = (|| {
+            // 1. Extract live vectors (read-only, doesn't block writes)
             let vectors = self.extract_live_vectors();
             let compacted = deleted_count;
             if vectors.is_empty() {
                 self.clear_deleted();
                 return Ok(false);
             }
-            self.rebuild_from_vectors(vectors)?;
-            // Clear deleted markers after successful rebuild
+
+            info!(
+                "Background rebuilding Vamana index with {} vectors (was {} incremental inserts)",
+                vectors.len(),
+                self.incremental_insert_count()
+            );
+
+            // 2. Build completely new index (expensive, but doesn't hold any locks on self)
+            let config = self.config.clone();
+            let mut new_index = VamanaIndex::new(config)?;
+            new_index.build(vectors)?;
+
+            // 3. Atomic swap - acquire all write locks briefly
+            // Lock ordering: graph -> vectors -> medoid (consistent with struct field order)
+            {
+                let mut old_graph = self.graph.write();
+                let mut old_vectors = self.vectors.write();
+                let mut old_medoid = self.medoid.write();
+
+                // Swap graph
+                let new_graph = std::mem::take(&mut *new_index.graph.write());
+                *old_graph = new_graph;
+
+                // Swap vectors
+                let new_vectors = std::mem::take(&mut *new_index.vectors.write());
+                *old_vectors = new_vectors;
+
+                // Swap medoid
+                *old_medoid = *new_index.medoid.read();
+            }
+
+            // Update num_vectors atomically (after releasing locks)
+            self.num_vectors.store(
+                new_index.num_vectors.load(std::sync::atomic::Ordering::Acquire),
+                std::sync::atomic::Ordering::Release,
+            );
+
+            // Clear deleted markers and reset counter
             self.clear_deleted();
+            self.reset_incremental_counter();
+
             if compacted > 0 {
                 info!("Compaction complete: removed {} deleted vectors", compacted);
             }
+            info!("Background Vamana index rebuild complete");
+
             Ok(true)
         })();
 
@@ -1148,11 +1213,12 @@ impl VamanaIndex {
             }
         };
 
+        let num_vecs = self.num_vectors.load(std::sync::atomic::Ordering::Acquire);
         let data = VamanaData {
             graph: self.graph.read().clone(),
             vectors,
             medoid: *self.medoid.read(),
-            num_vectors: self.num_vectors,
+            num_vectors: num_vecs,
         };
 
         // Save as binary
@@ -1162,7 +1228,7 @@ impl VamanaIndex {
 
         info!(
             "Saved Vamana index with {} vectors to {:?}",
-            self.num_vectors, index_file
+            num_vecs, index_file
         );
         Ok(())
     }
@@ -1196,7 +1262,7 @@ impl VamanaIndex {
         // Update internal state
         *self.graph.write() = data.graph;
         *self.medoid.write() = data.medoid;
-        self.num_vectors = data.num_vectors;
+        self.num_vectors.store(data.num_vectors, std::sync::atomic::Ordering::Release);
 
         // Update vector storage
         match &mut *self.vectors.write() {
@@ -1214,7 +1280,7 @@ impl VamanaIndex {
             }
         }
 
-        info!("Loaded Vamana index with {} vectors", self.num_vectors);
+        info!("Loaded Vamana index with {} vectors", data.num_vectors);
         Ok(())
     }
 }
