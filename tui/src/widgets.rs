@@ -419,13 +419,17 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         0u16
     };
     let list_height = inner.height.saturating_sub(detail_height);
-    let max_visible = list_height as usize;
 
+    // Timeline: 3 lines per event
+    let event_height = 3u16;
+    let max_events = (list_height / event_height).max(1) as usize;
+
+    // Calculate scroll position based on selection
     let scroll_start = if let Some(sel) = state.selected_event {
         if sel < state.scroll_offset {
             sel
-        } else if max_visible > 0 && sel >= state.scroll_offset + max_visible {
-            sel.saturating_sub(max_visible.saturating_sub(1))
+        } else if sel >= state.scroll_offset + max_events {
+            sel.saturating_sub(max_events.saturating_sub(1))
         } else {
             state.scroll_offset
         }
@@ -433,11 +437,6 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         state.scroll_offset
     };
 
-    let end = (scroll_start + max_visible).min(state.events.len());
-
-    // Timeline-style rendering: 3 lines per event
-    let event_height = 3u16;
-    let max_events = (list_height / event_height) as usize;
     let end = (scroll_start + max_events).min(state.events.len());
     let content_width = inner.width.saturating_sub(4) as usize; // Leave room for timeline
 
@@ -571,7 +570,7 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         }
     }
 
-    if state.events.len() > max_visible {
+    if state.events.len() > max_events {
         let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
         let mut scrollbar_state = ScrollbarState::new(state.events.len()).position(scroll_start);
         f.render_stateful_widget(
@@ -777,13 +776,13 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
     };
     let list_height = inner.height.saturating_sub(detail_height);
     let event_height = 5u16;
-    let max_visible = (list_height / event_height) as usize;
+    let max_events = (list_height / event_height) as usize;
 
     let scroll_start = if let Some(sel) = state.selected_event {
         if sel < state.scroll_offset {
             sel
-        } else if max_visible > 0 && sel >= state.scroll_offset + max_visible {
-            sel.saturating_sub(max_visible.saturating_sub(1))
+        } else if max_events > 0 && sel >= state.scroll_offset + max_events {
+            sel.saturating_sub(max_events.saturating_sub(1))
         } else {
             state.scroll_offset
         }
@@ -791,7 +790,7 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
         state.scroll_offset
     };
 
-    let end = (scroll_start + max_visible).min(state.events.len());
+    let end = (scroll_start + max_events).min(state.events.len());
     let mut y_offset = 0;
 
     for (global_idx, event) in state
@@ -827,7 +826,7 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
         }
     }
 
-    if state.events.len() > max_visible {
+    if state.events.len() > max_events {
         let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
         let mut scrollbar_state = ScrollbarState::new(state.events.len()).position(scroll_start);
         f.render_stateful_widget(
