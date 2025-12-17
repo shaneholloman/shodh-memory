@@ -163,11 +163,8 @@ impl MemoryStream {
                     (n * 0.618).sin() * 0.35 + 0.5,
                     (n * 0.618).cos() * 0.35 + 0.5,
                 );
-                let content_preview = if mem.content.len() > 100 {
-                    format!("{}...", &mem.content[..97.min(mem.content.len())])
-                } else {
-                    mem.content.clone()
-                };
+                // Store full content - truncation happens at display time
+                let content_preview = mem.content.clone();
                 let content = if mem.content.len() > 40 {
                     format!("{}...", &mem.content[..37.min(mem.content.len())])
                 } else {
