@@ -435,16 +435,21 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
 
     let end = (scroll_start + max_visible).min(state.events.len());
 
-    for (line_idx, (global_idx, event)) in state
+    // Timeline-style rendering: 3 lines per event
+    let event_height = 3u16;
+    let max_events = (list_height / event_height) as usize;
+    let end = (scroll_start + max_events).min(state.events.len());
+    let content_width = inner.width.saturating_sub(4) as usize; // Leave room for timeline
+
+    let mut y_offset = 0u16;
+    for (global_idx, event) in state
         .events
         .iter()
         .enumerate()
         .skip(scroll_start)
         .take(end.saturating_sub(scroll_start))
-        .enumerate()
     {
-        let y = inner.y + line_idx as u16;
-        if y >= inner.y + list_height {
+        if y_offset + event_height > list_height {
             break;
         }
 
@@ -452,44 +457,56 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         let is_newest = global_idx == 0;
         let color = event.event.event_color();
         let icon = event.event.event_icon();
-        // Green circle for newest, arrow for selected, space otherwise
-        let prefix = if is_newest {
-            "●"
+
+        // Timeline node: green for newest, cyan for selected, dim for others
+        let node = if is_newest { "●" } else { "○" };
+        let node_color = if is_newest {
+            Color::Green
         } else if is_selected {
-            "▶"
+            Color::Cyan
         } else {
-            " "
+            Color::DarkGray
         };
-        let prefix_color = if is_newest { Color::Green } else { Color::Cyan };
-        // Blue-tinted background for better contrast
+
         let bg = if is_selected {
             Color::Rgb(25, 40, 60)
         } else {
             Color::Reset
         };
 
+        // Line 1: Timeline node + event type + time
+        let time_str = event.time_ago();
+        let type_width = 10;
+        let padding = content_width.saturating_sub(type_width + time_str.len() + 2);
+        let line1 = Line::from(vec![
+            Span::styled(
+                node,
+                Style::default().fg(node_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("─", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                icon,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {:8}", event.event.event_type),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:>width$}", time_str, width = padding + time_str.len()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+
+        // Line 2: Content (full width)
         let preview = event
             .event
             .content_preview
             .as_ref()
-            .map(|s| truncate(s, 35))
+            .map(|s| truncate(s, content_width))
             .unwrap_or_default();
-        let line = Line::from(vec![
-            Span::styled(
-                prefix,
-                Style::default()
-                    .fg(prefix_color)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(bg),
-            ),
-            Span::styled(icon, Style::default().fg(color).bg(bg)),
-            Span::styled(
-                format!(" {:8} ", event.event.event_type),
-                Style::default()
-                    .fg(color)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(bg),
-            ),
+        let line2 = Line::from(vec![
+            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 preview,
                 Style::default()
@@ -500,26 +517,46 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
                     })
                     .bg(bg),
             ),
-            Span::styled(
-                format!(" {}", event.time_ago()),
-                Style::default()
-                    .fg(if is_selected {
-                        Color::White
-                    } else {
-                        Color::DarkGray
-                    })
-                    .bg(bg),
-            ),
         ]);
-        f.render_widget(
-            Paragraph::new(line),
-            Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            },
-        );
+
+        // Line 3: Metadata + spacing
+        let mut meta_spans = vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
+        if let Some(t) = &event.event.memory_type {
+            meta_spans.push(Span::styled(
+                format!("[{}]", t),
+                Style::default().fg(Color::Cyan),
+            ));
+            meta_spans.push(Span::raw(" "));
+        }
+        if let Some(entities) = &event.event.entities {
+            if !entities.is_empty() {
+                let tags = entities
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                meta_spans.push(Span::styled(tags, Style::default().fg(Color::Green)));
+            }
+        }
+        let line3 = Line::from(meta_spans);
+
+        // Render all 3 lines
+        let event_area = Rect {
+            x: inner.x,
+            y: inner.y + y_offset,
+            width: inner.width,
+            height: event_height,
+        };
+
+        // Background for selected
+        if is_selected {
+            f.render_widget(Block::default().style(Style::default().bg(bg)), event_area);
+        }
+
+        f.render_widget(Paragraph::new(vec![line1, line2, line3]), event_area);
+
+        y_offset += event_height;
     }
 
     if let Some(sel_idx) = state.selected_event {
