@@ -107,7 +107,10 @@ impl MemoryStream {
         loop {
             match self.connect().await {
                 Ok(()) => {}
-                Err(_) => {}
+                Err(e) => {
+                    let mut state = self.state.lock().await;
+                    state.set_error(format!("Connection error: {}", e));
+                }
             }
             {
                 let mut state = self.state.lock().await;
@@ -119,14 +122,20 @@ impl MemoryStream {
 
     async fn fetch_initial_data(&self) {
         let user_id = &self.user_id;
-        if let Ok(stats) = self.fetch_user_stats(user_id).await {
-            let mut state = self.state.lock().await;
-            state.total_memories += stats.total_memories as u64;
-            state.total_recalls += stats.total_retrievals as u64;
-            state.tier_stats.working += stats.working_memory_count as u32;
-            state.tier_stats.session += stats.session_memory_count as u32;
-            state.tier_stats.long_term += stats.long_term_memory_count as u32;
-            state.index_healthy = stats.vector_index_count >= stats.total_memories;
+        match self.fetch_user_stats(user_id).await {
+            Ok(stats) => {
+                let mut state = self.state.lock().await;
+                state.total_memories += stats.total_memories as u64;
+                state.total_recalls += stats.total_retrievals as u64;
+                state.tier_stats.working += stats.working_memory_count as u32;
+                state.tier_stats.session += stats.session_memory_count as u32;
+                state.tier_stats.long_term += stats.long_term_memory_count as u32;
+                state.index_healthy = stats.vector_index_count >= stats.total_memories;
+            }
+            Err(e) => {
+                let mut state = self.state.lock().await;
+                state.set_error(format!("Failed to load stats: {}", e));
+            }
         }
         if let Ok(list) = self.fetch_memory_list(user_id).await {
             let mut state = self.state.lock().await;

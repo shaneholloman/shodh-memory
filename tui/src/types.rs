@@ -319,6 +319,8 @@ pub struct AppState {
     pub session_start: Instant,
     pub current_user: String,
     pub selected_event: Option<usize>,
+    /// Error message to display in footer (message, timestamp)
+    pub error_message: Option<(String, Instant)>,
 }
 
 impl AppState {
@@ -345,6 +347,7 @@ impl AppState {
             session_start: Instant::now(),
             current_user: String::new(),
             selected_event: None,
+            error_message: None,
         }
     }
 
@@ -582,8 +585,23 @@ impl AppState {
         }
     }
 
+    /// Set an error message to display in footer (auto-clears after 5s)
+    pub fn set_error(&mut self, message: String) {
+        self.error_message = Some((message, Instant::now()));
+    }
+
+    /// Clear error if older than 5 seconds
+    pub fn clear_stale_error(&mut self) {
+        if let Some((_, timestamp)) = &self.error_message {
+            if timestamp.elapsed().as_secs() >= 5 {
+                self.error_message = None;
+            }
+        }
+    }
+
     pub fn tick(&mut self) {
         self.animation_tick = self.animation_tick.wrapping_add(1);
+        self.clear_stale_error();
         for event in &mut self.events {
             if let AnimationState::SlideIn(ref mut p) = event.animation {
                 *p += 0.15;

@@ -1379,6 +1379,30 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
         ViewMode::GraphMap => "Graph Map",
     };
 
+    // Check for error message
+    if let Some((error_msg, timestamp)) = &state.error_message {
+        let secs_remaining = 5u64.saturating_sub(timestamp.elapsed().as_secs());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+        let error_line = Line::from(vec![
+            Span::styled(
+                " ⚠ ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate(error_msg, area.width.saturating_sub(20) as usize),
+                Style::default().fg(Color::Red),
+            ),
+            Span::styled(
+                format!(" ({}s)", secs_remaining),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        f.render_widget(Paragraph::new(error_line).block(block), area);
+        return;
+    }
+
     let keys = vec![
         Span::styled(
             " q ",
