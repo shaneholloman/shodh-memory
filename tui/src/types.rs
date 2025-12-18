@@ -521,7 +521,12 @@ impl AppState {
     }
 
     /// Schedule a debounced search (will execute after 250ms)
+    /// Note: Date mode doesn't support search-as-you-type (requires Enter)
     pub fn schedule_search(&mut self) {
+        // Skip search-as-you-type for date mode - requires full date input
+        if self.search_mode == SearchMode::Date {
+            return;
+        }
         if self.search_query.len() >= 2 {
             self.search_debounce_at = Some(Instant::now() + std::time::Duration::from_millis(250));
         }

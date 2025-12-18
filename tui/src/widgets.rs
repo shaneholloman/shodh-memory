@@ -1,5 +1,5 @@
 use crate::logo::{ELEPHANT, ELEPHANT_GRADIENT, SHODH_GRADIENT, SHODH_TEXT};
-use crate::types::{AppState, DisplayEvent, SearchResult, ViewMode, VERSION};
+use crate::types::{AppState, DisplayEvent, SearchMode, SearchResult, ViewMode, VERSION};
 use ratatui::{prelude::*, widgets::*};
 
 fn truncate(s: &str, max_len: usize) -> String {
@@ -1847,6 +1847,11 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
         } else {
             " "
         };
+        // Show format hint for date mode
+        let hint = match state.search_mode {
+            SearchMode::Date => " (7d, 2w, 1m, YYYY-MM-DD)",
+            _ => "",
+        };
         let search_line = Line::from(vec![
             Span::styled(
                 format!(" [{}] ", state.search_mode.label()),
@@ -1856,6 +1861,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
             ),
             Span::styled(&state.search_query, Style::default().fg(Color::White)),
             Span::styled(cursor_char, Style::default().fg(Color::Yellow)),
+            Span::styled(hint, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled("Tab", Style::default().fg(Color::DarkGray)),
             Span::styled("=mode ", Style::default().fg(Color::DarkGray)),

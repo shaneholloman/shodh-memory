@@ -589,10 +589,18 @@ async fn execute_search(
             parse_recall_response(data)
         }
         SearchMode::Date => {
-            // POST request for date range search
+            // Parse date query - supports:
+            // - "7d" / "7D" = last 7 days
+            // - "2w" / "2W" = last 2 weeks
+            // - "1m" / "1M" = last 1 month
+            // - "2025-12-17" = from that date to now
+            let now = chrono::Utc::now();
+            let (start, end) = parse_date_query(query, now)?;
+
             let body = serde_json::json!({
                 "user_id": user_id,
-                "start": query,
+                "start": start.to_rfc3339(),
+                "end": end.to_rfc3339(),
                 "limit": 20
             });
 
@@ -609,6 +617,49 @@ async fn execute_search(
             parse_recall_response(data)
         }
     }
+}
+
+/// Parse date query string into start/end DateTime range
+/// Supports: "7d" (days), "2w" (weeks), "1m" (months), or "YYYY-MM-DD" format
+fn parse_date_query(
+    query: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>), String> {
+    let query = query.trim().to_lowercase();
+
+    // Try relative format: Nd, Nw, Nm (days, weeks, months)
+    if let Some(num_str) = query.strip_suffix('d') {
+        let days: i64 = num_str.parse().map_err(|_| "Invalid number of days")?;
+        let start = now - chrono::Duration::days(days);
+        return Ok((start, now));
+    }
+    if let Some(num_str) = query.strip_suffix('w') {
+        let weeks: i64 = num_str.parse().map_err(|_| "Invalid number of weeks")?;
+        let start = now - chrono::Duration::weeks(weeks);
+        return Ok((start, now));
+    }
+    if let Some(num_str) = query.strip_suffix('m') {
+        let months: i64 = num_str.parse().map_err(|_| "Invalid number of months")?;
+        let start = now - chrono::Duration::days(months * 30);
+        return Ok((start, now));
+    }
+
+    // Try YYYY-MM-DD format
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(&query, "%Y-%m-%d") {
+        let start = date
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        return Ok((start, now));
+    }
+
+    // Try just a number as days
+    if let Ok(days) = query.parse::<i64>() {
+        let start = now - chrono::Duration::days(days);
+        return Ok((start, now));
+    }
+
+    Err("Invalid date format. Use: 7d, 2w, 1m, or YYYY-MM-DD".to_string())
 }
 
 fn parse_memory_list_response(data: serde_json::Value) -> Result<Vec<types::SearchResult>, String> {
