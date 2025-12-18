@@ -161,6 +161,12 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
 }
 
 pub fn render_main(f: &mut Frame, area: Rect, state: &AppState) {
+    // If viewing search result detail, render detail view
+    if state.search_detail_visible {
+        render_search_detail(f, area, state);
+        return;
+    }
+
     // If search results are visible, render them instead of normal view
     if state.search_results_visible {
         render_search_results(f, area, state);
@@ -453,6 +459,100 @@ fn render_search_result_item(
     }
 
     f.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_search_detail(f: &mut Frame, area: Rect, state: &AppState) {
+    let result = match state.search_results.get(state.search_selected) {
+        Some(r) => r,
+        None => return,
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " MEMORY DETAIL ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title(
+            block::Title::from(Span::styled(
+                " Esc=back ",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Right),
+        );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let content_width = inner.width.saturating_sub(4) as usize;
+
+    // Format timestamp
+    let time_str = result.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+
+    let mut lines = vec![
+        // Header with type and ID
+        Line::from(vec![
+            Span::styled(
+                format!(" [{}] ", result.memory_type),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(&result.id, Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        // Score and timestamp
+        Line::from(vec![
+            Span::styled(" Score: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:.4}", result.score),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled("  Created: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(time_str, Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        // Tags
+        Line::from(vec![
+            Span::styled(" Tags: ", Style::default().fg(Color::DarkGray)),
+            if result.tags.is_empty() {
+                Span::styled("(none)", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::styled(result.tags.join(", "), Style::default().fg(Color::Green))
+            },
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            " ─── Content ───",
+            Style::default().fg(Color::Magenta),
+        )),
+        Line::from(""),
+    ];
+
+    // Word-wrap content
+    let content = &result.content;
+    let mut remaining = content.as_str();
+    while !remaining.is_empty() {
+        let take_len = remaining
+            .char_indices()
+            .take(content_width)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(remaining.len());
+        let line_content = &remaining[..take_len];
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(line_content, Style::default().fg(Color::White)),
+        ]));
+        remaining = &remaining[take_len..];
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).scroll((0, 0)),
+        inner,
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

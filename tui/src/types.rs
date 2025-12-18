@@ -472,6 +472,12 @@ pub struct AppState {
     pub search_loading: bool,
     /// UI zoom level (affects content density: 0=compact, 1=normal, 2=expanded)
     pub zoom_level: u8,
+    /// Debounce timestamp for search-as-you-type (triggers search after delay)
+    pub search_debounce_at: Option<Instant>,
+    /// Last query that was searched (to avoid duplicate searches)
+    pub search_last_query: String,
+    /// Whether viewing detail of selected search result
+    pub search_detail_visible: bool,
 }
 
 impl AppState {
@@ -508,7 +514,38 @@ impl AppState {
             search_results_visible: false,
             search_loading: false,
             zoom_level: 1,
+            search_debounce_at: None,
+            search_last_query: String::new(),
+            search_detail_visible: false,
         }
+    }
+
+    /// Schedule a debounced search (will execute after 250ms)
+    pub fn schedule_search(&mut self) {
+        if self.search_query.len() >= 2 {
+            self.search_debounce_at = Some(Instant::now() + std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// Check if debounced search should execute now
+    pub fn should_execute_search(&self) -> bool {
+        if let Some(debounce_at) = self.search_debounce_at {
+            if Instant::now() >= debounce_at
+                && self.search_query != self.search_last_query
+                && self.search_query.len() >= 2
+                && !self.search_loading
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark search as started
+    pub fn mark_search_started(&mut self) {
+        self.search_last_query = self.search_query.clone();
+        self.search_loading = true;
+        self.search_debounce_at = None;
     }
 
     pub fn zoom_in(&mut self) {

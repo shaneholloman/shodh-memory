@@ -343,6 +343,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                             }
                             KeyCode::Backspace => {
                                 g.search_query.pop();
+                                g.schedule_search();
                             }
                             KeyCode::Up => {
                                 if g.search_results_visible {
@@ -357,7 +358,19 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                             KeyCode::Char(c) => {
                                 if g.search_query.len() < 100 {
                                     g.search_query.push(c);
+                                    g.schedule_search();
                                 }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Handle search detail view
+                    if g.search_detail_visible {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Backspace => {
+                                g.search_detail_visible = false;
                             }
                             _ => {}
                         }
@@ -370,6 +383,12 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                             KeyCode::Esc => {
                                 g.search_results_visible = false;
                                 g.search_results.clear();
+                                g.search_active = false;
+                            }
+                            KeyCode::Enter => {
+                                if !g.search_results.is_empty() {
+                                    g.search_detail_visible = true;
+                                }
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
                                 g.search_select_prev();
@@ -479,7 +498,33 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
             }
         }
         if last_tick.elapsed() >= tick_rate {
-            state.lock().await.tick();
+            let mut g = state.lock().await;
+            g.tick();
+
+            // Check if debounced search should execute
+            if g.should_execute_search() {
+                let query = g.search_query.clone();
+                let mode = g.search_mode;
+                let user_id = g.current_user.clone();
+                g.mark_search_started();
+                drop(g);
+
+                // Execute search in background
+                let results = execute_search(&base_url, &api_key, &user_id, &query, mode).await;
+
+                let mut g = search_state.lock().await;
+                match results {
+                    Ok(r) => {
+                        g.set_search_results(r);
+                        g.search_results_visible = true;
+                    }
+                    Err(e) => {
+                        g.set_error(format!("Search: {}", e));
+                        g.search_loading = false;
+                    }
+                }
+            }
+
             last_tick = Instant::now();
         }
     }
