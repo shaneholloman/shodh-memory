@@ -817,9 +817,12 @@ impl MultiUserMemoryManager {
         // - Must have at least one uppercase letter (proper nouns)
         // - Filter common stop words that NER sometimes misclassifies
         let stop_words: std::collections::HashSet<&str> = [
-            "the", "and", "for", "that", "this", "with", "from", "have", "been",
-            "are", "was", "were", "will", "would", "could", "should", "may", "might",
-        ].iter().cloned().collect();
+            "the", "and", "for", "that", "this", "with", "from", "have", "been", "are", "was",
+            "were", "will", "would", "could", "should", "may", "might",
+        ]
+        .iter()
+        .cloned()
+        .collect();
 
         let filtered_entities: Vec<_> = extracted_entities
             .into_iter()
@@ -906,7 +909,10 @@ impl MultiUserMemoryManager {
         for cap in allcaps_regex.find_iter(&experience.content) {
             let term = cap.as_str();
             // Skip if already extracted or is a stop word
-            if entity_uuids.iter().any(|(name, _)| name.eq_ignore_ascii_case(term)) {
+            if entity_uuids
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(term))
+            {
                 continue;
             }
             if stop_words.contains(term.to_lowercase().as_str()) {
@@ -3194,8 +3200,7 @@ async fn recall(
         let normalized_linguistic = activated.linguistic_score.min(1.0);
 
         // Add graph activation score + linguistic score with density-dependent weights
-        entry.0 += graph_weight * normalized_activation
-            + linguistic_weight * normalized_linguistic;
+        entry.0 += graph_weight * normalized_activation + linguistic_weight * normalized_linguistic;
     }
 
     // Sort by final hybrid score and take top N
@@ -6185,7 +6190,10 @@ async fn add_relationship(
         timestamp: chrono::Utc::now(),
         user_id: req.user_id.clone(),
         memory_id: Some(edge_uuid.to_string()),
-        content_preview: Some(format!("{} -> {} ({})", req.from_entity_name, req.to_entity_name, req.relation_type)),
+        content_preview: Some(format!(
+            "{} -> {} ({})",
+            req.from_entity_name, req.to_entity_name, req.relation_type
+        )),
         memory_type: Some("graph".to_string()),
         importance: None,
         count: None,
@@ -6313,7 +6321,9 @@ async fn rebuild_user_graph(
     }
 
     // Get all memories for this user
-    let memory_sys = state.get_user_memory(&user_id).map_err(AppError::Internal)?;
+    let memory_sys = state
+        .get_user_memory(&user_id)
+        .map_err(AppError::Internal)?;
     let memories: Vec<(MemoryId, Experience)> = {
         let memory_guard = memory_sys.read();
         memory_guard
@@ -6337,7 +6347,9 @@ async fn rebuild_user_graph(
     }
 
     // Get final stats
-    let stats = state.get_user_graph_stats(&user_id).map_err(AppError::Internal)?;
+    let stats = state
+        .get_user_graph_stats(&user_id)
+        .map_err(AppError::Internal)?;
     let entities_created = stats.entity_count;
     let relationships_created = stats.relationship_count;
 
