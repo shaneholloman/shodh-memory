@@ -3712,6 +3712,8 @@ struct ListQuery {
     limit: Option<usize>,
     #[serde(rename = "type")]
     memory_type: Option<String>,
+    /// Text search query - filters by content or tags (case-insensitive)
+    query: Option<String>,
 }
 
 /// List response - simplified memory list
@@ -3757,7 +3759,7 @@ async fn list_memories(
     };
 
     // Filter by type if specified
-    let filtered: Vec<_> = if let Some(ref type_filter) = query.memory_type {
+    let mut filtered: Vec<_> = if let Some(ref type_filter) = query.memory_type {
         let type_lower = type_filter.to_lowercase();
         all_memories
             .into_iter()
@@ -3766,6 +3768,27 @@ async fn list_memories(
     } else {
         all_memories
     };
+
+    // Filter by text query if specified (search in content and tags)
+    if let Some(ref text_query) = query.query {
+        let query_lower = text_query.to_lowercase();
+        filtered = filtered
+            .into_iter()
+            .filter(|m| {
+                // Check content
+                if m.experience.content.to_lowercase().contains(&query_lower) {
+                    return true;
+                }
+                // Check tags/entities
+                for tag in &m.experience.entities {
+                    if tag.to_lowercase().contains(&query_lower) {
+                        return true;
+                    }
+                }
+                false
+            })
+            .collect();
+    }
 
     let total = filtered.len();
     let limit = query.limit.unwrap_or(100).min(1000);
