@@ -2105,56 +2105,15 @@ impl EntityExtractor {
         .map(String::from)
         .collect();
 
-        // Common words that are capitalized at sentence start but aren't entities
+        // Stop words: common words that appear capitalized at sentence start
+        // These aren't named entities even when capitalized
         let stop_words: HashSet<String> = vec![
-            "the",
-            "a",
-            "an",
-            "this",
-            "that",
-            "these",
-            "those",
-            "i",
-            "we",
-            "you",
-            "he",
-            "she",
-            "it",
-            "they",
-            "is",
-            "are",
-            "was",
-            "were",
-            "been",
-            "being",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "could",
-            "should",
-            "may",
-            "might",
-            "if",
-            "when",
-            "where",
-            "what",
-            "why",
-            "how",
-            "user",
-            "error",
-            "task",
-            "code",
-            "pattern",
-            "search",
-            "discovered",
-            "completed",
-            "performed",
-            "mentioned",
+            // Articles & pronouns
+            "the", "a", "an", "this", "that", "these", "those", "i", "we", "you", "he", "she", "it",
+            "they", // Common verbs (appear at sentence start)
+            "is", "are", "was", "were", "been", "being", "have", "has", "had", "do", "does", "did",
+            "will", "would", "could", "should", "may", "might", // Question words
+            "if", "when", "where", "what", "why", "how",
         ]
         .into_iter()
         .map(String::from)
@@ -2242,7 +2201,7 @@ impl EntityExtractor {
 
             let clean_word = word.trim_matches(|c: char| !c.is_alphanumeric());
 
-            if clean_word.is_empty() || clean_word.len() < 2 {
+            if clean_word.is_empty() {
                 continue;
             }
 
@@ -2360,14 +2319,18 @@ impl EntityExtractor {
                     }
                 }
 
-                // Default classification based on entity characteristics
+                // Only extract entities we have evidence for
+                // Don't guess on single unknown capitalized words - they're often noise
                 if matches!(entity_label, EntityLabel::Other(_)) {
                     if entity_name.contains(' ') {
-                        // Multi-word entities are likely Person names (First Last)
+                        // Multi-word capitalized sequences (like "John Smith", "New York")
+                        // are likely proper names - extract as Person
                         entity_label = EntityLabel::Person;
                     } else {
-                        // Single capitalized words default to Person
-                        entity_label = EntityLabel::Person;
+                        // Single capitalized word not in any keyword list
+                        // Skip it - we don't have enough evidence it's a real entity
+                        // The neural NER model handles these cases properly
+                        continue;
                     }
                 }
 

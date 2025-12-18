@@ -45,7 +45,9 @@ use constants::{
 };
 
 use embeddings::NerEntityType;
-use embeddings::{are_ner_models_downloaded, get_ner_models_dir, NerConfig, NeuralNer};
+use embeddings::{
+    are_ner_models_downloaded, download_ner_models, get_ner_models_dir, NerConfig, NeuralNer,
+};
 use errors::{AppError, ValidationErrorExt};
 use graph_memory::{
     EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats, GraphTraversal,
@@ -253,8 +255,46 @@ impl MultiUserMemoryManager {
                 }
             }
         } else {
-            info!("📋 NER models not downloaded. Using rule-based fallback.");
-            Arc::new(NeuralNer::new_fallback(NerConfig::default()))
+            // Auto-download NER models if not present
+            info!("📥 Downloading NER models (TinyBERT-NER, ~15MB)...");
+            match download_ner_models(Some(std::sync::Arc::new(|downloaded, total| {
+                if total > 0 {
+                    let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
+                    if percent % 20 == 0 {
+                        tracing::info!("NER model download: {}%", percent);
+                    }
+                }
+            }))) {
+                Ok(ner_dir) => {
+                    info!("✅ NER models downloaded to {:?}", ner_dir);
+                    let config = NerConfig {
+                        model_path: ner_dir.join("model.onnx"),
+                        tokenizer_path: ner_dir.join("tokenizer.json"),
+                        max_length: 128,
+                        confidence_threshold: 0.5,
+                    };
+                    match NeuralNer::new(config) {
+                        Ok(ner) => {
+                            info!("🧠 Neural NER initialized after download");
+                            Arc::new(ner)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to initialize downloaded NER: {}. Using fallback.",
+                                e
+                            );
+                            Arc::new(NeuralNer::new_fallback(NerConfig::default()))
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to download NER models: {}. Using rule-based fallback.",
+                        e
+                    );
+                    Arc::new(NeuralNer::new_fallback(NerConfig::default()))
+                }
+            }
         };
 
         // Initialize streaming memory extractor
@@ -2022,7 +2062,11 @@ async fn upsert_memory(
 
     // Broadcast CREATE/UPDATE event for real-time dashboard
     state.emit_event(MemoryEvent {
-        event_type: if was_update { "UPDATE".to_string() } else { "CREATE".to_string() },
+        event_type: if was_update {
+            "UPDATE".to_string()
+        } else {
+            "CREATE".to_string()
+        },
         timestamp: chrono::Utc::now(),
         user_id: req.user_id.clone(),
         memory_id: Some(memory_id.0.to_string()),
