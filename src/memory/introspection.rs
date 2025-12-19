@@ -112,6 +112,73 @@ pub enum ConsolidationEvent {
         duration_ms: u64,
         timestamp: DateTime<Utc>,
     },
+
+    // SHO-105: Memory Replay Events
+    // Based on Rasch & Born (2013) - sleep consolidation through replay
+
+    /// Memory was replayed during consolidation cycle
+    MemoryReplayed {
+        memory_id: String,
+        content_preview: String,
+        activation_before: f32,
+        activation_after: f32,
+        replay_priority: f32,
+        connected_memories_replayed: usize,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Replay cycle completed (batch of memories replayed)
+    ReplayCycleCompleted {
+        memories_replayed: usize,
+        edges_strengthened: usize,
+        total_priority_score: f32,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+    },
+
+    // SHO-106: Memory Interference Events
+    // Based on Anderson & Neely (1996) - retrieval competition
+
+    /// Interference detected between memories
+    InterferenceDetected {
+        new_memory_id: String,
+        old_memory_id: String,
+        similarity: f32,
+        interference_type: InterferenceType,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Memory weakened due to interference
+    MemoryWeakened {
+        memory_id: String,
+        content_preview: String,
+        activation_before: f32,
+        activation_after: f32,
+        interfering_memory_id: String,
+        interference_type: InterferenceType,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Retrieval competition occurred (similar memories competed)
+    RetrievalCompetition {
+        query_preview: String,
+        winner_memory_id: String,
+        suppressed_memory_ids: Vec<String>,
+        competition_factor: f32,
+        timestamp: DateTime<Utc>,
+    },
+}
+
+/// Types of memory interference (SHO-106)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterferenceType {
+    /// New learning disrupts old memories
+    Retroactive,
+    /// Old memories interfere with new learning
+    Proactive,
+    /// Similar memories compete during retrieval
+    RetrievalCompetition,
 }
 
 /// Reasons for memory strengthening
@@ -184,8 +251,41 @@ pub struct ConsolidationReport {
     /// Facts that were reinforced
     pub reinforced_facts: Vec<FactChange>,
 
+    // SHO-105: Replay events
+    /// Memories that were replayed for consolidation
+    pub replayed_memories: Vec<ReplayEvent>,
+
+    // SHO-106: Interference events
+    /// Interference events detected
+    pub interference_events: Vec<InterferenceEvent>,
+
+    /// Memories weakened due to interference
+    pub weakened_memories: Vec<MemoryChange>,
+
     /// Aggregate statistics
     pub statistics: ConsolidationStats,
+}
+
+/// Replay event details (SHO-105)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayEvent {
+    pub memory_id: String,
+    pub content_preview: String,
+    pub activation_before: f32,
+    pub activation_after: f32,
+    pub replay_priority: f32,
+    pub connected_memories: usize,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Interference event details (SHO-106)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterferenceEvent {
+    pub new_memory_id: String,
+    pub old_memory_id: String,
+    pub similarity: f32,
+    pub interference_type: InterferenceType,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// Time period for a report
@@ -245,6 +345,14 @@ pub struct ConsolidationStats {
     pub facts_reinforced: usize,
     pub maintenance_cycles: usize,
     pub total_maintenance_duration_ms: u64,
+    // SHO-105: Replay statistics
+    pub memories_replayed: usize,
+    pub replay_cycles: usize,
+    pub total_replay_priority: f32,
+    // SHO-106: Interference statistics
+    pub interference_events: usize,
+    pub memories_weakened: usize,
+    pub retrieval_competitions: usize,
 }
 
 /// Buffer for storing consolidation events
@@ -334,6 +442,11 @@ impl ConsolidationEventBuffer {
             pruned_associations: Vec::new(),
             extracted_facts: Vec::new(),
             reinforced_facts: Vec::new(),
+            // SHO-105: Replay events
+            replayed_memories: Vec::new(),
+            // SHO-106: Interference events
+            interference_events: Vec::new(),
+            weakened_memories: Vec::new(),
             statistics: ConsolidationStats::default(),
         };
 
@@ -505,6 +618,85 @@ impl ConsolidationEventBuffer {
                     report.statistics.maintenance_cycles += 1;
                     report.statistics.total_maintenance_duration_ms += duration_ms;
                 }
+
+                // SHO-105: Memory replay events
+                ConsolidationEvent::MemoryReplayed {
+                    memory_id,
+                    content_preview,
+                    activation_before,
+                    activation_after,
+                    replay_priority,
+                    connected_memories_replayed,
+                    timestamp,
+                } => {
+                    report.replayed_memories.push(ReplayEvent {
+                        memory_id: memory_id.clone(),
+                        content_preview: content_preview.clone(),
+                        activation_before: *activation_before,
+                        activation_after: *activation_after,
+                        replay_priority: *replay_priority,
+                        connected_memories: *connected_memories_replayed,
+                        timestamp: *timestamp,
+                    });
+                    report.statistics.memories_replayed += 1;
+                    report.statistics.total_replay_priority += replay_priority;
+                }
+
+                ConsolidationEvent::ReplayCycleCompleted {
+                    memories_replayed,
+                    total_priority_score,
+                    ..
+                } => {
+                    report.statistics.replay_cycles += 1;
+                    report.statistics.memories_replayed += memories_replayed;
+                    report.statistics.total_replay_priority += total_priority_score;
+                }
+
+                // SHO-106: Memory interference events
+                ConsolidationEvent::InterferenceDetected {
+                    new_memory_id,
+                    old_memory_id,
+                    similarity,
+                    interference_type,
+                    timestamp,
+                } => {
+                    report.interference_events.push(InterferenceEvent {
+                        new_memory_id: new_memory_id.clone(),
+                        old_memory_id: old_memory_id.clone(),
+                        similarity: *similarity,
+                        interference_type: interference_type.clone(),
+                        timestamp: *timestamp,
+                    });
+                    report.statistics.interference_events += 1;
+                }
+
+                ConsolidationEvent::MemoryWeakened {
+                    memory_id,
+                    content_preview,
+                    activation_before,
+                    activation_after,
+                    interfering_memory_id,
+                    interference_type,
+                    timestamp,
+                } => {
+                    report.weakened_memories.push(MemoryChange {
+                        memory_id: memory_id.clone(),
+                        content_preview: content_preview.clone(),
+                        activation_before: *activation_before,
+                        activation_after: *activation_after,
+                        change_reason: format!(
+                            "{:?} interference from {}",
+                            interference_type, interfering_memory_id
+                        ),
+                        at_risk: *activation_after < 0.1,
+                        timestamp: *timestamp,
+                    });
+                    report.statistics.memories_weakened += 1;
+                }
+
+                ConsolidationEvent::RetrievalCompetition { .. } => {
+                    report.statistics.retrieval_competitions += 1;
+                }
             }
         }
 
@@ -526,6 +718,13 @@ impl ConsolidationEvent {
             ConsolidationEvent::FactReinforced { timestamp, .. } => *timestamp,
             ConsolidationEvent::MemoryPromoted { timestamp, .. } => *timestamp,
             ConsolidationEvent::MaintenanceCycleCompleted { timestamp, .. } => *timestamp,
+            // SHO-105: Replay events
+            ConsolidationEvent::MemoryReplayed { timestamp, .. } => *timestamp,
+            ConsolidationEvent::ReplayCycleCompleted { timestamp, .. } => *timestamp,
+            // SHO-106: Interference events
+            ConsolidationEvent::InterferenceDetected { timestamp, .. } => *timestamp,
+            ConsolidationEvent::MemoryWeakened { timestamp, .. } => *timestamp,
+            ConsolidationEvent::RetrievalCompetition { timestamp, .. } => *timestamp,
         }
     }
 }
@@ -545,6 +744,11 @@ impl Default for ConsolidationReport {
             pruned_associations: Vec::new(),
             extracted_facts: Vec::new(),
             reinforced_facts: Vec::new(),
+            // SHO-105: Replay events
+            replayed_memories: Vec::new(),
+            // SHO-106: Interference events
+            interference_events: Vec::new(),
+            weakened_memories: Vec::new(),
             statistics: ConsolidationStats::default(),
         }
     }

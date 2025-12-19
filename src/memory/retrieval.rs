@@ -468,6 +468,45 @@ impl RetrievalEngine {
         self.storage.get(id)
     }
 
+    /// Search for similar memories by embedding directly (SHO-106)
+    ///
+    /// Used for interference detection to find memories similar to a new memory.
+    /// Optionally excludes a specific memory ID from results.
+    ///
+    /// Returns (MemoryId, similarity_score) pairs
+    pub fn search_by_embedding(
+        &self,
+        embedding: &[f32],
+        limit: usize,
+        exclude_id: Option<&MemoryId>,
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        // Search vector index
+        let index = self.vector_index.read();
+        let results = index
+            .search(embedding, limit * VECTOR_SEARCH_CANDIDATE_MULTIPLIER)
+            .context("Vector search by embedding failed")?;
+
+        // Map vector IDs to memory IDs, excluding specified ID if provided
+        let id_mapping = self.id_mapping.read();
+        let memory_ids: Vec<(MemoryId, f32)> = results
+            .into_iter()
+            .filter_map(|(vector_id, similarity)| {
+                id_mapping.get_memory_id(vector_id).and_then(|id| {
+                    // Exclude the specified memory ID if provided
+                    if let Some(exclude) = exclude_id {
+                        if *id == *exclude {
+                            return None;
+                        }
+                    }
+                    Some((id.clone(), similarity))
+                })
+            })
+            .take(limit)
+            .collect();
+
+        Ok(memory_ids)
+    }
+
     /// Search for memories using multiple retrieval modes (zero-copy with Arc)
     pub fn search(&self, query: &Query, limit: usize) -> Result<Vec<SharedMemory>> {
         let results = match query.retrieval_mode {
@@ -967,6 +1006,17 @@ impl RetrievalEngine {
     /// Get memory graph statistics
     pub fn graph_stats(&self) -> MemoryGraphStats {
         self.graph.read().stats()
+    }
+
+    /// Get read reference to memory graph (SHO-105)
+    pub(crate) fn graph_ref(&self) -> parking_lot::RwLockReadGuard<MemoryGraph> {
+        self.graph.read()
+    }
+
+    /// Get write reference to memory graph (SHO-105)
+    /// Note: For bulk edge operations, use this method sparingly
+    pub(crate) fn graph_write(&self) -> parking_lot::RwLockWriteGuard<'_, MemoryGraph> {
+        self.graph.write()
     }
 
     /// Get mutable access to memory graph (for Hebbian updates)
@@ -1584,6 +1634,50 @@ impl MemoryGraph {
             },
             potentiated_edges: potentiated_count / 2,
         }
+    }
+
+    /// Get neighboring memory IDs for a memory (SHO-105)
+    ///
+    /// Returns all memories connected to the given memory with edge strength >= threshold.
+    pub(crate) fn get_neighbors(&self, memory_id: &MemoryId) -> Vec<MemoryId> {
+        self.adjacency
+            .get(memory_id)
+            .map(|neighbors| {
+                neighbors
+                    .iter()
+                    .filter(|(_, w)| w.strength >= EDGE_MIN_STRENGTH)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Strengthen a specific edge by a given amount (SHO-105)
+    ///
+    /// Used by replay mechanism to strengthen associations during memory replay.
+    /// Creates the edge if it doesn't exist.
+    pub(crate) fn strengthen_edge(&mut self, from: &MemoryId, to: &MemoryId, boost: f32) {
+        let now = chrono::Utc::now().timestamp();
+
+        // Strengthen forward edge
+        let forward = self
+            .adjacency
+            .entry(from.clone())
+            .or_default()
+            .entry(to.clone())
+            .or_default();
+        forward.strength = (forward.strength + boost).min(1.0);
+        forward.last_activated = now;
+
+        // Strengthen backward edge (bidirectional)
+        let backward = self
+            .adjacency
+            .entry(to.clone())
+            .or_default()
+            .entry(from.clone())
+            .or_default();
+        backward.strength = (backward.strength + boost).min(1.0);
+        backward.last_activated = now;
     }
 }
 

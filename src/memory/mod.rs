@@ -9,6 +9,7 @@
 pub mod compression;
 pub mod context;
 pub mod introspection;
+pub mod replay;
 pub mod retrieval;
 pub mod storage;
 pub mod types;
@@ -50,8 +51,12 @@ pub use crate::memory::compression::{
 pub use crate::memory::graph_retrieval::{spreading_activation_retrieve, ActivatedMemory};
 pub use crate::memory::introspection::{
     AssociationChange, ConsolidationEvent, ConsolidationEventBuffer, ConsolidationReport,
-    ConsolidationStats, EdgeFormationReason, FactChange, MemoryChange, PruningReason, ReportPeriod,
-    StrengtheningReason,
+    ConsolidationStats, EdgeFormationReason, FactChange, InterferenceEvent, InterferenceType,
+    MemoryChange, PruningReason, ReplayEvent, ReportPeriod, StrengtheningReason,
+};
+pub use crate::memory::replay::{
+    InterferenceCheckResult, InterferenceDetector, InterferenceRecord, ReplayCandidate,
+    ReplayCycleResult, ReplayManager,
 };
 use crate::memory::retrieval::RetrievalEngine;
 pub use crate::memory::retrieval::{
@@ -136,6 +141,14 @@ pub struct MemorySystem {
     /// Consolidation event buffer for introspection
     /// Tracks what the memory system is learning (strengthening, decay, edges, facts)
     consolidation_events: Arc<RwLock<ConsolidationEventBuffer>>,
+
+    /// Memory replay manager (SHO-105)
+    /// Implements sleep-like consolidation through replay of high-value memories
+    replay_manager: Arc<RwLock<replay::ReplayManager>>,
+
+    /// Interference detector (SHO-106)
+    /// Detects and handles memory interference (retroactive/proactive)
+    interference_detector: Arc<RwLock<replay::InterferenceDetector>>,
 }
 
 impl MemorySystem {
@@ -197,6 +210,10 @@ impl MemorySystem {
             stats: Arc::new(RwLock::new(initial_stats)),
             logger,
             consolidation_events, // Use the shared buffer created earlier
+            // SHO-105: Memory replay manager
+            replay_manager: Arc::new(RwLock::new(replay::ReplayManager::new())),
+            // SHO-106: Interference detector
+            interference_detector: Arc::new(RwLock::new(replay::InterferenceDetector::new())),
         })
     }
 
@@ -282,6 +299,73 @@ impl MemorySystem {
 
         // Add to knowledge graph for associative/causal retrieval
         self.retriever.add_to_graph(&memory);
+
+        // SHO-106: Check for interference with existing memories
+        // Find similar memories and apply retroactive/proactive interference
+        if let Some(embedding) = &memory.experience.embeddings {
+            // Search for similar memories (excluding the new one)
+            if let Ok(similar_ids) =
+                self.retriever
+                    .search_by_embedding(embedding, 5, Some(&memory.id))
+            {
+                if !similar_ids.is_empty() {
+                    // Collect similar memory data for interference check
+                    let similar_memories: Vec<_> = similar_ids
+                        .iter()
+                        .filter_map(|(id, similarity)| {
+                            self.retriever.get_from_storage(id).ok().map(|m| {
+                                (
+                                    id.0.to_string(),
+                                    *similarity,
+                                    m.importance(),
+                                    m.created_at,
+                                    m.experience.content.chars().take(50).collect::<String>(),
+                                )
+                            })
+                        })
+                        .collect();
+
+                    if !similar_memories.is_empty() {
+                        let interference_result = self.interference_detector.write().check_interference(
+                            &memory.id.0.to_string(),
+                            importance,
+                            memory.created_at,
+                            &similar_memories,
+                        );
+
+                        // Apply retroactive interference (weaken old memories)
+                        for (old_id, _similarity, decay_amount) in &interference_result.retroactive_targets
+                        {
+                            if let Ok(old_memory) =
+                                self.long_term_memory.get(&MemoryId(uuid::Uuid::parse_str(old_id).unwrap_or_default()))
+                            {
+                                old_memory.decay_importance(*decay_amount);
+                                let _ = self.long_term_memory.update(&old_memory);
+                            }
+                        }
+
+                        // Apply proactive interference (reduce new memory importance)
+                        if interference_result.proactive_decay > 0.0 {
+                            memory.decay_importance(interference_result.proactive_decay);
+                            let _ = self.long_term_memory.update(&memory);
+                        }
+
+                        // Record interference events
+                        for event in interference_result.events {
+                            self.record_consolidation_event(event);
+                        }
+
+                        // Handle duplicates - don't duplicate here, just log
+                        if interference_result.is_duplicate {
+                            tracing::debug!(
+                                memory_id = %memory.id.0,
+                                "Memory detected as near-duplicate of existing memory"
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // If important enough, prepare for session storage
         let added_to_session = if importance > self.config.importance_threshold {
@@ -617,6 +701,48 @@ impl MemorySystem {
         if memories.len() >= 2 {
             let memory_ids: Vec<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
             self.retriever.record_coactivation(&memory_ids);
+        }
+
+        // SHO-106: Apply retrieval competition between similar memories
+        // When highly similar memories are retrieved, they compete for activation
+        if memories.len() >= 2 {
+            // Calculate similarity scores for competition analysis
+            let candidates: Vec<(String, f32, f32)> = memories
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let relevance = 1.0 - (i as f32 / memories.len() as f32) * 0.3; // Position-based score
+                    let similarity = m.importance(); // Use importance as proxy for query relevance
+                    (m.id.0.to_string(), relevance, similarity)
+                })
+                .collect();
+
+            let competition_result = self
+                .interference_detector
+                .write()
+                .apply_retrieval_competition(&candidates, query_text);
+
+            // Record competition event if any memories were suppressed
+            if let Some(event) = competition_result.event {
+                self.record_consolidation_event(event);
+            }
+
+            // Re-order memories based on competition results (winners first)
+            if !competition_result.suppressed.is_empty() {
+                let winner_set: std::collections::HashSet<_> = competition_result
+                    .winners
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect();
+
+                // Keep only winners, maintain their relative order
+                memories.retain(|m| winner_set.contains(&m.id.0.to_string()));
+
+                tracing::debug!(
+                    "Retrieval competition: {} memories suppressed",
+                    competition_result.suppressed.len()
+                );
+            }
         }
 
         Ok(memories)
@@ -2377,7 +2503,103 @@ impl MemorySystem {
         // but the retriever could be modified to return pruning stats
         self.graph_maintenance();
 
-        // 4. Auto-repair index integrity and compact if needed
+        // 4. SHO-105: Memory replay cycle (sleep-like consolidation)
+        // Replays high-value memories to strengthen them and their associations
+        let mut replay_result = replay::ReplayCycleResult::default();
+        {
+            let should_replay = self.replay_manager.read().should_replay();
+            if should_replay {
+                // Collect replay candidates from working + session memory
+                let candidates_data: Vec<_> = {
+                    let working = self.working_memory.read();
+                    let session = self.session_memory.read();
+
+                    working
+                        .all_memories()
+                        .iter()
+                        .chain(session.all_memories().iter())
+                        .map(|m| {
+                            // Get connected memory IDs from graph
+                            let connections = self.retriever.graph_ref().get_neighbors(&m.id);
+                            let arousal = m
+                                .experience
+                                .context
+                                .as_ref()
+                                .map(|c| c.emotional.arousal)
+                                .unwrap_or(0.3);
+                            (
+                                m.id.0.to_string(),
+                                m.importance(),
+                                arousal,
+                                m.created_at,
+                                connections.into_iter().map(|id| id.0.to_string()).collect(),
+                                m.experience.content.chars().take(50).collect::<String>(),
+                            )
+                        })
+                        .collect()
+                };
+
+                // Identify and execute replay
+                let candidates = self
+                    .replay_manager
+                    .read()
+                    .identify_replay_candidates(&candidates_data);
+
+                if !candidates.is_empty() {
+                    let (memory_boosts, edge_boosts, events) =
+                        self.replay_manager.write().execute_replay(&candidates);
+
+                    replay_result.memories_replayed = candidates.len();
+                    replay_result.edges_strengthened = edge_boosts.len();
+                    replay_result.total_priority_score =
+                        candidates.iter().map(|c| c.priority_score).sum();
+
+                    // Apply memory boosts
+                    for (mem_id_str, boost) in &memory_boosts {
+                        if let Ok(mem_id) = uuid::Uuid::parse_str(mem_id_str) {
+                            if let Ok(memory) = self.long_term_memory.get(&MemoryId(mem_id)) {
+                                memory.boost_importance(*boost);
+                                let _ = self.long_term_memory.update(&memory);
+                            }
+                        }
+                    }
+
+                    // Apply edge boosts through graph
+                    for (from_str, to_str, boost) in &edge_boosts {
+                        if let (Ok(from_id), Ok(to_id)) = (
+                            uuid::Uuid::parse_str(from_str),
+                            uuid::Uuid::parse_str(to_str),
+                        ) {
+                            self.retriever
+                                .graph_write()
+                                .strengthen_edge(&MemoryId(from_id), &MemoryId(to_id), *boost);
+                        }
+                    }
+
+                    // Record events
+                    for event in events {
+                        self.record_consolidation_event(event);
+                    }
+
+                    // Record replay cycle completion
+                    self.record_consolidation_event(ConsolidationEvent::ReplayCycleCompleted {
+                        memories_replayed: replay_result.memories_replayed,
+                        edges_strengthened: replay_result.edges_strengthened,
+                        total_priority_score: replay_result.total_priority_score,
+                        duration_ms: start_time.elapsed().as_millis() as u64,
+                        timestamp: now,
+                    });
+
+                    tracing::debug!(
+                        "Replay cycle complete: {} memories replayed, {} edges strengthened",
+                        replay_result.memories_replayed,
+                        replay_result.edges_strengthened
+                    );
+                }
+            }
+        }
+
+        // 5. Auto-repair index integrity and compact if needed
         // This ensures storage↔index sync and prevents memory leaks from soft-deleted vectors
         self.auto_repair_and_compact();
 
@@ -2393,10 +2615,11 @@ impl MemorySystem {
         });
 
         tracing::debug!(
-            "Maintenance complete: {} memories decayed (factor={}), {} at risk, took {}ms",
+            "Maintenance complete: {} memories decayed (factor={}), {} at risk, {} replayed, took {}ms",
             decayed_count,
             decay_factor,
             at_risk_count,
+            replay_result.memories_replayed,
             duration_ms
         );
 

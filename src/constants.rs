@@ -660,6 +660,160 @@ pub const PREFETCH_RECENCY_FULL_BOOST: f32 = 0.1;
 pub const PREFETCH_RECENCY_PARTIAL_BOOST: f32 = 0.05;
 
 // =============================================================================
+// MEMORY REPLAY CONSTANTS (SHO-105)
+// Based on sleep consolidation research: hippocampal replay during rest
+// strengthens important memory traces through co-activation
+// =============================================================================
+
+/// Minimum importance score for a memory to be eligible for replay
+///
+/// Justification:
+/// - 0.3 threshold selects top ~30% of memories by importance
+/// - Low-importance memories don't benefit from replay (noise)
+/// - Combined with recency, targets recent + important memories
+///
+/// Reference: Rasch & Born (2013) "About Sleep's Role in Memory"
+pub const REPLAY_IMPORTANCE_THRESHOLD: f32 = 0.3;
+
+/// Maximum age in days for memories eligible for replay
+///
+/// Justification:
+/// - 7 days matches sleep consolidation window in neuroscience
+/// - Older memories are already consolidated (in power-law phase)
+/// - Focus replay resources on recent, unconsolidated memories
+pub const REPLAY_MAX_AGE_DAYS: i64 = 7;
+
+/// Minimum emotional arousal for priority replay
+///
+/// High-arousal memories (emotional events) get priority in replay queue.
+///
+/// Justification:
+/// - 0.6 threshold selects emotionally significant events
+/// - Matches amygdala modulation threshold for enhanced encoding
+/// - Emotional memories benefit most from replay consolidation
+///
+/// Reference: LaBar & Cabeza (2006) "Cognitive neuroscience of emotional memory"
+pub const REPLAY_AROUSAL_THRESHOLD: f32 = 0.6;
+
+/// Strength boost per replay cycle for memory activation
+///
+/// Justification:
+/// - 0.05 (5%) is small enough to require multiple replays for significant effect
+/// - Matches biological synaptic strengthening rates
+/// - 10 replay cycles → ~60% increase (compound effect)
+pub const REPLAY_STRENGTH_BOOST: f32 = 0.05;
+
+/// Strength boost for edges during replay co-activation
+///
+/// Justification:
+/// - 0.08 (8%) strengthens associations during replay
+/// - Slightly higher than memory boost (edges benefit more from co-activation)
+/// - Simulates sleep spindle-mediated synaptic strengthening
+pub const REPLAY_EDGE_BOOST: f32 = 0.08;
+
+/// Maximum memories to replay per cycle
+///
+/// Justification:
+/// - 50 memories per cycle limits computational cost
+/// - Typical replay session processes 30-50 memories
+/// - Higher values may cause maintenance cycle delays
+pub const REPLAY_BATCH_SIZE: usize = 50;
+
+/// Minimum connected memories required for replay network
+///
+/// Justification:
+/// - 2 minimum ensures replay involves co-activation (not isolated memories)
+/// - Replay benefits from network effects
+/// - Isolated memories should wait for more connections
+pub const REPLAY_MIN_CONNECTIONS: usize = 2;
+
+// =============================================================================
+// MEMORY INTERFERENCE CONSTANTS (SHO-106)
+// Based on interference theory: similar memories compete and can disrupt each other
+// =============================================================================
+
+/// Similarity threshold for interference detection
+///
+/// When a new memory exceeds this similarity to an existing memory,
+/// interference effects are triggered.
+///
+/// Justification:
+/// - 0.85 cosine similarity indicates highly similar content
+/// - Below this, memories are distinct enough to coexist
+/// - Above this, memories compete for the same retrieval cues
+///
+/// Reference: Postman & Underwood (1973) "Critical issues in interference theory"
+pub const INTERFERENCE_SIMILARITY_THRESHOLD: f32 = 0.85;
+
+/// Similarity threshold for severe interference (conflicting memories)
+///
+/// Justification:
+/// - 0.95 indicates nearly identical content
+/// - At this level, one memory should dominate
+/// - Retroactive interference is strongest
+pub const INTERFERENCE_SEVERE_THRESHOLD: f32 = 0.95;
+
+/// Strength reduction per interference event (retroactive)
+///
+/// When new memory interferes with old, old memory loses this much strength.
+///
+/// Justification:
+/// - 0.1 (10%) is moderate - requires multiple interferences to significantly weaken
+/// - Matches empirical retroactive interference rates
+/// - Allows recovery if new memory is later found to be incorrect
+pub const INTERFERENCE_RETROACTIVE_DECAY: f32 = 0.1;
+
+/// Strength reduction for proactive interference
+///
+/// Strong old memories can suppress encoding of similar new memories.
+///
+/// Justification:
+/// - 0.05 (5%) is weaker than retroactive (new info typically wins)
+/// - Only applies when old memory is very strong (>0.8 importance)
+/// - Prevents over-learning effects
+pub const INTERFERENCE_PROACTIVE_DECAY: f32 = 0.05;
+
+/// Importance threshold for proactive interference
+///
+/// Only memories above this importance can cause proactive interference.
+///
+/// Justification:
+/// - 0.8 selects only very strong, well-established memories
+/// - Weak memories shouldn't block new learning
+/// - Matches schema-based learning effects
+pub const INTERFERENCE_PROACTIVE_THRESHOLD: f32 = 0.8;
+
+/// Competition factor during retrieval
+///
+/// How much similar memories suppress each other during retrieval.
+///
+/// Justification:
+/// - 0.15 provides moderate competition
+/// - Higher values cause winner-take-all behavior
+/// - Lower values allow more co-retrieval
+///
+/// Reference: Anderson & Neely (1996) "Interference and inhibition in memory retrieval"
+pub const INTERFERENCE_COMPETITION_FACTOR: f32 = 0.15;
+
+/// Time window for interference sensitivity (hours)
+///
+/// New memories are most vulnerable to interference within this window.
+///
+/// Justification:
+/// - 24 hours matches synaptic consolidation window
+/// - After this, memories become more resistant to interference
+/// - Combined with DECAY_CROSSOVER_DAYS for full model
+pub const INTERFERENCE_VULNERABILITY_HOURS: i64 = 24;
+
+/// Maximum interference events to track per memory
+///
+/// Justification:
+/// - 10 events provides sufficient history
+/// - Beyond this, early interference events are less relevant
+/// - Limits memory overhead
+pub const INTERFERENCE_MAX_TRACKED: usize = 10;
+
+// =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================
 //
