@@ -382,7 +382,7 @@ async function isServerAvailable(): Promise<boolean> {
 const server = new Server(
   {
     name: "shodh-memory",
-    version: "0.1.5",
+    version: "0.1.51",
   },
   {
     capabilities: {
@@ -1778,7 +1778,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Shodh-Memory MCP server v0.1.5 running");
+  console.error("Shodh-Memory MCP server v0.1.51 running");
   console.error(`Connecting to: ${API_URL}`);
   console.error(`User ID: ${USER_ID}`);
   console.error(`Streaming: ${STREAM_ENABLED ? "enabled" : "disabled"}`);
