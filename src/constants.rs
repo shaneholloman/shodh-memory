@@ -2205,6 +2205,85 @@ pub const PROACTIVE_RECENCY_DECAY_RATE: f32 = 0.03;
 pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
 
 // =============================================================================
+// CAUSAL LINEAGE CONSTANTS (SHO-118)
+// Lineage inference detects causal relationships between memories using
+// temporal proximity, entity overlap, and memory type patterns.
+//
+// Reference: Shanahan (2005) "Perception as Abduction: Turning Sensor Data
+// into Meaningful Representation" — causal abduction from temporal sequences
+// =============================================================================
+
+/// Maximum temporal gap (days) between memories for causal inference.
+///
+/// Memories further apart than this are unlikely to share causal links.
+/// 7 days balances catching multi-session causal chains (e.g., Monday's
+/// error→Friday's fix) while filtering noise from stale associations.
+pub const LINEAGE_MAX_TEMPORAL_GAP_DAYS: i64 = 7;
+
+/// Minimum Jaccard entity overlap for causal inference.
+///
+/// Memories must share at least 30% of their entities to infer causation.
+/// Too low and unrelated memories get linked; too high and indirect
+/// causal chains (A→B→C where A and C share few entities) are missed.
+pub const LINEAGE_MIN_ENTITY_OVERLAP: f32 = 0.3;
+
+/// Maximum candidate memories to evaluate for lineage inference.
+///
+/// Caps the per-memory inference cost. 20 candidates × O(1) inference
+/// ≈ negligible latency. Higher values catch more distant causal links
+/// but increase background task duration.
+pub const LINEAGE_MAX_CANDIDATES: usize = 20;
+
+/// Lookback window (days) for finding candidate memories during inference.
+///
+/// Controls how far back the graph entity index is searched for
+/// co-occurring memories. Matches LINEAGE_MAX_TEMPORAL_GAP_DAYS by default.
+pub const LINEAGE_LOOKBACK_DAYS: i64 = 7;
+
+/// Base confidence for Caused relation (Error → Task).
+pub const LINEAGE_CONFIDENCE_CAUSED: f32 = 0.8;
+
+/// Base confidence for ResolvedBy relation (Task → Learning).
+pub const LINEAGE_CONFIDENCE_RESOLVED_BY: f32 = 0.85;
+
+/// Base confidence for InformedBy relation (Learning/Discovery → Decision).
+pub const LINEAGE_CONFIDENCE_INFORMED_BY: f32 = 0.7;
+
+/// Base confidence for SupersededBy relation (Decision → Decision).
+pub const LINEAGE_CONFIDENCE_SUPERSEDED_BY: f32 = 0.6;
+
+/// Base confidence for TriggeredBy relation (Discovery/Learning → Task).
+pub const LINEAGE_CONFIDENCE_TRIGGERED_BY: f32 = 0.75;
+
+/// Base confidence for BranchedFrom relation (pivot detection).
+pub const LINEAGE_CONFIDENCE_BRANCHED_FROM: f32 = 0.9;
+
+/// Base confidence for RelatedTo relation (same-group fallback).
+pub const LINEAGE_CONFIDENCE_RELATED_TO: f32 = 0.5;
+
+/// Scale factor for propagating lineage confidence into graph edge weights.
+///
+/// When a causal lineage edge is inferred between two memories with confidence C,
+/// the corresponding graph edges between their entities are strengthened by
+/// C * LINEAGE_GRAPH_BOOST_SCALE. This bidirectionally couples the lineage system
+/// (explicit causal chains) with the knowledge graph (spreading activation), so
+/// causally-linked memories naturally co-activate during retrieval.
+///
+/// Conservative value: lineage inferences are probabilistic, so we attenuate the
+/// boost to prevent false causal links from dominating the graph topology.
+///
+/// Reference: Anderson (1983) "The Architecture of Cognition" — spreading activation
+/// strength should reflect the reliability of the association source.
+pub const LINEAGE_GRAPH_BOOST_SCALE: f32 = 0.15;
+
+/// Boost applied when a user explicitly confirms a lineage edge.
+///
+/// Confirmation is a strong signal — the user validated the causal relationship.
+/// This uses a higher boost than automatic inference to reward human-in-the-loop
+/// validation and make confirmed causal paths more prominent in retrieval.
+pub const LINEAGE_CONFIRM_GRAPH_BOOST: f32 = 0.3;
+
+// =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================
 //
