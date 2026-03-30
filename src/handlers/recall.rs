@@ -1561,6 +1561,7 @@ pub async fn proactive_context(
     // Post-pipeline: adaptive involuntary memory constraints (Berntsen 2009)
     // Applied here (not in semantic_retrieve) to keep voluntary recall untouched.
     let context_clone = req.context.clone();
+    let context_lower_for_tags = req.context.to_lowercase();
     let max_results = req.max_results;
     let user_id_for_query = req.user_id.clone();
     let entity_names_for_recall = context_entity_names.clone();
@@ -1651,6 +1652,8 @@ pub async fn proactive_context(
                 })
                 .collect();
 
+            let context_lower = &context_lower_for_tags;
+
             // Compute entity matches and boost scores BEFORE quality gate
             let context_entity_count = entity_names_for_recall.len().max(1);
             let mut enriched: Vec<(
@@ -1705,6 +1708,47 @@ pub async fn proactive_context(
                         let diminishing = (1.0 + matched.len() as f32).ln() / (1.0_f32 + 3.0).ln();
                         let entity_boost = entity_match_weight * match_ratio * diminishing.min(1.0);
                         score *= 1.0 + entity_boost;
+                    }
+
+                    // Structured tag matching — boost memories whose hook-written
+                    // tags (tool:*, file:*, error) align with context signals.
+                    {
+                        let mut tag_matches: u32 = 0;
+                        for tag in &m.experience.tags {
+                            let lower_tag = tag.to_lowercase();
+                            if let Some(tool_name) = lower_tag.strip_prefix("tool:") {
+                                if entity_names_for_recall
+                                    .iter()
+                                    .any(|e| e.eq_ignore_ascii_case(tool_name))
+                                {
+                                    tag_matches += 1;
+                                }
+                            } else if let Some(file_path) = lower_tag.strip_prefix("file:") {
+                                let file_name = file_path
+                                    .rsplit('/')
+                                    .next()
+                                    .or_else(|| file_path.rsplit('\\').next())
+                                    .unwrap_or(file_path);
+                                if file_name.len() >= 3
+                                    && entity_names_for_recall.iter().any(|e| {
+                                        e.contains(file_name) || file_name.contains(e.as_str())
+                                    })
+                                {
+                                    tag_matches += 1;
+                                }
+                            } else if lower_tag == "error"
+                                && (context_lower.contains("error")
+                                    || context_lower.contains("fail")
+                                    || context_lower.contains("bug")
+                                    || context_lower.contains("fix"))
+                            {
+                                tag_matches += 1;
+                            }
+                        }
+                        if tag_matches > 0 {
+                            let capped = tag_matches.min(3) as f32;
+                            score *= 1.0 + crate::constants::TAG_RELEVANCE_BOOST * capped;
+                        }
                     }
 
                     (m, score, matched)
