@@ -784,10 +784,30 @@ async function handleSubagentStop(input: HookInput): Promise<void> {
   );
 }
 
-async function handleStop(_input: HookInput): Promise<void> {
-  // Session end is tracked implicitly by memory timestamps and decay.
-  // Storing explicit "Session ended" memories creates noise in the activity log
-  // and gets re-ingested by proactive_context auto-ingest, causing duplicate events.
+async function handleStop(input: HookInput): Promise<void> {
+  // Store a lightweight session summary so handleSessionStart can surface
+  // continuity context in the next session. We keep it minimal to avoid
+  // noise — just the session boundary marker with lineage metadata.
+  const sessionId = input.session_id || currentEpisodeId || "unknown";
+  const stopReason = input.stop_reason || "unknown";
+  const cwd = input.cwd || process.cwd();
+
+  // Extract just the project directory name for context
+  const projectDir = cwd.split(/[/\\]/).pop() || cwd;
+
+  const content = `Session ended (${stopReason}) in ${projectDir}. Session ID: ${sessionId}`;
+
+  await callBrain("/api/remember", {
+    user_id: SHODH_USER_ID,
+    content,
+    type: "Context",
+    tags: ["session-summary", "source:stop-hook"],
+    source_type: "system",
+    importance: 0.3,
+    episode_id: sessionId,
+    preceding_memory_id: currentEpisodeId || undefined,
+    credibility: 1.0,
+  });
 }
 
 async function main(): Promise<void> {

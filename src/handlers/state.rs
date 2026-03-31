@@ -281,6 +281,11 @@ pub struct MultiUserMemoryManager {
     /// applying logarithmic decay to prevent pathological repeated intrusions.
     /// See: Berntsen (2009), Thompson & Spencer (1966).
     pub habituation_tracker: Arc<HabituationTracker>,
+
+    /// Tracks background tasks (graph processing, lineage inference) spawned by
+    /// remember/upsert handlers. On shutdown, we close + await all tracked tasks
+    /// to prevent data loss from fire-and-forget graph writes.
+    pub task_tracker: tokio_util::task::TaskTracker,
 }
 
 impl MultiUserMemoryManager {
@@ -356,6 +361,8 @@ impl MultiUserMemoryManager {
         let evictions_clone = user_evictions.clone();
         let max_cache = server_config.max_users_in_memory;
         let eviction_base_path = base_path.clone();
+        let habituation_tracker: Arc<HabituationTracker> = Arc::new(DashMap::new());
+        let habituation_for_eviction = habituation_tracker.clone();
 
         // Configurable idle eviction timeout. Default: 0 (disabled).
         // Single-user deployments (local Claude Code) should keep 0 — idle eviction
@@ -396,7 +403,10 @@ impl MultiUserMemoryManager {
                     // while the lock is held, MemorySystem::new() fails with a lock error.
                     let index_path = eviction_base_path.join(key.as_str()).join("vector_index");
                     let user_key = key.clone();
+                    let hab_tracker = habituation_for_eviction.clone();
                     std::thread::spawn(move || {
+                        // Clean up habituation tracking for evicted user
+                        hab_tracker.remove(user_key.as_str());
                         // Scope the read guard so it drops before we drop the Arc.
                         // This ensures the RocksDB file lock is released promptly.
                         let save_result = {
@@ -599,7 +609,8 @@ impl MultiUserMemoryManager {
             user_memory_init_locks: DashMap::new(),
             user_graph_init_locks: DashMap::new(),
             shared_rocksdb_cache,
-            habituation_tracker: Arc::new(DashMap::new()),
+            habituation_tracker,
+            task_tracker: tokio_util::task::TaskTracker::new(),
         };
 
         info!("Running initial audit log rotation...");
@@ -924,6 +935,7 @@ impl MultiUserMemoryManager {
     pub fn evict_user(&self, user_id: &str) {
         self.user_memories.invalidate(user_id);
         self.graph_memories.invalidate(user_id);
+        self.habituation_tracker.remove(user_id);
         self.user_memories.run_pending_tasks();
         self.graph_memories.run_pending_tasks();
 
@@ -947,6 +959,7 @@ impl MultiUserMemoryManager {
     pub fn forget_user(&self, user_id: &str) -> Result<()> {
         self.user_memories.invalidate(user_id);
         self.graph_memories.invalidate(user_id);
+        self.habituation_tracker.remove(user_id);
 
         self.user_memories.run_pending_tasks();
         self.graph_memories.run_pending_tasks();
@@ -1004,7 +1017,7 @@ impl MultiUserMemoryManager {
     }
 
     /// Prefix-scan and batch-delete all keys starting with `{user_id}:` from a column family
-    fn delete_by_prefix(db: &rocksdb::DB, cf: &rocksdb::ColumnFamily, prefix: &[u8]) -> usize {
+    fn delete_by_prefix(db: &rocksdb::DB, cf: &rocksdb::ColumnFamily, prefix: &[u8]) -> Result<usize> {
         let mut batch = rocksdb::WriteBatch::default();
         let mut count = 0;
         let iter = db.prefix_iterator_cf(cf, prefix);
@@ -1017,9 +1030,9 @@ impl MultiUserMemoryManager {
             count += 1;
         }
         if count > 0 {
-            let _ = db.write(batch);
+            db.write(batch).map_err(|e| anyhow::anyhow!("RocksDB batch delete failed: {e}"))?;
         }
-        count
+        Ok(count)
     }
 
     /// Purge all user data from shared RocksDB (todos, reminders, files, feedback, audit)
@@ -1031,7 +1044,7 @@ impl MultiUserMemoryManager {
         let cf_names = ["todos", "projects", "prospective"];
         for name in &cf_names {
             if let Some(cf) = self.shared_db.cf_handle(name) {
-                let n = Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+                let n = Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes)?;
                 if n > 0 {
                     tracing::debug!("GDPR: purged {n} entries from {name} CF for {user_id}");
                 }
@@ -1052,7 +1065,7 @@ impl MultiUserMemoryManager {
                 format!("todo_vector:{user_id}:"),
             ];
             for p in &prefixes {
-                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes());
+                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes())?;
             }
             // Priority and due/context keys also contain user_id but at varying positions.
             // Full scan of index CF to catch them all.
@@ -1066,7 +1079,7 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            let _ = self.shared_db.write(batch);
+            self.shared_db.write(batch).map_err(|e| anyhow::anyhow!("GDPR todo_index purge failed: {e}"))?;
         }
 
         if let Some(cf) = self.shared_db.cf_handle("prospective_index") {
@@ -1077,7 +1090,7 @@ impl MultiUserMemoryManager {
                 format!("status:Dismissed:{user_id}:"),
             ];
             for p in &prefixes {
-                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes());
+                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes())?;
             }
             // Context keyword indices: `context:{keyword}:{user_id}:{id}`
             let mut batch = rocksdb::WriteBatch::default();
@@ -1090,16 +1103,16 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            let _ = self.shared_db.write(batch);
+            self.shared_db.write(batch).map_err(|e| anyhow::anyhow!("GDPR prospective_index purge failed: {e}"))?;
         }
 
         // Files
         if let Some(cf) = self.shared_db.cf_handle("files") {
-            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes)?;
         }
         if let Some(cf) = self.shared_db.cf_handle("file_index") {
             let idx_prefix = format!("file_idx:{user_id}:");
-            Self::delete_by_prefix(&self.shared_db, cf, idx_prefix.as_bytes());
+            Self::delete_by_prefix(&self.shared_db, cf, idx_prefix.as_bytes())?;
             // Also catch other patterns
             let mut batch = rocksdb::WriteBatch::default();
             let iter = self.shared_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
@@ -1111,18 +1124,19 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            let _ = self.shared_db.write(batch);
+            self.shared_db.write(batch).map_err(|e| anyhow::anyhow!("GDPR file_index purge failed: {e}"))?;
         }
 
         // Feedback: `pending:{user_id}`
         if let Some(cf) = self.shared_db.cf_handle("feedback") {
             let pending_key = format!("pending:{user_id}");
-            let _ = self.shared_db.delete_cf(cf, pending_key.as_bytes());
+            self.shared_db.delete_cf(cf, pending_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("GDPR feedback purge failed: {e}"))?;
         }
 
         // Audit logs
         if let Some(cf) = self.shared_db.cf_handle("audit") {
-            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes)?;
         }
 
         // Clear in-memory audit log cache

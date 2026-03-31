@@ -3982,6 +3982,7 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower 0.5.2",
  "tower-http",
  "tower_governor",

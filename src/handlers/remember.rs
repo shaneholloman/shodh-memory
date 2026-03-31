@@ -86,12 +86,21 @@ pub struct BatchRememberRequest {
 }
 
 /// Options for batch remember
-#[derive(Debug, serde::Deserialize, Clone, Default)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct BatchRememberOptions {
     #[serde(default = "default_true")]
     pub extract_entities: bool,
     #[serde(default = "default_true")]
     pub create_edges: bool,
+}
+
+impl Default for BatchRememberOptions {
+    fn default() -> Self {
+        Self {
+            extract_entities: true,
+            create_edges: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -371,12 +380,20 @@ pub async fn remember(
     let mut seen: HashSet<String> = merged_entities.iter().map(|t| t.to_lowercase()).collect();
     for record in &ner_entities {
         if seen.insert(record.text.to_lowercase()) {
-            merged_entities.push(record.text.clone());
+            if validation::validate_entity(&record.text).is_ok() {
+                merged_entities.push(record.text.clone());
+            } else {
+                tracing::debug!(entity = %record.text, "Skipping invalid NER entity (too long or invalid chars)");
+            }
         }
     }
     for keyword in extracted_keywords {
         if seen.insert(keyword.to_lowercase()) {
-            merged_entities.push(keyword);
+            if validation::validate_entity(&keyword).is_ok() {
+                merged_entities.push(keyword);
+            } else {
+                tracing::debug!(entity = %keyword, "Skipping invalid YAKE keyword (too long or invalid chars)");
+            }
         }
     }
     if merged_entities.len() > validation::MAX_ENTITIES_PER_MEMORY {
@@ -478,8 +495,10 @@ pub async fn remember(
     // caused 5-15s handler latency, exceeding the MCP client's 10s timeout and
     // triggering retries that created duplicate memories (31% duplication rate).
     // Now fire-and-forget: response returns in <200ms, post-tasks run in background.
+    // Use task_tracker.spawn() so shutdown can await in-flight graph writes.
     let response_id = memory_id.0.to_string();
     {
+        let tracker = state.task_tracker.clone();
         let state = state.clone();
         let memory = memory.clone();
         let user_id = req.user_id.clone();
@@ -488,7 +507,7 @@ pub async fn remember(
         let parent_id = req.parent_id.clone();
         let created_at = req.created_at;
 
-        tokio::spawn(async move {
+        tracker.spawn(async move {
             // Task 1: Build episodic graph (entities + episode + relationships)
             if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id) {
                 tracing::debug!("Graph processing failed (non-fatal): {}", e);
@@ -846,12 +865,20 @@ pub async fn upsert_memory(
     let mut seen: HashSet<String> = merged_entities.iter().map(|t| t.to_lowercase()).collect();
     for record in &ner_entities {
         if seen.insert(record.text.to_lowercase()) {
-            merged_entities.push(record.text.clone());
+            if validation::validate_entity(&record.text).is_ok() {
+                merged_entities.push(record.text.clone());
+            } else {
+                tracing::debug!(entity = %record.text, "Skipping invalid NER entity in upsert (too long or invalid chars)");
+            }
         }
     }
     for keyword in extracted_keywords {
         if seen.insert(keyword.to_lowercase()) {
-            merged_entities.push(keyword);
+            if validation::validate_entity(&keyword).is_ok() {
+                merged_entities.push(keyword);
+            } else {
+                tracing::debug!(entity = %keyword, "Skipping invalid YAKE keyword in upsert (too long or invalid chars)");
+            }
         }
     }
     if merged_entities.len() > validation::MAX_ENTITIES_PER_MEMORY {
@@ -987,7 +1014,8 @@ pub async fn upsert_memory(
 /// edges, and strengthens corresponding knowledge graph connections. All failures
 /// are logged but never propagate — lineage is best-effort.
 fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::memory::MemoryId) {
-    tokio::spawn(async move {
+    let tracker = state.task_tracker.clone();
+    tracker.spawn(async move {
         let graph_arc = match state.get_user_graph(&user_id) {
             Ok(g) => g,
             Err(e) => {
