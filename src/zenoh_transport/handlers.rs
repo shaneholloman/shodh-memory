@@ -72,7 +72,7 @@ pub fn authenticate_payload(payload: &ZBytes, expected: Option<&str>) -> bool {
     };
 
     match provided {
-        Some(ref key) if constant_time_eq(key.as_bytes(), expected.as_bytes()) => true,
+        Some(ref key) if crate::auth::constant_time_compare(key, expected) => true,
         Some(_) => {
             warn!("Zenoh auth: api_key mismatch, rejecting request");
             false
@@ -82,18 +82,6 @@ pub fn authenticate_payload(payload: &ZBytes, expected: Option<&str>) -> bool {
             false
         }
     }
-}
-
-/// Constant-time byte comparison to prevent timing side-channels on key validation.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 // =============================================================================

@@ -119,7 +119,7 @@ impl IntoResponse for AuthError {
 ///
 /// Compares all bytes of both strings to prevent length-based timing leaks.
 /// The comparison time is constant regardless of where differences occur.
-fn constant_time_compare(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_compare(a: &str, b: &str) -> bool {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
     let a_len = a_bytes.len();

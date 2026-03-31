@@ -396,15 +396,38 @@ async function handleSessionStart(): Promise<void> {
   const projectName = projectDir.split(/[/\\]/).pop() || "unknown";
 
   const context = `Starting session in project: ${projectName}`;
-  const memoryContext = await surfaceProactiveContext(context, 5);
 
-  if (memoryContext) {
+  // Parallel: semantic context + tag-based session restoration
+  const [memoryContext, tagResult] = await Promise.all([
+    surfaceProactiveContext(context, 5),
+    callBrain("/api/recall/tags", {
+      user_id: SHODH_USER_ID,
+      tags: ["session-summary", "source:hook"],
+      limit: 5,
+    }) as Promise<{ memories?: Array<{ id: string; content?: string; experience?: { content?: string } }> } | null>,
+  ]);
+
+  // Extract tag-based session context (cap at 3 to avoid noise)
+  let tagContext = "";
+  if (tagResult?.memories?.length) {
+    tagContext = tagResult.memories
+      .slice(0, 3)
+      .map((m) => {
+        const content = m.content || m.experience?.content || "";
+        return `• [session] ${content.slice(0, 120)}${content.length > 120 ? "..." : ""}`;
+      })
+      .join("\n");
+  }
+
+  const combinedContext = [memoryContext, tagContext].filter(Boolean).join("\n\n");
+
+  if (combinedContext) {
     console.error(`[shodh] Session context loaded`);
 
     // Write to project memory file
     const memoryFile = `${projectDir}/.claude/memory-context.md`;
     try {
-      await Bun.write(memoryFile, `# Shodh Memory Context\n\n${memoryContext}\n`);
+      await Bun.write(memoryFile, `# Shodh Memory Context\n\n${combinedContext}\n`);
     } catch {
       // Directory might not exist
     }

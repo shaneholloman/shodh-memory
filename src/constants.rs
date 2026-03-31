@@ -2204,6 +2204,16 @@ pub const PROACTIVE_RECENCY_DECAY_RATE: f32 = 0.03;
 /// their score, while rich elaborated memories get full weight.
 pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
 
+/// Tag relevance boost for proactive_context scoring.
+///
+/// When a memory's structured tags (tool:*, file:*, error) match patterns
+/// detected in the current context, the memory receives a multiplicative boost
+/// of (1 + TAG_RELEVANCE_BOOST × min(matches, 3)). This connects hook-written
+/// metadata to retrieval ranking without overriding semantic similarity.
+///
+/// Range: [0.0, 1.0]. At 0.05, maximum boost is +15% for 3 matching patterns.
+pub const TAG_RELEVANCE_BOOST: f32 = 0.05;
+
 // =============================================================================
 // TEMPORAL CREDIT ASSIGNMENT CONSTANTS
 // Multi-turn feedback attribution with exponential discounting.
@@ -2520,6 +2530,7 @@ pub const LINEAGE_CONFIRM_GRAPH_BOOST: f32 = 0.3;
 // | LATERAL_INHIBITION_STRENGTH   | handlers/recall.rs        | proactive_context() inhibition      |
 // | PROACTIVE_RECENCY_DECAY_RATE  | handlers/recall.rs        | proactive_context() recency curve   |
 // | ELABORATION_QUALITY_MIN       | handlers/recall.rs        | proactive_context() quality gate    |
+// | TAG_RELEVANCE_BOOST           | handlers/recall.rs        | proactive_context() tag boost       |
 //
 // ## Temporal Credit Assignment Constants (Sutton & Barto 2018)
 // | Constant                      | File                      | Function/Context                    |
