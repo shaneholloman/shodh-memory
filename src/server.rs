@@ -310,6 +310,26 @@ async fn async_main() -> Result<()> {
         }
     }
 
+    // Wait for tracked background tasks (graph processing, lineage inference)
+    // to complete before flushing databases, preventing data loss.
+    manager_for_shutdown.task_tracker.close();
+    let task_timeout = std::time::Duration::from_secs(10);
+    info!(
+        "Waiting up to {}s for background graph tasks...",
+        task_timeout.as_secs()
+    );
+    if tokio::time::timeout(task_timeout, manager_for_shutdown.task_tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "Background task drain timed out after {}s, proceeding with shutdown",
+            task_timeout.as_secs()
+        );
+    } else {
+        info!("All background graph tasks completed");
+    }
+
     // Shut down Zenoh transport before flushing databases
     #[cfg(feature = "zenoh")]
     if let Some(handle) = zenoh_handle {
@@ -347,6 +367,27 @@ fn start_maintenance_scheduler(manager: AppState, interval_secs: u64) {
             let session_cleaned = manager.session_store().cleanup_stale_sessions();
             if session_cleaned > 0 {
                 tracing::debug!("Ended {} stale user sessions", session_cleaned);
+            }
+
+            // Prune stale habituation entries (> 24 hours since last surfaced)
+            {
+                let tracker = &manager.habituation_tracker;
+                let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+                let mut pruned = 0usize;
+                // Outer map: user_id -> inner map
+                tracker.retain(|_user_id, inner| {
+                    inner.retain(|_mem_id, entry| {
+                        let keep = entry.last_surfaced > cutoff;
+                        if !keep {
+                            pruned += 1;
+                        }
+                        keep
+                    });
+                    !inner.is_empty()
+                });
+                if pruned > 0 {
+                    tracing::debug!("Pruned {} stale habituation entries (>24h)", pruned);
+                }
             }
 
             // Run maintenance in blocking thread pool

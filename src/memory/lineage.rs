@@ -753,6 +753,8 @@ impl LineageGraph {
             "start fresh",
             "start over",
             "complete rewrite",
+            "should rewrite",
+            "need to rewrite",
             "scrap this",
             "scrap the",
             "different strategy",
