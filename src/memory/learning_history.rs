@@ -736,12 +736,16 @@ impl LearningHistoryStore {
 
                         // Also delete secondary index entries for this event
                         if value.len() <= MAX_LEARNING_EVENT_SIZE {
-                            if let Ok(stored) = rmp_serde::from_slice::<StoredLearningEvent>(&value) {
+                            if let Ok(stored) = rmp_serde::from_slice::<StoredLearningEvent>(&value)
+                            {
                                 let ts_fmt = format!("{:020}", ts);
                                 if let Some(ref mem_id) = stored.memory_id {
                                     batch.delete(
-                                        format!("learning_by_memory:{}:{}:{}", user_id, mem_id, ts_fmt)
-                                            .as_bytes(),
+                                        format!(
+                                            "learning_by_memory:{}:{}:{}",
+                                            user_id, mem_id, ts_fmt
+                                        )
+                                        .as_bytes(),
                                     );
                                 }
                                 if let Some(ref related_id) = stored.related_memory_id {

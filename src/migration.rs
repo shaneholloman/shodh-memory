@@ -142,9 +142,7 @@ pub fn migrate_all(storage_path: &Path, dry_run: bool) -> Result<MigrationReport
                 report.audit_skipped = skipped;
             }
             Err(e) => {
-                report
-                    .errors
-                    .push(format!("shared DB: {e:#}"));
+                report.errors.push(format!("shared DB: {e:#}"));
             }
         }
     }
@@ -347,10 +345,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
         }
 
         // Skip index-only entries (values are plain string references, not serialized)
-        if INDEX_ONLY_PREFIXES
-            .iter()
-            .any(|p| key.starts_with(p))
-        {
+        if INDEX_ONLY_PREFIXES.iter().any(|p| key.starts_with(p)) {
             continue;
         }
 
@@ -738,8 +733,8 @@ where
     }
 
     // Decode with legacy bincode fallback
-    let (val, _needs_migration): (T, bool) = serialization::try_decode(value)
-        .with_context(|| {
+    let (val, _needs_migration): (T, bool) =
+        serialization::try_decode(value).with_context(|| {
             format!(
                 "decoding record (key len={}, value len={})",
                 key.len(),

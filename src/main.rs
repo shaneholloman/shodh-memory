@@ -64,7 +64,13 @@ struct Cli {
 
     // ── Flat args for backward compat (no subcommand = serve) ──
     /// Bind address (use 0.0.0.0 for network access)
-    #[arg(short = 'H', long, env = "SHODH_HOST", default_value = "127.0.0.1", global = true)]
+    #[arg(
+        short = 'H',
+        long,
+        env = "SHODH_HOST",
+        default_value = "127.0.0.1",
+        global = true
+    )]
     host: String,
 
     /// Port number to listen on
@@ -90,7 +96,12 @@ struct Cli {
     rate_limit: u64,
 
     /// Maximum concurrent requests before load shedding
-    #[arg(long, env = "SHODH_MAX_CONCURRENT", default_value_t = 200, global = true)]
+    #[arg(
+        long,
+        env = "SHODH_MAX_CONCURRENT",
+        default_value_t = 200,
+        global = true
+    )]
     max_concurrent: usize,
 }
 
@@ -127,8 +138,7 @@ fn main() -> Result<()> {
                 if dry_run { " (dry run)" } else { "" }
             );
 
-            let report =
-                shodh_memory::migration::migrate_all(&cli.storage_path, dry_run)?;
+            let report = shodh_memory::migration::migrate_all(&cli.storage_path, dry_run)?;
             eprintln!("{report}");
 
             if !report.errors.is_empty() {

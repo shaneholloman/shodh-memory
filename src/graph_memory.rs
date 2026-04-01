@@ -1445,8 +1445,7 @@ impl GraphMemory {
             let entity_iter = db.iterator_cf(entities_cf, rocksdb::IteratorMode::Start);
             let mut migrated_count = 0;
             for (_, value) in entity_iter.flatten() {
-                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
-                {
+                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
                     // Store in name_index CF: name -> UUID bytes
                     db.put_cf(
                         name_index_cf,
@@ -1569,8 +1568,7 @@ impl GraphMemory {
         for uuid in name_index.values() {
             let key = uuid.as_bytes();
             if let Ok(Some(value)) = db.get_cf(entities_cf, key) {
-                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
-                {
+                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
                     if let Some(emb) = entity.name_embedding {
                         cache.push((*uuid, emb));
                         if cache.len() >= ENTITY_EMBEDDING_CACHE_MAX {
@@ -2345,8 +2343,7 @@ impl GraphMemory {
 
         let mut edges = Vec::with_capacity(edge_uuids.len());
         for value in results.into_iter().flatten().flatten() {
-            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value)
-            {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
                 edges.push(edge);
             }
         }
@@ -2515,8 +2512,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (edge, _) =
-                    crate::serialization::try_decode::<RelationshipEdge>(&value)?;
+                let (edge, _) = crate::serialization::try_decode::<RelationshipEdge>(&value)?;
                 Ok(Some(edge))
             }
             None => Ok(None),
@@ -2535,8 +2531,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (mut edge, _) =
-                    crate::serialization::try_decode::<RelationshipEdge>(&value)?;
+                let (mut edge, _) = crate::serialization::try_decode::<RelationshipEdge>(&value)?;
                 // Apply effective strength calculation (doesn't persist)
                 edge.strength = edge.effective_strength();
                 Ok(Some(edge))
@@ -2618,8 +2613,7 @@ impl GraphMemory {
             .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
         let mut edges_to_delete = Vec::new();
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value)
-            {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
                 if edge.source_episode_id == Some(*episode_uuid) {
                     edges_to_delete.push(edge.uuid);
                 }
@@ -2724,8 +2718,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.episodes_cf(), key)? {
             Some(value) => {
-                let (episode, _) =
-                    crate::serialization::try_decode::<EpisodicNode>(&value)?;
+                let (episode, _) = crate::serialization::try_decode::<EpisodicNode>(&value)?;
                 Ok(Some(episode))
             }
             None => Ok(None),
@@ -2773,8 +2766,7 @@ impl GraphMemory {
 
         let mut episodes = Vec::with_capacity(episode_uuids.len());
         for value in results.into_iter().flatten().flatten() {
-            if let Ok((episode, _)) = crate::serialization::try_decode::<EpisodicNode>(&value)
-            {
+            if let Ok((episode, _)) = crate::serialization::try_decode::<EpisodicNode>(&value) {
                 episodes.push(episode);
             }
         }
@@ -3498,8 +3490,7 @@ impl GraphMemory {
             }
 
             let (_, value) = result?;
-            let (entity, _) =
-                crate::serialization::try_decode::<EntityNode>(&value)?;
+            let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
 
             let entity_matches = self.match_pattern(&entity.uuid, pattern, min_strength)?;
             for m in entity_matches {
@@ -3665,9 +3656,7 @@ impl GraphMemory {
                     // Strengthen existing edge
                     let _ = edge.strengthen();
                     let key = edge.uuid.as_bytes();
-                    if let Ok(value) =
-                        crate::serialization::encode(&edge)
-                    {
+                    if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
                         edges_updated += 1;
                     }
@@ -3695,9 +3684,7 @@ impl GraphMemory {
                     };
 
                     let key = edge.uuid.as_bytes();
-                    if let Ok(value) =
-                        crate::serialization::encode(&edge)
-                    {
+                    if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
 
                         // Also index in the reverse direction for lookup
@@ -3817,8 +3804,7 @@ impl GraphMemory {
                 // Strengthen existing edge — capture tier promotion if it occurs
                 let promotion = edge.strengthen();
                 let key = edge.uuid.as_bytes();
-                if let Ok(value) = crate::serialization::encode(&edge)
-                {
+                if let Ok(value) = crate::serialization::encode(&edge) {
                     batch.put_cf(self.relationships_cf(), key, value);
                     strengthened += 1;
 
@@ -3877,8 +3863,7 @@ impl GraphMemory {
                 };
 
                 let key = edge.uuid.as_bytes();
-                if let Ok(value) = crate::serialization::encode(&edge)
-                {
+                if let Ok(value) = crate::serialization::encode(&edge) {
                     batch.put_cf(self.relationships_cf(), key, value);
 
                     // Index both directions
@@ -4106,9 +4091,7 @@ impl GraphMemory {
                     }
                     let _ = edge.strengthen();
                     let key = edge.uuid.as_bytes();
-                    if let Ok(value) =
-                        crate::serialization::encode(&edge)
-                    {
+                    if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
                         strengthened += 1;
                     }
@@ -4486,8 +4469,7 @@ impl GraphMemory {
             rocksdb::IteratorMode::Start,
         );
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value)
-            {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
                 // Only include non-invalidated relationships
                 if edge.invalidated_at.is_none() {
                     relationships.push(edge);

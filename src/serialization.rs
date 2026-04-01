@@ -59,8 +59,8 @@ const SHO_TRAILER_LEN: usize = 4; // CRC32-LE
 /// Used for all non-Memory RocksDB records (graph, facts, lineage, etc.).
 /// Single allocation: reserves space for the tag, then serializes in-place.
 pub fn encode<T: Serialize + ?Sized>(val: &T) -> Result<Vec<u8>> {
-    let payload = postcard::to_allocvec(val)
-        .map_err(|e| anyhow::anyhow!("postcard encode: {e}"))?;
+    let payload =
+        postcard::to_allocvec(val).map_err(|e| anyhow::anyhow!("postcard encode: {e}"))?;
     // Single allocation: prepend 2-byte tag by building final buffer once.
     // Vec::with_capacity + extend is one alloc; the payload Vec is consumed.
     let mut buf = Vec::with_capacity(FORMAT_TAG_LEN + payload.len());
@@ -109,8 +109,7 @@ pub fn decode_raw<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
 /// Returns an error if the data doesn't have the format tag or postcard fails.
 pub fn decode<T: DeserializeOwned>(data: &[u8]) -> Result<T> {
     if has_format_tag(data) {
-        postcard::from_bytes(&data[2..])
-            .map_err(|e| anyhow::anyhow!("postcard decode: {e}"))
+        postcard::from_bytes(&data[2..]).map_err(|e| anyhow::anyhow!("postcard decode: {e}"))
     } else {
         Err(anyhow::anyhow!("missing postcard format tag"))
     }
@@ -129,9 +128,8 @@ pub fn try_decode<T: DeserializeOwned>(data: &[u8]) -> Result<(T, bool)> {
     }
 
     // Legacy: bincode 2.x with safe allocation limit
-    let (val, _): (T, _) =
-        bincode::serde::decode_from_slice(data, crate::bincode_safe_config())
-            .map_err(|e| anyhow::anyhow!("bincode decode (legacy): {e}"))?;
+    let (val, _): (T, _) = bincode::serde::decode_from_slice(data, crate::bincode_safe_config())
+        .map_err(|e| anyhow::anyhow!("bincode decode (legacy): {e}"))?;
     Ok((val, true))
 }
 
@@ -262,9 +260,11 @@ mod tests {
             d: map,
         };
         // Encode with bincode (no format tag)
-        let bytes =
-            bincode::serde::encode_to_vec(&val, bincode::config::standard()).unwrap();
-        assert!(!has_format_tag(&bytes), "bincode should not have format tag");
+        let bytes = bincode::serde::encode_to_vec(&val, bincode::config::standard()).unwrap();
+        assert!(
+            !has_format_tag(&bytes),
+            "bincode should not have format tag"
+        );
         let (decoded, needs_migration): (Complex, bool) = try_decode(&bytes).unwrap();
         assert_eq!(decoded, val);
         assert!(needs_migration);
@@ -276,8 +276,7 @@ mod tests {
         let envelope = encode_sho(&val).unwrap();
         let (version, payload) = unwrap_sho(&envelope).unwrap();
         assert_eq!(version, SHO_VERSION_POSTCARD);
-        let decoded: (u64, String) =
-            postcard::from_bytes(payload).unwrap();
+        let decoded: (u64, String) = postcard::from_bytes(payload).unwrap();
         assert_eq!(decoded, val);
     }
 }

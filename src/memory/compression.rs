@@ -98,8 +98,7 @@ impl CompressionPipeline {
 
     /// LZ4 compression - preserves all data
     fn compress_lz4(&self, memory: &Memory) -> Result<Memory> {
-        let original =
-            crate::serialization::encode_raw(&memory.experience)?;
+        let original = crate::serialization::encode_raw(&memory.experience)?;
         let compressed = lz4::block::compress(&original, None, false)?;
 
         let compression_ratio = compressed.len() as f32 / original.len() as f32;

@@ -178,7 +178,9 @@ const MAX_MSGPACK_DESER_SIZE: usize = 1024 * 1024;
 ///
 /// Returns None (skip) if the data doesn't look like a MessagePack struct
 /// or exceeds the safe size limit.
-fn try_msgpack_deserialize<T: serde::de::DeserializeOwned>(data: &[u8]) -> Option<Result<T, String>> {
+fn try_msgpack_deserialize<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+) -> Option<Result<T, String>> {
     if !is_plausible_msgpack_struct(data) {
         return None;
     }
@@ -694,7 +696,7 @@ impl LegacyMemoryV2 {
 /// Returns (Memory, needs_migration) where needs_migration=true means the data
 /// was in a legacy format and should be re-written for future performance.
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
-    use crate::serialization::{SHO_VERSION_POSTCARD, SHO_VERSION_BINCODE2};
+    use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
 
     // Check for versioned format: SHO + version byte + payload + 4-byte CRC32
     if let Some((version, payload)) = crate::serialization::unwrap_sho(data) {
@@ -835,7 +837,8 @@ fn deserialize_legacy_fallback(
 
     // Try bincode 2.x MINIMAL format (just UUID + content string)
     // This matches the hex pattern: 16-byte UUID + varint length + string bytes
-    match bincode::serde::decode_from_slice::<MinimalMemory, _>(data, crate::bincode_safe_config()) {
+    match bincode::serde::decode_from_slice::<MinimalMemory, _>(data, crate::bincode_safe_config())
+    {
         Ok((minimal, _)) => {
             tracing::debug!("Migrated memory from bincode 2.x minimal format");
             record_branch("bincode2_minimal");
@@ -955,7 +958,10 @@ fn deserialize_legacy_fallback(
             return Ok((legacy.into_memory(), true));
         }
         Some(Err(e)) => errors.push(("msgpack SimpleLegacyMemory", e)),
-        None => errors.push(("msgpack SimpleLegacyMemory", "not msgpack format".to_string())),
+        None => errors.push((
+            "msgpack SimpleLegacyMemory",
+            "not msgpack format".to_string(),
+        )),
     }
 
     // Try bincode 1.x format with original Experience (no multimodal fields)
@@ -986,7 +992,10 @@ fn deserialize_legacy_fallback(
             return Ok((legacy.into_memory(), true));
         }
         Some(Err(e)) => errors.push(("msgpack LegacyMemoryV1Full", e)),
-        None => errors.push(("msgpack LegacyMemoryV1Full", "not msgpack format".to_string())),
+        None => errors.push((
+            "msgpack LegacyMemoryV1Full",
+            "not msgpack format".to_string(),
+        )),
     }
 
     // Try bincode 1.x format (used in versions prior to bincode 2.0 migration)
@@ -2605,8 +2614,7 @@ impl MemoryStorage {
                             .metadata
                             .insert("forgotten_at".to_string(), now.clone());
 
-                        let updated_value =
-                            crate::serialization::encode_sho(&memory)?;
+                        let updated_value = crate::serialization::encode_sho(&memory)?;
                         batch.put(&key, updated_value);
                     }
                 }
@@ -2651,8 +2659,7 @@ impl MemoryStorage {
                             .metadata
                             .insert("forgotten_at".to_string(), now.clone());
 
-                        let updated_value =
-                            crate::serialization::encode_sho(&memory)?;
+                        let updated_value = crate::serialization::encode_sho(&memory)?;
                         batch.put(&key, updated_value);
                     }
                 }
@@ -3314,9 +3321,8 @@ impl MemoryStorage {
         // Add/update the modality vectors
         mapping_entry.add_modality(modality, vector_ids);
 
-        let mapping_value =
-            crate::serialization::encode(&mapping_entry)
-                .context("Failed to serialize vector mapping")?;
+        let mapping_value = crate::serialization::encode(&mapping_entry)
+            .context("Failed to serialize vector mapping")?;
         batch.put(mapping_key.as_bytes(), &mapping_value);
 
         // 3. Atomic write - both succeed or both fail
@@ -3420,8 +3426,7 @@ impl MemoryStorage {
         // Update the specific modality
         mapping_entry.add_modality(modality, vector_ids);
 
-        let mapping_value =
-            crate::serialization::encode(&mapping_entry)?;
+        let mapping_value = crate::serialization::encode(&mapping_entry)?;
 
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(self.write_mode == WriteMode::Sync);

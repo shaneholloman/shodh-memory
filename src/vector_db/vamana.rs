@@ -1547,16 +1547,16 @@ impl VamanaIndex {
         let data: VamanaData = {
             use std::io::Read;
             let mut len_buf = [0u8; 8];
-            let postcard_result = reader.read_exact(&mut len_buf)
-                .ok()
-                .and_then(|()| {
-                    let len = u64::from_le_bytes(len_buf) as usize;
-                    // Sanity check: reject implausible lengths (> 4 GB)
-                    if len > 4 * 1024 * 1024 * 1024 { return None; }
-                    let mut buf = vec![0u8; len];
-                    reader.read_exact(&mut buf).ok()?;
-                    crate::serialization::decode_raw::<VamanaData>(&buf).ok()
-                });
+            let postcard_result = reader.read_exact(&mut len_buf).ok().and_then(|()| {
+                let len = u64::from_le_bytes(len_buf) as usize;
+                // Sanity check: reject implausible lengths (> 4 GB)
+                if len > 4 * 1024 * 1024 * 1024 {
+                    return None;
+                }
+                let mut buf = vec![0u8; len];
+                reader.read_exact(&mut buf).ok()?;
+                crate::serialization::decode_raw::<VamanaData>(&buf).ok()
+            });
             match postcard_result {
                 Some(data) => data,
                 None => {
