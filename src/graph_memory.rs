@@ -1445,11 +1445,7 @@ impl GraphMemory {
             let entity_iter = db.iterator_cf(entities_cf, rocksdb::IteratorMode::Start);
             let mut migrated_count = 0;
             for (_, value) in entity_iter.flatten() {
-                if let Ok(entity) = bincode::serde::decode_from_slice::<EntityNode, _>(
-                    &value,
-                    bincode::config::standard(),
-                )
-                .map(|(v, _)| v)
+                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
                 {
                     // Store in name_index CF: name -> UUID bytes
                     db.put_cf(
@@ -1573,10 +1569,8 @@ impl GraphMemory {
         for uuid in name_index.values() {
             let key = uuid.as_bytes();
             if let Ok(Some(value)) = db.get_cf(entities_cf, key) {
-                if let Ok((entity, _)) = bincode::serde::decode_from_slice::<EntityNode, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
+                {
                     if let Some(emb) = entity.name_embedding {
                         cache.push((*uuid, emb));
                         if cache.len() >= ENTITY_EMBEDDING_CACHE_MAX {
@@ -1762,7 +1756,7 @@ impl GraphMemory {
 
         // Store entity in database
         let key = entity.uuid.as_bytes();
-        let value = bincode::serde::encode_to_vec(&entity, bincode::config::standard())?;
+        let value = crate::serialization::encode(&entity)?;
         self.db.put_cf(self.entities_cf(), key, value)?;
 
         // Increment counter only for truly new entities
@@ -1778,8 +1772,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.entities_cf(), key)? {
             Some(value) => {
-                let (entity, _): (EntityNode, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -2166,7 +2159,7 @@ impl GraphMemory {
 
             // Persist the strengthened edge
             let key = existing.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&existing, bincode::config::standard())?;
+            let value = crate::serialization::encode(&existing)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
 
             return Ok(existing.uuid);
@@ -2178,7 +2171,7 @@ impl GraphMemory {
 
         // Store relationship
         let key = edge.uuid.as_bytes();
-        let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+        let value = crate::serialization::encode(&edge)?;
         self.db.put_cf(self.relationships_cf(), key, value)?;
 
         // Increment relationship counter
@@ -2352,10 +2345,8 @@ impl GraphMemory {
 
         let mut edges = Vec::with_capacity(edge_uuids.len());
         for value in results.into_iter().flatten().flatten() {
-            if let Ok((edge, _)) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value)
+            {
                 edges.push(edge);
             }
         }
@@ -2524,8 +2515,8 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (edge, _): (RelationshipEdge, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (edge, _) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)?;
                 Ok(Some(edge))
             }
             None => Ok(None),
@@ -2544,8 +2535,8 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (mut edge, _): (RelationshipEdge, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (mut edge, _) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)?;
                 // Apply effective strength calculation (doesn't persist)
                 edge.strength = edge.effective_strength();
                 Ok(Some(edge))
@@ -2627,10 +2618,8 @@ impl GraphMemory {
             .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
         let mut edges_to_delete = Vec::new();
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value)
+            {
                 if edge.source_episode_id == Some(*episode_uuid) {
                     edges_to_delete.push(edge.uuid);
                 }
@@ -2707,7 +2696,7 @@ impl GraphMemory {
             entity_count
         );
 
-        let value = bincode::serde::encode_to_vec(&episode, bincode::config::standard())?;
+        let value = crate::serialization::encode(&episode)?;
         self.db.put_cf(self.episodes_cf(), key, value)?;
 
         // Increment episode counter
@@ -2735,8 +2724,8 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.episodes_cf(), key)? {
             Some(value) => {
-                let (episode, _): (EpisodicNode, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (episode, _) =
+                    crate::serialization::try_decode::<EpisodicNode>(&value)?;
                 Ok(Some(episode))
             }
             None => Ok(None),
@@ -2784,10 +2773,8 @@ impl GraphMemory {
 
         let mut episodes = Vec::with_capacity(episode_uuids.len());
         for value in results.into_iter().flatten().flatten() {
-            if let Ok((episode, _)) = bincode::serde::decode_from_slice::<EpisodicNode, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((episode, _)) = crate::serialization::try_decode::<EpisodicNode>(&value)
+            {
                 episodes.push(episode);
             }
         }
@@ -3511,8 +3498,8 @@ impl GraphMemory {
             }
 
             let (_, value) = result?;
-            let (entity, _): (EntityNode, _) =
-                bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+            let (entity, _) =
+                crate::serialization::try_decode::<EntityNode>(&value)?;
 
             let entity_matches = self.match_pattern(&entity.uuid, pattern, min_strength)?;
             for m in entity_matches {
@@ -3547,7 +3534,7 @@ impl GraphMemory {
             edge.invalidated_at = Some(Utc::now());
 
             let key = edge.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+            let value = crate::serialization::encode(&edge)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
         }
 
@@ -3571,7 +3558,7 @@ impl GraphMemory {
             let _ = edge.strengthen();
 
             let key = edge.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+            let value = crate::serialization::encode(&edge)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
         }
 
@@ -3609,12 +3596,11 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut edge, _)) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((mut edge, _)) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                {
                     let _ = edge.strengthen();
-                    match bincode::serde::encode_to_vec(&edge, bincode::config::standard()) {
+                    match crate::serialization::encode(&edge) {
                         Ok(encoded) => {
                             batch.put_cf(self.relationships_cf(), &keys[i], encoded);
                             strengthened += 1;
@@ -3680,7 +3666,7 @@ impl GraphMemory {
                     let _ = edge.strengthen();
                     let key = edge.uuid.as_bytes();
                     if let Ok(value) =
-                        bincode::serde::encode_to_vec(&edge, bincode::config::standard())
+                        crate::serialization::encode(&edge)
                     {
                         batch.put_cf(self.relationships_cf(), key, value);
                         edges_updated += 1;
@@ -3710,7 +3696,7 @@ impl GraphMemory {
 
                     let key = edge.uuid.as_bytes();
                     if let Ok(value) =
-                        bincode::serde::encode_to_vec(&edge, bincode::config::standard())
+                        crate::serialization::encode(&edge)
                     {
                         batch.put_cf(self.relationships_cf(), key, value);
 
@@ -3831,7 +3817,7 @@ impl GraphMemory {
                 // Strengthen existing edge — capture tier promotion if it occurs
                 let promotion = edge.strengthen();
                 let key = edge.uuid.as_bytes();
-                if let Ok(value) = bincode::serde::encode_to_vec(&edge, bincode::config::standard())
+                if let Ok(value) = crate::serialization::encode(&edge)
                 {
                     batch.put_cf(self.relationships_cf(), key, value);
                     strengthened += 1;
@@ -3891,7 +3877,7 @@ impl GraphMemory {
                 };
 
                 let key = edge.uuid.as_bytes();
-                if let Ok(value) = bincode::serde::encode_to_vec(&edge, bincode::config::standard())
+                if let Ok(value) = crate::serialization::encode(&edge)
                 {
                     batch.put_cf(self.relationships_cf(), key, value);
 
@@ -4121,7 +4107,7 @@ impl GraphMemory {
                     let _ = edge.strengthen();
                     let key = edge.uuid.as_bytes();
                     if let Ok(value) =
-                        bincode::serde::encode_to_vec(&edge, bincode::config::standard())
+                        crate::serialization::encode(&edge)
                     {
                         batch.put_cf(self.relationships_cf(), key, value);
                         strengthened += 1;
@@ -4229,7 +4215,7 @@ impl GraphMemory {
             let should_prune = edge.decay();
 
             let key = edge.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+            let value = crate::serialization::encode(&edge)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
 
             return Ok(should_prune);
@@ -4262,7 +4248,7 @@ impl GraphMemory {
                 let should_prune = edge.decay();
 
                 let key = edge.uuid.as_bytes();
-                match bincode::serde::encode_to_vec(&edge, bincode::config::standard()) {
+                match crate::serialization::encode(&edge) {
                     Ok(value) => {
                         batch.put_cf(self.relationships_cf(), key, value);
                         if should_prune {
@@ -4310,7 +4296,7 @@ impl GraphMemory {
             // so this reduces the WriteBatch from ~12MB (all 34k edges) to ~150KB.
             if should_prune || (edge.strength - strength_before).abs() > f32::EPSILON {
                 let key = edge.uuid.as_bytes();
-                match bincode::serde::encode_to_vec(&*edge, bincode::config::standard()) {
+                match crate::serialization::encode(&*edge) {
                     Ok(value) => {
                         batch.put_cf(self.relationships_cf(), key, value);
                         if should_prune {
@@ -4474,12 +4460,7 @@ impl GraphMemory {
             self.db
                 .iterator_cf_opt(self.entities_cf(), read_opts, rocksdb::IteratorMode::Start);
         for (_, value) in iter.flatten() {
-            if let Ok(entity) = bincode::serde::decode_from_slice::<EntityNode, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
                 entities.push(entity);
             }
         }
@@ -4505,11 +4486,7 @@ impl GraphMemory {
             rocksdb::IteratorMode::Start,
         );
         for (_, value) in iter.flatten() {
-            if let Ok(edge) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value)
             {
                 // Only include non-invalidated relationships
                 if edge.invalidated_at.is_none() {
