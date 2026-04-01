@@ -721,7 +721,7 @@ impl MultiUserMemoryManager {
                 0
             })
         );
-        if let Ok(serialized) = bincode::serde::encode_to_vec(&event, bincode::config::standard()) {
+        if let Ok(serialized) = crate::serialization::encode(&event) {
             let db = self.shared_db.clone();
             let key_bytes = key.into_bytes();
 
@@ -811,10 +811,7 @@ impl MultiUserMemoryManager {
                     break;
                 }
 
-                if let Ok((event, _)) = bincode::serde::decode_from_slice::<AuditEvent, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
                     events.push(event);
                 }
             }
@@ -1227,10 +1224,7 @@ impl MultiUserMemoryManager {
                 if !key_str.starts_with(&prefix) {
                     break;
                 }
-                if let Ok((event, _)) = bincode::serde::decode_from_slice::<AuditEvent, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
                     events.push(event);
                 }
             }

@@ -328,7 +328,7 @@ impl LineageGraph {
     pub fn store_edge(&self, user_id: &str, edge: &LineageEdge) -> Result<()> {
         // Primary storage
         let key = format!("lineage:edges:{}:{}", user_id, edge.id);
-        let value = bincode::serde::encode_to_vec(edge, bincode::config::standard())?;
+        let value = crate::serialization::encode(edge)?;
         self.db.put(key.as_bytes(), &value)?;
 
         // Index by source (from)
@@ -347,8 +347,7 @@ impl LineageGraph {
         let key = format!("lineage:edges:{}:{}", user_id, edge_id);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (edge, _): (LineageEdge, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                let (edge, _) = crate::serialization::try_decode::<LineageEdge>(&data)?;
                 Ok(Some(edge))
             }
             None => Ok(None),
@@ -431,12 +430,7 @@ impl LineageGraph {
                 break;
             }
 
-            if let Ok(edge) = bincode::serde::decode_from_slice::<LineageEdge, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<LineageEdge>(&value) {
                 edges.push(edge);
                 if edges.len() >= limit {
                     break;
@@ -456,7 +450,7 @@ impl LineageGraph {
     /// Store a branch
     pub fn store_branch(&self, user_id: &str, branch: &LineageBranch) -> Result<()> {
         let key = format!("lineage:branches:{}:{}", user_id, branch.id);
-        let value = bincode::serde::encode_to_vec(branch, bincode::config::standard())?;
+        let value = crate::serialization::encode(branch)?;
         self.db.put(key.as_bytes(), &value)?;
         Ok(())
     }
@@ -466,8 +460,7 @@ impl LineageGraph {
         let key = format!("lineage:branches:{}:{}", user_id, branch_id);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (branch, _): (LineageBranch, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                let (branch, _) = crate::serialization::try_decode::<LineageBranch>(&data)?;
                 Ok(Some(branch))
             }
             None => Ok(None),
@@ -492,12 +485,7 @@ impl LineageGraph {
                 break;
             }
 
-            if let Ok(branch) = bincode::serde::decode_from_slice::<LineageBranch, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((branch, _)) = crate::serialization::try_decode::<LineageBranch>(&value) {
                 branches.push(branch);
             }
         }
