@@ -245,6 +245,17 @@ pub struct MemorySystem {
     /// re-process the entire memory store. Initialized from the latest fact's
     /// created_at or 0 if no facts exist.
     fact_extraction_watermark: std::sync::atomic::AtomicI64,
+
+    /// Prediction cache for feedback prediction error weighting (VTA/Dopamine system).
+    ///
+    /// Stores (memory_id → final_score) for recently surfaced memories during recall.
+    /// When feedback arrives (Helpful/Misleading), the prediction error (|predicted - actual|)
+    /// scales the learning signal: expected outcomes → 0.5x, surprises → 2.0x.
+    ///
+    /// TTL: 10 minutes via moka cache. Cap: 500 entries (~4KB).
+    ///
+    /// Reference: Schultz et al. (1997) "A neural substrate of prediction and reward"
+    prediction_cache: moka::sync::Cache<MemoryId, f32>,
 }
 
 /// Resolve an entity name to a graph label and salience using pre-extracted NER data.
@@ -545,6 +556,12 @@ impl MemorySystem {
             // Watermark for incremental fact extraction — initialized to 0 (sentinel).
             // On first maintenance call, loaded from RocksDB or derived from latest fact timestamp.
             fact_extraction_watermark: std::sync::atomic::AtomicI64::new(0),
+            // Prediction cache for VTA/dopamine-inspired feedback error weighting
+            // TTL 10 minutes, max 500 entries (~4KB)
+            prediction_cache: moka::sync::Cache::builder()
+                .max_capacity(500)
+                .time_to_live(std::time::Duration::from_secs(600))
+                .build(),
         })
     }
 
@@ -1319,6 +1336,14 @@ impl MemorySystem {
                     tracing::trace!("Coactivation recording failed (non-critical): {e}");
                 }
             }
+        }
+
+        // Populate prediction cache for VTA/dopamine-inspired feedback error weighting.
+        // Uses importance as the prediction signal — "how useful we think this memory is."
+        // When feedback arrives later, the prediction error scales learning rate.
+        for memory in &memories {
+            self.prediction_cache
+                .insert(memory.id.clone(), memory.importance());
         }
 
         // Increment and persist retrieval counter
@@ -5221,8 +5246,26 @@ impl MemorySystem {
         // 3. Then persist to storage for durability
         // 4. If not in cache, get from storage, modify, and persist
         let mut persist_failures: Vec<(MemoryId, String)> = Vec::new();
+        let mut total_prediction_error = 0.0f32;
+        let mut prediction_error_count = 0u32;
 
         for id in memory_ids {
+            // Prediction error weighting (VTA/Dopamine system — Schultz 1997):
+            // Look up how important we predicted this memory to be when surfaced.
+            // Compute prediction error → scale learning signal by surprise level.
+            let predicted = self.prediction_cache.get(id).unwrap_or(0.5);
+            let prediction_error = match &outcome {
+                RetrievalOutcome::Helpful => 1.0 - predicted, // High importance + Helpful = expected = low error
+                RetrievalOutcome::Misleading => predicted, // High importance + Misleading = surprising = high error
+                RetrievalOutcome::Neutral => 0.5,          // Baseline
+            };
+            let error_multiplier = crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER
+                + prediction_error
+                    * (crate::constants::PREDICTION_ERROR_MAX_MULTIPLIER
+                        - crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER);
+            total_prediction_error += prediction_error;
+            prediction_error_count += 1;
+
             // Try working memory cache first
             let cached_memory = {
                 let working = self.working_memory.read();
@@ -5240,11 +5283,11 @@ impl MemorySystem {
                 memory.record_access();
                 match &outcome {
                     RetrievalOutcome::Helpful => {
-                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL);
+                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
                         stats.importance_boosts += 1;
                     }
                     RetrievalOutcome::Misleading => {
-                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING);
+                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
                         stats.importance_decays += 1;
                     }
                     RetrievalOutcome::Neutral => {
@@ -5268,11 +5311,12 @@ impl MemorySystem {
                         memory.record_access();
                         match &outcome {
                             RetrievalOutcome::Helpful => {
-                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL);
+                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
                                 stats.importance_boosts += 1;
                             }
                             RetrievalOutcome::Misleading => {
-                                memory.decay_importance(HEBBIAN_DECAY_MISLEADING);
+                                memory
+                                    .decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
                                 stats.importance_decays += 1;
                             }
                             RetrievalOutcome::Neutral => {
@@ -5307,6 +5351,15 @@ impl MemorySystem {
                 failure_count = persist_failures.len(),
                 "Hebbian reinforcement had persistence failures - learning feedback partially lost"
             );
+        }
+
+        // Record average prediction error multiplier for observability
+        if prediction_error_count > 0 {
+            let avg_error = total_prediction_error / prediction_error_count as f32;
+            stats.prediction_error_multiplier = crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER
+                + avg_error
+                    * (crate::constants::PREDICTION_ERROR_MAX_MULTIPLIER
+                        - crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER);
         }
 
         Ok(stats)
@@ -5890,11 +5943,20 @@ impl MemorySystem {
         const AT_RISK_THRESHOLD: f32 = 0.2; // Memories below this are at risk of being forgotten
 
         // Decay working memory activations with event tracking
+        // Emotional modulation: high-arousal memories decay slower (amygdala coupling)
         {
             let working = self.working_memory.read();
             for memory in working.all_memories() {
                 let activation_before = memory.activation();
-                memory.decay_activation(decay_factor);
+                let arousal = memory
+                    .experience
+                    .context
+                    .as_ref()
+                    .map(|c| c.emotional.arousal)
+                    .unwrap_or(0.0);
+                let emotional_factor =
+                    1.0 - (arousal * crate::constants::EMOTIONAL_DECAY_MODULATION);
+                memory.decay_activation(decay_factor * emotional_factor);
                 let activation_after = memory.activation();
                 decayed_count += 1;
 
@@ -5919,11 +5981,20 @@ impl MemorySystem {
         }
 
         // Decay session memory activations with event tracking
+        // Emotional modulation: high-arousal memories decay slower (amygdala coupling)
         {
             let session = self.session_memory.read();
             for memory in session.all_memories() {
                 let activation_before = memory.activation();
-                memory.decay_activation(decay_factor);
+                let arousal = memory
+                    .experience
+                    .context
+                    .as_ref()
+                    .map(|c| c.emotional.arousal)
+                    .unwrap_or(0.0);
+                let emotional_factor =
+                    1.0 - (arousal * crate::constants::EMOTIONAL_DECAY_MODULATION);
+                memory.decay_activation(decay_factor * emotional_factor);
                 let activation_after = memory.activation();
                 decayed_count += 1;
 

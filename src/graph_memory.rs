@@ -4434,12 +4434,73 @@ impl GraphMemory {
         Ok(to_prune)
     }
 
+    /// Apply synaptic homeostasis: global downscaling of all edge strengths.
+    ///
+    /// After each maintenance cycle, scales ALL edge weights by `factor` (typically 0.95).
+    /// Edges with LtpStatus::Full are protected — fully consolidated synapses resist
+    /// homeostatic downscaling, matching biological systems consolidation.
+    ///
+    /// This prevents runaway strengthening and keeps total network energy bounded.
+    /// Strong edges survive; weak edges fall below prune thresholds and are cleared
+    /// in the next decay cycle.
+    ///
+    /// Reference: Tononi & Cirelli (2003) "Sleep and synaptic homeostasis: a hypothesis"
+    pub fn apply_synaptic_homeostasis(&self, factor: f32) -> Result<usize> {
+        let mut all_edges = self.get_all_relationships()?;
+        if all_edges.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .synapse_update_lock
+            .try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| {
+                anyhow::anyhow!("synapse_update_lock timeout in apply_synaptic_homeostasis")
+            })?;
+
+        let mut batch = WriteBatch::default();
+        let mut scaled_count = 0;
+
+        for edge in all_edges.iter_mut() {
+            // Fully potentiated edges are protected from homeostatic downscaling
+            if matches!(edge.ltp_status, LtpStatus::Full) {
+                continue;
+            }
+
+            let old_strength = edge.strength;
+            edge.strength *= factor;
+            // Never scale below absolute floor
+            edge.strength = edge.strength.max(crate::constants::LTP_MIN_STRENGTH);
+
+            if (edge.strength - old_strength).abs() > f32::EPSILON {
+                let key = edge.uuid.as_bytes();
+                if let Ok(value) = crate::serialization::encode(&*edge) {
+                    batch.put_cf(self.relationships_cf(), key, value);
+                    scaled_count += 1;
+                }
+            }
+        }
+
+        if scaled_count > 0 {
+            self.db.write(batch)?;
+            tracing::debug!(
+                "Synaptic homeostasis: scaled {} of {} edges by factor {}",
+                scaled_count,
+                all_edges.len(),
+                factor
+            );
+        }
+
+        Ok(scaled_count)
+    }
+
     /// Apply decay to all synapses and prune weak edges (AUD-2)
     ///
     /// Called during maintenance cycle to:
     /// 1. Apply time-based decay to all edge strengths
     /// 2. Remove edges that have decayed below threshold
     /// 3. Detect orphaned entities (entities that lost all their edges)
+    /// 4. Apply synaptic homeostasis (global edge downscaling)
     ///
     /// Returns a `GraphDecayResult` with pruned count and orphaned entity/memory IDs
     /// for Direction 2 coupling (edge pruning → orphan detection).
@@ -4497,6 +4558,15 @@ impl GraphMemory {
                 all_edges.len(),
                 orphaned_entity_ids.len()
             );
+        }
+
+        // 4. Apply synaptic homeostasis (global edge downscaling)
+        // Runs after pruning so that homeostatic pressure doesn't interfere with
+        // the prune decision (edges are pruned at their true decayed strength first).
+        if let Err(e) =
+            self.apply_synaptic_homeostasis(crate::constants::HOMEOSTASIS_SCALING_FACTOR)
+        {
+            tracing::warn!("Synaptic homeostasis failed (non-fatal): {}", e);
         }
 
         Ok(crate::memory::types::GraphDecayResult {

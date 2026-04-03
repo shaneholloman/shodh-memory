@@ -48,6 +48,94 @@ pub const HEBBIAN_DECAY_MISLEADING: f32 = 0.10;
 pub const IMPORTANCE_FLOOR: f32 = 0.05;
 
 // =============================================================================
+// NEUROSCIENCE-INSPIRED DYNAMICS
+// =============================================================================
+
+/// Synaptic homeostasis scaling factor (Tononi & Cirelli 2003).
+///
+/// After each graph maintenance cycle, ALL edge strengths are multiplied by this
+/// factor. Strong edges (>0.7) survive with minimal impact; weak edges (<0.2)
+/// fall below prune threshold and get cleared. Edges with LtpStatus::Full are
+/// protected (fully consolidated synapses resist homeostatic downscaling).
+///
+/// Justification:
+/// - 0.95 = 5% reduction per cycle, matching "synaptic renormalization" during sleep
+/// - Prevents runaway strengthening and keeps total network energy bounded
+/// - After 14 cycles without reinforcement: 0.4 → 0.19 (falls below L1 prune threshold)
+/// - L3 edges at 0.7: 0.7 × 0.95^14 ≈ 0.34 (still above L3 prune threshold 0.3)
+///
+/// Reference: Tononi & Cirelli (2003) "Sleep and synaptic homeostasis: a hypothesis"
+pub const HOMEOSTASIS_SCALING_FACTOR: f32 = 0.95;
+
+/// Emotional decay modulation factor (Amygdala-Hippocampal coupling).
+///
+/// High-arousal memories decay slower. The effective decay factor is:
+///   effective_decay = base_decay × (1.0 - arousal × EMOTIONAL_DECAY_MODULATION)
+///
+/// At max arousal (1.0), decay is 30% slower. At zero arousal, baseline decay.
+///
+/// Justification:
+/// - 0.3 is conservative — prevents immortal memories while preserving emotional salience
+/// - Matches amygdala modulation of hippocampal consolidation strength
+/// - Frustrating bugs (arousal=0.8) decay 24% slower than routine observations (arousal=0.2)
+///
+/// Reference: McGaugh (2004) "The amygdala modulates the consolidation of memories"
+pub const EMOTIONAL_DECAY_MODULATION: f32 = 0.3;
+
+/// Graph retrieval lateral inhibition strength (cortical winner-take-all dynamics).
+///
+/// After scoring candidates in graph retrieval, high-scoring memories suppress
+/// semantically similar lower-ranked competitors by this factor of their score.
+///
+/// penalty = higher.score × GRAPH_LATERAL_INHIBITION_STRENGTH × cosine_similarity
+///
+/// Justification:
+/// - 0.15 = mild suppression, sharpens recall without discarding valid alternatives
+/// - Prevents retrieval of near-duplicate memories that dilute answer quality
+/// - Total penalty capped at 50% of original score to prevent over-suppression
+///
+/// Note: Distinct from LATERAL_INHIBITION_STRENGTH (0.3) used in proactive_context.
+/// Graph retrieval uses gentler inhibition because it feeds into the RRF fusion stage.
+///
+/// Reference: Rumelhart & Zipser (1985) "Feature discovery by competitive learning"
+pub const GRAPH_LATERAL_INHIBITION_STRENGTH: f32 = 0.15;
+
+/// Graph retrieval cosine similarity threshold for lateral inhibition.
+///
+/// Only memories with cosine similarity above this threshold to a higher-ranked
+/// memory receive inhibitory suppression. Below threshold = independent memories.
+///
+/// Justification:
+/// - 0.7 = high similarity required before inhibition fires
+/// - Prevents unrelated memories from suppressing each other
+/// - Matches "receptive field overlap" concept in visual cortex
+pub const GRAPH_LATERAL_INHIBITION_THRESHOLD: f32 = 0.7;
+
+/// Minimum prediction error multiplier (VTA/Dopamine system).
+///
+/// When feedback confirms expectations (high-score memory marked Helpful),
+/// the learning signal is scaled down to this multiplier (0.5x).
+///
+/// Justification:
+/// - Expected outcomes produce small prediction errors → modest learning
+/// - Matches reward prediction error in dopaminergic systems (Schultz 1997)
+/// - Prevents over-learning from confirmatory signals
+///
+/// Reference: Schultz et al. (1997) "A neural substrate of prediction and reward"
+pub const PREDICTION_ERROR_MIN_MULTIPLIER: f32 = 0.5;
+
+/// Maximum prediction error multiplier (VTA/Dopamine system).
+///
+/// When feedback surprises (high-score memory marked Misleading, or low-score
+/// memory marked Helpful), the learning signal is scaled up to this multiplier (2.0x).
+///
+/// Justification:
+/// - Surprising outcomes produce large prediction errors → accelerated learning
+/// - 2.0x = double the normal learning rate for maximum surprise
+/// - Enables rapid adaptation when retrieval confidence is miscalibrated
+pub const PREDICTION_ERROR_MAX_MULTIPLIER: f32 = 2.0;
+
+// =============================================================================
 // MEMORY GRAPH EDGE CONSTANTS
 // =============================================================================
 

@@ -950,6 +950,17 @@ pub fn spreading_activation_retrieve_with_stats(
     // Step 6: Sort by final score (descending)
     scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
 
+    // Step 6.5: Lateral inhibition — high-scoring memories suppress similar competitors
+    // Mimics cortical winner-take-all dynamics (Rumelhart & Zipser 1985)
+    if scored_memories.len() > 1 {
+        let penalties = calculate_lateral_inhibition(&scored_memories);
+        for (i, penalty) in penalties.iter().enumerate() {
+            scored_memories[i].final_score -= penalty;
+        }
+        // Re-sort after inhibition reweighting
+        scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
+    }
+
     // Step 7: Apply limit
     scored_memories.truncate(query.max_results);
 
@@ -1024,6 +1035,50 @@ fn calculate_linguistic_match(memory: &Memory, analysis: &QueryAnalysis) -> f32 
     } else {
         0.0
     }
+}
+
+/// Calculate lateral inhibition penalties for scored memories.
+///
+/// Implements cortical winner-take-all dynamics: for each memory (starting from rank 2),
+/// compute inhibitory signal from all higher-ranked memories based on embedding similarity.
+/// If similarity exceeds threshold, the lower-ranked memory receives a penalty proportional
+/// to the higher-ranked memory's score.
+///
+/// Total penalty per memory is capped at 50% of its original score to prevent over-suppression.
+///
+/// Reference: Rumelhart & Zipser (1985) "Feature discovery by competitive learning"
+fn calculate_lateral_inhibition(scored: &[ActivatedMemory]) -> Vec<f32> {
+    use crate::constants::{GRAPH_LATERAL_INHIBITION_STRENGTH, GRAPH_LATERAL_INHIBITION_THRESHOLD};
+
+    let mut penalties = vec![0.0f32; scored.len()];
+
+    // For each memory, check similarity to all higher-ranked memories
+    for i in 1..scored.len() {
+        let emb_i = match &scored[i].memory.experience.embeddings {
+            Some(e) => e,
+            None => continue,
+        };
+
+        let mut total_penalty = 0.0f32;
+
+        for j in 0..i {
+            let emb_j = match &scored[j].memory.experience.embeddings {
+                Some(e) => e,
+                None => continue,
+            };
+
+            let sim = cosine_similarity(emb_i, emb_j);
+            if sim > GRAPH_LATERAL_INHIBITION_THRESHOLD {
+                // Higher-ranked memory suppresses this one proportional to similarity
+                total_penalty += scored[j].final_score * GRAPH_LATERAL_INHIBITION_STRENGTH * sim;
+            }
+        }
+
+        // Cap penalty at 50% of original score to prevent over-suppression
+        penalties[i] = total_penalty.min(scored[i].final_score * 0.5);
+    }
+
+    penalties
 }
 
 #[cfg(test)]

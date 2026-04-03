@@ -1727,6 +1727,9 @@ pub struct ReinforcementStats {
     pub outcome: RetrievalOutcome,
     /// How many persistence operations failed (non-zero indicates data loss risk)
     pub persist_failures: usize,
+    /// Average prediction error multiplier applied to learning signals (VTA/Dopamine).
+    /// 0.5 = expected outcomes (slow learning), 2.0 = max surprise (fast learning).
+    pub prediction_error_multiplier: f32,
 }
 
 impl Default for RetrievalOutcome {
