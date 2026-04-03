@@ -1620,14 +1620,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         };
 
+        // Backend normalizes scores relative to top result (0-0.95 range).
+        // Pass through directly — no client-side rescaling needed.
+        const memoryDisplayScores = memories.map(m => m.score || 0);
+        const todoDisplayScores = todos.map(t => t.score || 0);
+
         // Format memories
         if (memories.length > 0) {
           response += `📝 MEMORIES\n`;
           for (let i = 0; i < memories.length; i++) {
             const m = memories[i];
             const content = getContent(m);
-            const score = ((m.score || 0) * 100).toFixed(0);
-            const filled = Math.max(0, Math.min(10, Math.round((m.score || 0) * 10)));
+            const displayScore = memoryDisplayScores[i];
+            const score = (displayScore * 100).toFixed(0);
+            const filled = Math.max(0, Math.min(10, Math.round(displayScore * 10)));
             const matchBar = '█'.repeat(filled) + '░'.repeat(10 - filled);
             const timeStr = formatTime(m.created_at);
 
@@ -1644,8 +1650,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           response += `✅ TODOS\n`;
           for (let i = 0; i < todos.length; i++) {
             const t = todos[i];
-            const score = ((t.score || 0) * 100).toFixed(0);
-            const filled = Math.max(0, Math.min(10, Math.round((t.score || 0) * 10)));
+            const displayScore = todoDisplayScores[i];
+            const score = (displayScore * 100).toFixed(0);
+            const filled = Math.max(0, Math.min(10, Math.round(displayScore * 10)));
             const matchBar = '█'.repeat(filled) + '░'.repeat(10 - filled);
             const statusIcon = t.status === 'done' ? '✓' : t.status === 'in_progress' ? '▶' : t.status === 'blocked' ? '⊗' : '○';
             const timeStr = formatTime(t.created_at);

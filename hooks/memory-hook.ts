@@ -306,11 +306,20 @@ export function formatRelativeTime(isoDate: string): string {
 export function formatMemoriesForContext(memories: SurfacedMemory[]): string {
   if (!memories.length) return "";
 
+  // Rescale scores within result set for meaningful display.
+  // Raw scores cluster at 1-5% due to multiplicative scoring pipeline.
+  const raw = memories.map(m => m.score || 0);
+  const maxScore = Math.max(...raw, 0.001);
+  const minScore = Math.min(...raw);
+  const range = maxScore - minScore;
+
   return memories
-    .map((m) => {
+    .map((m, i) => {
       const time = formatRelativeTime(m.created_at);
-      const score = Math.round(m.score * 100);
-      return `• [${score}%] (${time}) ${m.content.slice(0, 120)}${m.content.length > 120 ? "..." : ""}`;
+      const displayScore = range < 0.001
+        ? 100
+        : Math.round(((raw[i] - minScore) / range) * 100);
+      return `• [${displayScore}%] (${time}) ${m.content.slice(0, 120)}${m.content.length > 120 ? "..." : ""}`;
     })
     .join("\n");
 }
