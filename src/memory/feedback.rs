@@ -385,9 +385,9 @@ impl ContextFingerprint {
         // Compress embedding to 16 components by taking evenly spaced samples
         let mut signature = [0.0f32; 16];
         if !embedding.is_empty() {
-            let step = embedding.len() / 16;
+            let len = embedding.len();
             for (i, sig) in signature.iter_mut().enumerate() {
-                let idx = (i * step).min(embedding.len() - 1);
+                let idx = (i * len / 16).min(len - 1);
                 *sig = embedding[idx];
             }
         }
