@@ -17,7 +17,10 @@ use super::types::{
     RecallResponse, RecallTodo, ReinforceFeedbackRequest, RetrieveResponse, TrackedRetrieveRequest,
     TrackedRetrieveResponse,
 };
-use super::utils::{is_bare_question, is_boilerplate_response, strip_system_noise};
+use super::utils::{
+    has_sufficient_alpha_ratio, is_bare_question, is_boilerplate_response,
+    is_formatted_recall_output, is_tool_output_noise, strip_system_noise,
+};
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::feedback;
 use crate::similarity::cosine_similarity;
@@ -458,14 +461,25 @@ pub async fn recall(
         );
     }
 
-    // Convert to response format — preserve pipeline scores
-    // The retrieval pipeline (semantic_retrieve Layer 5) computes a unified score
-    // incorporating RRF fusion, graph associations, recency, arousal, credibility,
-    // temporal matching, and feedback momentum. Use it directly.
+    // Convert to response format with normalized scores.
+    // Raw pipeline scores (RRF fusion × hebbian × recency × feedback) cluster in
+    // 0.01-0.10 range, making percentage display useless (everything shows 1-5%).
+    // Normalize relative to top score so results span 0-95% for meaningful display.
+    let raw_scores: Vec<f32> = memories
+        .iter()
+        .map(|m| m.score.unwrap_or_else(|| m.salience_score_with_access()))
+        .collect();
+    let top_score = raw_scores.iter().cloned().fold(0.0_f32, f32::max);
+
     let recall_memories: Vec<RecallMemory> = memories
         .iter()
-        .map(|m| {
-            let score = m.score.unwrap_or_else(|| m.salience_score_with_access());
+        .zip(raw_scores.iter())
+        .map(|(m, &raw)| {
+            let score = if top_score > 0.0 {
+                (raw / top_score) * 0.95
+            } else {
+                0.0
+            };
             RecallMemory {
                 id: m.id.0.to_string(),
                 experience: RecallExperience {
@@ -2097,7 +2111,10 @@ pub async fn proactive_context(
         && !is_duplicate
         && clean_context.len() > 50
         && clean_context.len() < 5000
-        && !is_bare_question(&clean_context);
+        && !is_bare_question(&clean_context)
+        && !is_tool_output_noise(&clean_context)
+        && has_sufficient_alpha_ratio(&clean_context)
+        && !is_formatted_recall_output(&clean_context);
 
     let ingested_memory_id = if should_ingest {
         let context = clean_context;
@@ -2671,11 +2688,22 @@ pub async fn recall_tracked(
     // Generate tracking ID (could be stored for audit, but for now just a UUID)
     let tracking_id = uuid::Uuid::new_v4().to_string();
 
-    // Convert to response format — preserve pipeline scores (same as recall handler)
+    // Normalize scores relative to top result (same as recall handler)
+    let raw_scores: Vec<f32> = memories
+        .iter()
+        .map(|m| m.score.unwrap_or_else(|| m.salience_score_with_access()))
+        .collect();
+    let top_score = raw_scores.iter().cloned().fold(0.0_f32, f32::max);
+
     let recall_memories: Vec<RecallMemory> = memories
-        .into_iter()
-        .map(|m| {
-            let score = m.score.unwrap_or_else(|| m.salience_score_with_access());
+        .iter()
+        .zip(raw_scores.iter())
+        .map(|(m, &raw)| {
+            let score = if top_score > 0.0 {
+                (raw / top_score) * 0.95
+            } else {
+                0.0
+            };
             RecallMemory {
                 id: m.id.0.to_string(),
                 experience: RecallExperience {

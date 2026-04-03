@@ -1283,14 +1283,20 @@ impl GraphMemory {
 
         // Count relationships and episodes during startup (one-time cost)
         // This is O(n) at startup, but get_stats() will be O(1) at runtime
-        let relationships_cf = db.cf_handle(CF_RELATIONSHIPS).unwrap();
-        let episodes_cf = db.cf_handle(CF_EPISODES).unwrap();
+        let relationships_cf = db
+            .cf_handle(CF_RELATIONSHIPS)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_RELATIONSHIPS))?;
+        let episodes_cf = db
+            .cf_handle(CF_EPISODES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_EPISODES))?;
         let relationship_count = Self::count_cf_entries(&db, relationships_cf);
         let episode_count = Self::count_cf_entries(&db, episodes_cf);
 
         // Load entity embedding cache for concept merging
         // Only entities with pre-computed name_embeddings are cached
-        let entities_cf = db.cf_handle(CF_ENTITIES).unwrap();
+        let entities_cf = db
+            .cf_handle(CF_ENTITIES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_ENTITIES))?;
         let entity_embedding_cache =
             Self::load_entity_embedding_cache(&db, entities_cf, &entity_name_index);
         let embedding_cache_size = entity_embedding_cache.len();
@@ -1347,7 +1353,9 @@ impl GraphMemory {
                 continue;
             }
 
-            let cf = db.cf_handle(cf_name).unwrap();
+            let cf = db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("CF '{}' not found during migration", cf_name))?;
 
             // Only migrate if the CF is empty (avoid double migration)
             if db
@@ -1425,8 +1433,12 @@ impl GraphMemory {
 
     /// Load entity name->UUID index from name_index CF, or migrate from entities CF if empty
     fn load_or_migrate_name_index(db: &DB) -> Result<HashMap<String, Uuid>> {
-        let name_index_cf = db.cf_handle(CF_NAME_INDEX).unwrap();
-        let entities_cf = db.cf_handle(CF_ENTITIES).unwrap();
+        let name_index_cf = db
+            .cf_handle(CF_NAME_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_NAME_INDEX))?;
+        let entities_cf = db
+            .cf_handle(CF_ENTITIES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_ENTITIES))?;
         let mut index = HashMap::new();
 
         // Try to load from name_index CF first
@@ -1471,7 +1483,9 @@ impl GraphMemory {
         db: &DB,
         name_index: &HashMap<String, Uuid>,
     ) -> Result<HashMap<String, Uuid>> {
-        let lowercase_cf = db.cf_handle(CF_LOWERCASE_INDEX).unwrap();
+        let lowercase_cf = db
+            .cf_handle(CF_LOWERCASE_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_LOWERCASE_INDEX))?;
         let mut index = HashMap::new();
 
         // Try to load from lowercase_index CF
@@ -1509,7 +1523,9 @@ impl GraphMemory {
         db: &DB,
         name_index: &HashMap<String, Uuid>,
     ) -> Result<HashMap<String, Uuid>> {
-        let stemmed_cf = db.cf_handle(CF_STEMMED_INDEX).unwrap();
+        let stemmed_cf = db
+            .cf_handle(CF_STEMMED_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_STEMMED_INDEX))?;
         let mut index = HashMap::new();
 
         // Try to load from stemmed_index CF
@@ -2648,7 +2664,10 @@ impl GraphMemory {
 
         // Clear each column family by iterating and batch-deleting
         for cf_name in GRAPH_CF_NAMES {
-            let cf = self.db.cf_handle(cf_name).unwrap();
+            let cf = self
+                .db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("CF '{}' not found during clear_all", cf_name))?;
             let mut batch = rocksdb::WriteBatch::default();
             let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
             for (key, _) in iter.flatten() {
@@ -3610,6 +3629,124 @@ impl GraphMemory {
         }
 
         Ok(strengthened)
+    }
+
+    /// Weaken edges in batch (anti-Hebbian: misleading retrieval feedback).
+    ///
+    /// Applies multiplicative decay (`1 - decay_factor`) to each edge's strength.
+    /// Edges below their tier's prune threshold are queued for lazy removal.
+    /// Uses a single RocksDB `WriteBatch` and one lock acquisition.
+    ///
+    /// Returns the number of edges successfully weakened.
+    pub fn batch_weaken_synapses(&self, edge_uuids: &[Uuid], decay_factor: f32) -> Result<usize> {
+        if edge_uuids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .synapse_update_lock
+            .try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| {
+                anyhow::anyhow!("synapse_update_lock timeout in batch_weaken_synapses")
+            })?;
+
+        let keys: Vec<[u8; 16]> = edge_uuids.iter().map(|u| *u.as_bytes()).collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let results = self
+            .db
+            .batched_multi_get_cf(self.relationships_cf(), &key_refs, false);
+
+        let mut batch = WriteBatch::default();
+        let mut weakened = 0;
+        let clamped_decay = decay_factor.clamp(0.0, 1.0);
+
+        for (i, result) in results.into_iter().enumerate() {
+            if let Ok(Some(value)) = result {
+                if let Ok((mut edge, _)) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                {
+                    edge.strength *= 1.0 - clamped_decay;
+                    // Queue for pruning if below tier threshold
+                    if edge.strength < edge.tier.prune_threshold() {
+                        self.pending_prune.lock().push(edge.uuid);
+                    }
+                    match crate::serialization::encode(&edge) {
+                        Ok(encoded) => {
+                            batch.put_cf(self.relationships_cf(), keys[i], encoded);
+                            weakened += 1;
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to serialize edge {}: {}", edge_uuids[i], e);
+                        }
+                    }
+                }
+            }
+        }
+
+        if weakened > 0 {
+            self.db.write(batch)?;
+        }
+
+        Ok(weakened)
+    }
+
+    /// Collect edge UUIDs for a set of memory UUIDs via their episodic entity refs.
+    ///
+    /// For each memory, looks up its EpisodicNode to find entity_refs, then collects
+    /// all edges incident to those entities (capped at `max_edges`).
+    /// Used by feedback-driven Hebbian reinforcement.
+    pub fn collect_entity_edges_for_memories(
+        &self,
+        memory_uuids: &[Uuid],
+        max_edges: usize,
+    ) -> Result<Vec<Uuid>> {
+        use std::collections::HashSet;
+
+        let mut entity_set: HashSet<Uuid> = HashSet::new();
+
+        // Phase 1: gather all entities referenced by these memories' episodes
+        for mem_uuid in memory_uuids.iter().take(20) {
+            if let Some(episode) = self.get_episode(mem_uuid)? {
+                for entity_ref in &episode.entity_refs {
+                    entity_set.insert(*entity_ref);
+                }
+            }
+        }
+
+        if entity_set.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 2: collect edge UUIDs from entity_edges index (deduplicated)
+        let mut edge_set: HashSet<Uuid> = HashSet::new();
+        for entity_uuid in &entity_set {
+            let prefix = format!("{entity_uuid}:");
+            let iter = self
+                .db
+                .prefix_iterator_cf(self.entity_edges_cf(), prefix.as_bytes());
+
+            for (key, _) in iter.flatten() {
+                if edge_set.len() >= max_edges {
+                    break;
+                }
+                if let Ok(key_str) = std::str::from_utf8(&key) {
+                    if !key_str.starts_with(&prefix) {
+                        break;
+                    }
+                    if let Some(edge_uuid_str) = key_str.split(':').nth(1) {
+                        if let Ok(edge_uuid) = Uuid::parse_str(edge_uuid_str) {
+                            edge_set.insert(edge_uuid);
+                        }
+                    }
+                }
+            }
+
+            if edge_set.len() >= max_edges {
+                break;
+            }
+        }
+
+        Ok(edge_set.into_iter().collect())
     }
 
     /// Record co-retrieval of memories (Hebbian learning between memories)

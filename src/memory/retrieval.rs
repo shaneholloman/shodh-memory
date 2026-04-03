@@ -1717,6 +1717,8 @@ pub struct ReinforcementStats {
     pub memories_processed: usize,
     /// How many association edges were strengthened
     pub associations_strengthened: usize,
+    /// How many entity-level graph edges were strengthened/weakened by feedback
+    pub entity_edges_reinforced: usize,
     /// How many importance boosts were applied
     pub importance_boosts: usize,
     /// How many importance decays were applied

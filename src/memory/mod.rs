@@ -5172,6 +5172,48 @@ impl MemorySystem {
             }
         }
 
+        // Hebbian feedback on entity-level graph edges:
+        // Helpful → strengthen entity edges for involved memories
+        // Misleading → weaken entity edges (anti-Hebbian)
+        if let Some(graph) = &self.graph_memory {
+            let memory_uuids: Vec<uuid::Uuid> = memory_ids.iter().map(|id| id.0).collect();
+            const MAX_FEEDBACK_EDGES: usize = 200;
+            match graph
+                .read()
+                .collect_entity_edges_for_memories(&memory_uuids, MAX_FEEDBACK_EDGES)
+            {
+                Ok(edge_uuids) if !edge_uuids.is_empty() => {
+                    let result = match outcome {
+                        RetrievalOutcome::Helpful => {
+                            graph.read().batch_strengthen_synapses(&edge_uuids)
+                        }
+                        RetrievalOutcome::Misleading => graph
+                            .read()
+                            .batch_weaken_synapses(&edge_uuids, HEBBIAN_DECAY_MISLEADING),
+                        RetrievalOutcome::Neutral => Ok(0),
+                    };
+                    match result {
+                        Ok(count) => {
+                            stats.entity_edges_reinforced = count;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to reinforce entity-level graph edges"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {} // No entity edges found
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to collect entity edges for feedback reinforcement"
+                    );
+                }
+            }
+        }
+
         // CACHE COHERENT IMPORTANCE UPDATES:
         // 1. First try to find memory in caches (working, session)
         // 2. If found in cache, modify through the cached Arc (interior mutability)
