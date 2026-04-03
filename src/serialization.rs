@@ -181,8 +181,9 @@ pub fn unwrap_sho(data: &[u8]) -> Option<(u8, &[u8])> {
         tracing::warn!(
             stored_crc = format_args!("{stored_crc:08x}"),
             computed_crc = format_args!("{computed_crc:08x}"),
-            "SHO envelope checksum mismatch"
+            "SHO envelope checksum mismatch — rejecting corrupted payload"
         );
+        return None;
     }
     Some((version, &data[4..payload_end]))
 }
