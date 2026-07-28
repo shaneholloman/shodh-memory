@@ -2209,6 +2209,43 @@ impl MemorySystem {
         };
 
         // ===========================================================================
+        // LAYER 0.45: GEO PRE-FILTER (Geohash Candidate Prefetch)
+        // ===========================================================================
+        // Mirror of Layer 0.4 for spatial constraints: when the query carries a
+        // geo_filter, prefetch in-radius memory ids via the geohash index. These ids
+        // are UNIONED into the fused pool at GEO_INJECT_FLOOR (additive-only) —
+        // without this, in-radius memories that are semantically silent for the query
+        // text never enter the Vamana/BM25 pool and the hard geo predicate at
+        // hydration can only shrink results, never recover them.
+        let geo_prefilter_ids: HashSet<MemoryId> = if let Some(gf) = &query.geo_filter {
+            match self.advanced_search(storage::SearchCriteria::ByLocation {
+                lat: gf.lat,
+                lon: gf.lon,
+                radius_meters: gf.radius_meters,
+            }) {
+                Ok(memories) => {
+                    let ids: HashSet<_> = memories.iter().map(|m| m.id.clone()).collect();
+                    if !ids.is_empty() {
+                        tracing::info!(
+                            "Layer 0.45: Geo pre-filter found {} memories within {}m of ({}, {})",
+                            ids.len(),
+                            gf.radius_meters,
+                            gf.lat,
+                            gf.lon
+                        );
+                    }
+                    ids
+                }
+                Err(e) => {
+                    tracing::warn!("Layer 0.45: Geo pre-filter search failed: {}", e);
+                    HashSet::new()
+                }
+            }
+        } else {
+            HashSet::new()
+        };
+
+        // ===========================================================================
         // LAYER 0.5: ATTRIBUTE QUERY DETECTION (Fact-First Retrieval)
         // ===========================================================================
         // For attribute queries like "What is Caroline's relationship status?",
@@ -4211,6 +4248,22 @@ impl MemorySystem {
                 }
             }
 
+            // Layer 4.46: geo candidate injection (additive union — see GEO_INJECT_FLOOR docs).
+            // Placed with the 4.4x fused-map adjustments so injected ids flow through the
+            // same hydration path, where Query::matches applies the hard radius predicate.
+            if !geo_prefilter_ids.is_empty() {
+                let mut injected = 0usize;
+                for id in &geo_prefilter_ids {
+                    fused.entry(id.clone()).or_insert_with(|| {
+                        injected += 1;
+                        crate::constants::GEO_INJECT_FLOOR
+                    });
+                }
+                if injected > 0 {
+                    tracing::debug!("Layer 4.46: injected {} geo candidates at floor score", injected);
+                }
+            }
+
             // ===========================================================================
             // LAYER 4.55: TEMPORAL FACT BOOST
             // ===========================================================================
@@ -4581,7 +4634,26 @@ impl MemorySystem {
             }
 
             crate::memory::gold_funnel::record("fusion", res.iter().map(|(id, _)| id));
-            res.truncate(query.max_results);
+            // GEO INJECTION SURVIVAL (Layer 4.46 companion): `res` is sorted score-
+            // descending and geo-injected ids sit at GEO_INJECT_FLOOR, i.e. the very
+            // bottom. A plain `truncate(query.max_results)` here runs BEFORE the geo
+            // hard predicate (applied later, in the per-candidate hydration loop via
+            // `matches_filters`/`Query::matches`) — so an injected id is cut on rank
+            // alone, never reaching the predicate that was supposed to decide its
+            // fate. Extend the truncation length to cover the deepest-ranked
+            // geo-injected id's actual position (not merely the count of injected
+            // ids past the window — other real candidates can sit between the
+            // window edge and an injected id's true rank, so counting alone
+            // under-extends). Sort order is untouched; nothing above the injected
+            // ids is inserted, reordered, or evicted.
+            let geo_high_water_mark = res
+                .iter()
+                .enumerate()
+                .filter(|(_, (id, _))| geo_prefilter_ids.contains(id))
+                .map(|(idx, _)| idx + 1)
+                .max()
+                .unwrap_or(0);
+            res.truncate(query.max_results.max(geo_high_water_mark));
             tracing::debug!("Layer 4: {} fused results", res.len());
 
             // Capture RRF base scores for attribution

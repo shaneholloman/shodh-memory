@@ -2446,6 +2446,12 @@ impl QueryBuilder {
         self
     }
 
+    /// Set spatial filter (geo_location within radius) for composed geo retrieval
+    pub fn geo_filter(mut self, filter: GeoFilter) -> Self {
+        self.query.geo_filter = Some(filter);
+        self
+    }
+
     /// Set offset for pagination (skip first N results)
     pub fn offset(mut self, offset: usize) -> Self {
         self.query.offset = offset;

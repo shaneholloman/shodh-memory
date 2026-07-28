@@ -1255,6 +1255,23 @@ pub const TEMPORAL_MATCH_BOOST_MONTH: f32 = 0.1;
 /// but gives temporal-range memories a meaningful advantage.
 pub const TEMPORAL_PREFILTER_BOOST: f32 = 0.15;
 
+/// Floor score for geo-prefetched candidates injected into the fused pool.
+/// Injection is additive-only: ids already in the pool keep their semantic score
+/// (entry().or_insert), so this can never displace or re-rank semantic candidates.
+///
+/// The fusion pipeline truncates `res` to `query.max_results` BEFORE the hard
+/// geo predicate runs (predicate lives in the per-candidate hydration loop, via
+/// `matches_filters`/`Query::matches`); a floor-scored, bottom-ranked candidate
+/// would otherwise be cut on rank alone and never reach that predicate. The
+/// truncation length is extended to the deepest-ranked geo-injected id's
+/// actual position in the sorted list (see "GEO INJECTION SURVIVAL" at the
+/// `res.truncate` call site) — not merely by the count of injected ids past
+/// the window, since real candidates can occupy positions between the window
+/// edge and an injected id's true rank. This lets injected candidates always
+/// reach the predicate — which is what actually decides whether they survive
+/// — without displacing or re-ranking any real candidate ranked above them.
+pub const GEO_INJECT_FLOOR: f32 = 0.05;
+
 /// Minimum confidence for temporal prefix injection into query embeddings
 ///
 /// Only inject a temporal context prefix (e.g., "[March 2026]") into the query
