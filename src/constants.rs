@@ -1257,7 +1257,21 @@ pub const TEMPORAL_PREFILTER_BOOST: f32 = 0.15;
 
 /// Floor score for geo-prefetched candidates injected into the fused pool.
 /// Injection is additive-only: ids already in the pool keep their semantic score
-/// (entry().or_insert), so this can never displace or re-rank semantic candidates.
+/// (entry().or_insert), so this can never displace or re-rank semantic candidates
+/// under the DEFAULT fusion mode (SHODH_FUSION_FLAT, calibrated-max magnitude
+/// scoring — real candidates enter at their full leg weight, e.g. up to
+/// graph_w/semantic_w, comfortably above 0.05).
+///
+/// CAVEAT (review finding): under the legacy `SHODH_FUSION_RRF` escape-hatch
+/// mode, scores are rank-reciprocal — `weight / (RRF_K_GRAPH_FUSION + rank)`
+/// with `RRF_K_GRAPH_FUSION = 30.0` — so even a rank-1 real candidate can score
+/// as low as `~0.6 / 31 ≈ 0.019`, which is BELOW 0.05. In that mode a
+/// floor-injected candidate can outrank a genuine top semantic result, i.e.
+/// "enters at the bottom of the ranking" is only true under the default
+/// (non-RRF) fusion mode, not universally. This is a pre-existing property of
+/// choosing a fixed floor against a mode-dependent score scale, not something
+/// this feature can fully close without reading the active fusion mode at
+/// injection time; documented here so it isn't rediscovered as a bug later.
 ///
 /// The fusion pipeline truncates `res` to `query.max_results` BEFORE the hard
 /// geo predicate runs (predicate lives in the per-candidate hydration loop, via
@@ -1269,8 +1283,25 @@ pub const TEMPORAL_PREFILTER_BOOST: f32 = 0.15;
 /// the window, since real candidates can occupy positions between the window
 /// edge and an injected id's true rank. This lets injected candidates always
 /// reach the predicate — which is what actually decides whether they survive
-/// — without displacing or re-ranking any real candidate ranked above them.
+/// — without displacing or re-ranking any real candidate ranked above them
+/// (again, under the default fusion mode; see the RRF-mode caveat above).
 pub const GEO_INJECT_FLOOR: f32 = 0.05;
+
+/// Multiplier applied to `query.max_results` to bound the number of geo
+/// prefetch candidates Layer 0.45 considers, mirroring Layer 3's
+/// `vector_top_k = query.max_results * 3` pattern.
+///
+/// Without this cap, `search_by_location`'s geohash scan returns EVERY memory
+/// within the query radius uncapped — cost scales with corpus density inside
+/// the radius, not with `max_results`, and the GEO_INJECT_FLOOR truncation
+/// widening would then extend the hydration window to cover all of them,
+/// fetching every in-radius memory from RocksDB regardless of how many could
+/// ever matter. Candidates are selected deterministically before the cap is
+/// applied: nearest-haversine-distance-first (ties broken by MemoryId), never
+/// by geohash scan order, which is a RocksDB iteration artifact and not a
+/// meaningful ordering. `3` matches the vector leg's multiplier so a geo
+/// query gets the same proportional headroom as a semantic query.
+pub const MAX_GEO_PREFETCH_CANDIDATES: usize = 3;
 
 /// Minimum confidence for temporal prefix injection into query embeddings
 ///

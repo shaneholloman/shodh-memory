@@ -2217,21 +2217,49 @@ impl MemorySystem {
         // without this, in-radius memories that are semantically silent for the query
         // text never enter the Vamana/BM25 pool and the hard geo predicate at
         // hydration can only shrink results, never recover them.
+        //
+        // CAP (review finding, geotemporal Task 2): `search_by_location`'s geohash
+        // scan returns EVERY in-radius memory uncapped — cost scales with corpus
+        // density inside the radius, not with `query.max_results`, and the
+        // high-water-mark truncate fix below would extend the hydration window to
+        // cover all of them, so every in-radius memory gets fetched from RocksDB
+        // regardless of how many actually matter. Bound the prefetch set the same
+        // way Layer 3 bounds vector_top_k (`query.max_results * 3`): select
+        // deterministically by nearest-haversine-distance-first (ties broken by
+        // MemoryId, never by geohash scan order, which is an implementation detail
+        // of RocksDB iteration and not a meaningful ordering), then take the
+        // nearest `query.max_results * MAX_GEO_PREFETCH_CANDIDATES`.
         let geo_prefilter_ids: HashSet<MemoryId> = if let Some(gf) = &query.geo_filter {
             match self.advanced_search(storage::SearchCriteria::ByLocation {
                 lat: gf.lat,
                 lon: gf.lon,
                 radius_meters: gf.radius_meters,
             }) {
-                Ok(memories) => {
-                    let ids: HashSet<_> = memories.iter().map(|m| m.id.clone()).collect();
+                Ok(mut memories) => {
+                    let total_found = memories.len();
+                    memories.sort_by(|a, b| {
+                        let da = a
+                            .experience
+                            .geo_location
+                            .map(|g| gf.haversine_distance(g[0], g[1]))
+                            .unwrap_or(f64::MAX);
+                        let db = b
+                            .experience
+                            .geo_location
+                            .map(|g| gf.haversine_distance(g[0], g[1]))
+                            .unwrap_or(f64::MAX);
+                        da.total_cmp(&db).then_with(|| a.id.cmp(&b.id))
+                    });
+                    let cap = query.max_results * crate::constants::MAX_GEO_PREFETCH_CANDIDATES;
+                    let ids: HashSet<_> = memories.into_iter().take(cap).map(|m| m.id).collect();
                     if !ids.is_empty() {
                         tracing::info!(
-                            "Layer 0.45: Geo pre-filter found {} memories within {}m of ({}, {})",
-                            ids.len(),
+                            "Layer 0.45: Geo pre-filter found {} memories within {}m of ({}, {}), capped to {} nearest",
+                            total_found,
                             gf.radius_meters,
                             gf.lat,
-                            gf.lon
+                            gf.lon,
+                            ids.len()
                         );
                     }
                     ids

@@ -18,6 +18,7 @@
 //! under any OneDrive-watched path — the tantivy file-watcher corrupts
 //! commits under watched directories (see the BM25 onedrive finding).
 
+use shodh_memory::constants::{DEFAULT_MAX_RESULTS, MAX_GEO_PREFETCH_CANDIDATES};
 use shodh_memory::memory::storage::SearchCriteria;
 use shodh_memory::memory::{
     Experience, ExperienceType, GeoFilter, MemoryConfig, MemorySystem, Query, RetrievalMode,
@@ -155,5 +156,77 @@ fn hybrid_mode_geo_filter_composes() {
     assert!(
         texts.iter().any(|t| t.contains("harbor patrol")),
         "geo prefetch did not inject in-radius memory: {texts:?}"
+    );
+}
+
+/// Verifies Layer 0.45's prefetch cap (`MAX_GEO_PREFETCH_CANDIDATES`, review
+/// finding on this task): `search_by_location`'s geohash scan returns EVERY
+/// in-radius memory uncapped, so without a cap the prefetch (and the
+/// GEO_INJECT_FLOOR truncation-widening it feeds) would fetch every in-radius
+/// memory from RocksDB regardless of corpus size within the radius.
+///
+/// Stores `cap + 1` in-radius memories at strictly increasing haversine
+/// distance from the query center (`lat = base + i * 0.001`, i.e. ~111m
+/// steps — see `haversine_distance`), all semantically unrelated to the
+/// query text so they can only ever surface via geo injection, never the
+/// ordinary vector/BM25 legs. Layer 0.45 selects the nearest `cap` by
+/// distance (ties broken by MemoryId) before injecting, so the single
+/// farthest ("sensor ping {cap}", index `cap`, one step beyond the cap
+/// boundary) must never reach the fused pool and therefore can never appear
+/// in results — a real, deterministic assertion of the cap's effect, not an
+/// inference from aggregate counts. All `cap` in-cap candidates share the
+/// same GEO_INJECT_FLOOR score, so final ranking among them is by MemoryId
+/// tie-break (arbitrary distance-wise) — this test does not assert which of
+/// the nearest `cap` appear, only that the cap-excluded one never does, and
+/// that capping still leaves room for real results (correctness preserved).
+#[test]
+fn geo_prefetch_respects_candidate_cap() {
+    let (system, _temp) = setup_memory_system();
+
+    let cap = DEFAULT_MAX_RESULTS * MAX_GEO_PREFETCH_CANDIDATES;
+    let base_lat = 39.2904_f64;
+    let base_lon = -76.6122_f64;
+
+    // cap + 1 memories inside the radius, strictly increasing distance from
+    // the query center. Index `cap` (the (cap+1)-th, farthest) must be
+    // excluded from the prefetch's cap.
+    for i in 0..=cap {
+        let lat = base_lat + (i as f64) * 0.001; // ~111m per step
+        store_with_geo(
+            &system,
+            &format!("sensor ping {i}"),
+            Some([lat, base_lon, 0.0]),
+        );
+    }
+
+    let query = Query::builder()
+        .query_text("wildlife survey") // shares no terms with "sensor ping N"
+        .retrieval_mode(RetrievalMode::Hybrid)
+        .geo_filter(GeoFilter::new(base_lat, base_lon, 5_000.0)) // covers all cap+1 points (~111*cap m spread)
+        .build();
+    let results = system
+        .recall_with_diagnostics(&query)
+        .expect("recall should succeed");
+
+    let texts: Vec<&str> = results
+        .memories
+        .iter()
+        .map(|m| m.experience.content.as_str())
+        .collect();
+
+    // (b) cap respected: the cap-excluded farthest memory must never appear.
+    let excluded_marker = format!("sensor ping {cap}");
+    assert!(
+        !texts.iter().any(|t| t.contains(&excluded_marker)),
+        "cap-excluded farthest memory leaked past MAX_GEO_PREFETCH_CANDIDATES: {texts:?}"
+    );
+
+    // (a) results still correct: capping must not break injection entirely —
+    // some in-cap, semantically-unrelated sensor-ping memory must still
+    // surface via the geo prefetch (there are no other memories in this
+    // test's corpus that could fill the results otherwise).
+    assert!(
+        texts.iter().any(|t| t.contains("sensor ping")),
+        "capped geo prefetch surfaced nothing: {texts:?}"
     );
 }
