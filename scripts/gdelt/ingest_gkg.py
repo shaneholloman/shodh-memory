@@ -11,7 +11,20 @@ shodh-memory server.
 Silent-data-loss rule: a row is only ever *skipped entirely* if it is
 genuinely empty. Any other defect (unparseable date, unparseable/missing
 coordinates, truncated column count) causes that one field to be dropped
-from the payload -- the record itself is always ingested.
+from the payload -- the record itself is always ingested. Every such drop
+is counted and surfaced in the JSON summary (rows_missing_location vs.
+rows_location_parse_failed vs. date_parse_failed) rather than silently
+disappearing.
+
+On the server response: "posted" means the server accepted the POST
+request (HTTP 2xx). It does NOT mean a new memory was created -- the
+server's content-hash dedup (memory/mod.rs `remember()`) silently returns
+the existing memory's id as a success response when identical content was
+already stored, and the response body gives this script no way to tell
+"created" apart from "already existed". There is no duplicate/409 path to
+count separately: `AppError::MemoryAlreadyExists` exists in errors.rs but
+is never constructed by the remember handler, so the server never returns
+409 for a dedup hit in practice.
 
 stdlib-only (urllib), no third-party HTTP dependency.
 """
@@ -25,9 +38,9 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence, Tuple
 
-from v2locations import GdeltLocation, parse_v2locations, primary_location
+from v2locations import GdeltLocation, _SPECIFICITY, parse_v2locations, primary_location
 
 # =============================================================================
 # GKG 2.1 column layout
@@ -45,18 +58,13 @@ _CANONICAL_COLUMNS = [
 ]
 _DEFAULT_COLUMNS: Dict[str, int] = {name: i for i, name in enumerate(_CANONICAL_COLUMNS)}
 
-# Ranking mirrored from v2locations._SPECIFICITY, used here only to pick a
-# human-readable place name for the memory's content text. primary_location()
-# remains the sole source of truth for the coordinates that get POSTed.
-_SPECIFICITY = {3: 0, 4: 0, 2: 1, 5: 1, 1: 2}
-
 
 def detect_columns(header_row: Optional[Sequence[str]]) -> Dict[str, int]:
     """Resolve column-name -> index. If `header_row` names recognizable GKG
-    columns, use those positions (BigQuery CSV export order can differ from
-    the canonical layout); otherwise fall back to the fixed GKG 2.1 layout.
-    Missing names always fall back to their canonical position so a partial
-    or unrecognized header never leaves a column unresolved."""
+    columns, use those positions (BigQuery CSV export order/width can differ
+    from the canonical layout); otherwise fall back to the fixed GKG 2.1
+    layout. Missing names always fall back to their canonical position so a
+    partial or unrecognized header never leaves a column unresolved."""
     columns = dict(_DEFAULT_COLUMNS)
     if not header_row:
         return columns
@@ -75,6 +83,21 @@ def looks_like_header(row: Sequence[str]) -> bool:
     if not row:
         return False
     return row[0].strip().lower() in ("gkgrecordid",)
+
+
+def _is_header_row(row: Sequence[str]) -> bool:
+    """True if `row` looks like a header rather than data: either its first
+    cell is literally 'GKGRECORDID', or any cell matches a recognized GKG
+    column name (covers a header that starts with something other than
+    GKGRECORDID, however unlikely). Any row this returns True for MUST be
+    resolved through detect_columns(), never assumed to already be in
+    canonical order -- a narrowed/reordered BigQuery export has a header by
+    definition, and canonical-order fallback would silently mis-index it."""
+    if not row:
+        return False
+    if looks_like_header(row):
+        return True
+    return any((cell or "").strip().lower() in _DEFAULT_COLUMNS for cell in row)
 
 
 def _col(row: Sequence[str], columns: Dict[str, int], name: str) -> str:
@@ -132,8 +155,12 @@ def _extract_names(field: str, limit: int = 6) -> List[str]:
 
 def build_content(row: Sequence[str], columns: Dict[str, int], locs: List[GdeltLocation]) -> str:
     """Build embeddable memory text from the GKG row. Falls back down a
-    chain of increasingly generic descriptions so content is never empty
-    (the API requires minLength 1)."""
+    chain of increasingly generic descriptions so content is never empty --
+    and, more precisely, never shorter than the server's real minimum: the
+    API requires content to be non-empty AND at least
+    MIN_MEANINGFUL_CONTENT_LENGTH (10) trimmed characters
+    (src/validation.rs:112-132), not merely non-empty. Every fallback string
+    below clears that bound with room to spare."""
     loc_name = _best_location_name(locs)
     gkg_id = _col(row, columns, "gkgrecordid")
 
@@ -163,16 +190,30 @@ def build_content(row: Sequence[str], columns: Dict[str, int], locs: List[GdeltL
 # =============================================================================
 # Row -> payload transform
 # =============================================================================
-def build_payload(row: Sequence[str], user_id: str, columns: Optional[Dict[str, int]] = None) -> Optional[dict]:
-    """Transform one GKG row into a /api/remember payload. Returns None only
-    for a genuinely empty row -- every other defect degrades gracefully
-    (drop the one bad field, keep the record)."""
+class RowStats(NamedTuple):
+    """Per-row field-loss accounting, distinguishing 'no data was there' from
+    'data was there but couldn't be used' -- the latter is the real
+    silent-data-loss case."""
+    missing_location: bool        # V2Locations column was blank for this row
+    location_parse_failed: bool   # V2Locations had content but none of it parsed
+    date_parse_failed: bool       # DATE had content but it didn't parse
+
+
+def build_payload(
+    row: Sequence[str], user_id: str, columns: Optional[Dict[str, int]] = None
+) -> Tuple[Optional[dict], RowStats]:
+    """Transform one GKG row into a /api/remember payload. Returns
+    (None, RowStats(False, False, False)) only for a genuinely empty row --
+    every other defect degrades gracefully (drop the one bad field, keep
+    the record) and is reflected in the returned RowStats."""
     columns = columns or _DEFAULT_COLUMNS
     if not row or all(not (c or "").strip() for c in row):
-        return None
+        return None, RowStats(False, False, False)
 
     locations_raw = _col(row, columns, "v2locations")
-    locs = parse_v2locations(locations_raw)
+    locs, loc_stats = parse_v2locations(locations_raw)
+    missing_location = not locations_raw
+    location_parse_failed = bool(locations_raw) and loc_stats.parsed == 0
 
     content = build_content(row, columns, locs)
     payload: dict = {
@@ -185,17 +226,20 @@ def build_payload(row: Sequence[str], user_id: str, columns: Optional[Dict[str, 
     if source:
         payload["tags"].append(source.lower())
 
+    # parse_v2locations already rejects non-finite/out-of-range coordinates
+    # (see v2locations.py), so any coords here are already valid WGS84.
     coords = primary_location(locations_raw)
     if coords is not None:
         lat, lon = coords
-        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
-            payload["geo_location"] = [lat, lon, 0.0]
+        payload["geo_location"] = [lat, lon, 0.0]
 
-    iso_date = parse_gkg_date(_col(row, columns, "date"))
+    raw_date = _col(row, columns, "date")
+    iso_date = parse_gkg_date(raw_date)
+    date_parse_failed = bool(raw_date) and iso_date is None
     if iso_date:
         payload["created_at"] = iso_date
 
-    return payload
+    return payload, RowStats(missing_location, location_parse_failed, date_parse_failed)
 
 
 # =============================================================================
@@ -208,7 +252,17 @@ def _detect_delimiter(sample_line: str) -> str:
 def iter_gkg_rows(path: str) -> Tuple[Dict[str, int], Iterator[List[str]]]:
     """Read a GKG CSV/TSV export. Returns (columns, rows) where `rows` yields
     data rows in file order (a leading header row, if present, is consumed
-    to build `columns` and is not yielded as data)."""
+    to build `columns` and is not yielded as data).
+
+    Note: this reads the whole file into memory (`list(reader)`) to detect
+    the delimiter/header before yielding rows. Fine for the sizes this
+    script has been used with; a real daily GKG export (which can run to
+    hundreds of thousands of rows) would want a streaming rewrite instead.
+
+    Raises whatever `open()` raises (FileNotFoundError, PermissionError,
+    etc.) -- callers (see `run()`) are responsible for turning that into a
+    reported error rather than an unhandled traceback.
+    """
     with open(path, "r", encoding="utf-8", newline="") as fh:
         first_line = fh.readline()
         if not first_line:
@@ -221,13 +275,11 @@ def iter_gkg_rows(path: str) -> Tuple[Dict[str, int], Iterator[List[str]]]:
     if not rows:
         return dict(_DEFAULT_COLUMNS), iter(())
 
-    if not looks_like_header(rows[0]) and any(
-        (cell or "").strip().lower() in _DEFAULT_COLUMNS for cell in rows[0]
-    ):
+    if _is_header_row(rows[0]):
+        # Any detected header MUST be resolved by name -- never assume
+        # canonical order just because a header is present. A narrowed or
+        # reordered BigQuery export has exactly this shape.
         columns = detect_columns(rows[0])
-        data_rows = rows[1:]
-    elif looks_like_header(rows[0]):
-        columns = dict(_DEFAULT_COLUMNS)
         data_rows = rows[1:]
     else:
         columns = dict(_DEFAULT_COLUMNS)
@@ -241,7 +293,10 @@ def iter_gkg_rows(path: str) -> Tuple[Dict[str, int], Iterator[List[str]]]:
 # =============================================================================
 def post_remember(server: str, payload: dict, api_key: Optional[str] = None, timeout: float = 10.0) -> dict:
     """POST payload to {server}/api/remember. Raises urllib.error.HTTPError
-    on non-2xx (callers distinguish 409 duplicate from other failures)."""
+    on non-2xx. The parsed response body is currently unused by callers
+    (see module docstring re: "posted" not implying "created") -- json.loads
+    is guarded so a non-JSON or malformed response body can't crash an
+    otherwise-successful ingest run."""
     url = server.rstrip("/") + "/api/remember"
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -251,7 +306,12 @@ def post_remember(server: str, payload: dict, api_key: Optional[str] = None, tim
         request.add_header("Authorization", f"Bearer {api_key}")
     with urllib.request.urlopen(request, timeout=timeout) as response:
         body = response.read().decode("utf-8")
-        return json.loads(body) if body else {}
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return {}
 
 
 # =============================================================================
@@ -274,23 +334,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def run(argv: Optional[Sequence[str]] = None) -> dict:
     args = _build_arg_parser().parse_args(argv)
 
-    columns, rows = iter_gkg_rows(args.input)
+    try:
+        columns, rows = iter_gkg_rows(args.input)
+    except OSError as e:
+        return {"error": f"could not read --input {args.input}: {e}"}
 
     parsed = 0
     skipped = 0
     posted = 0
-    duplicates = 0
     errors = 0
+    rows_missing_location = 0
+    rows_location_parse_failed = 0
+    date_parse_failed = 0
     error_samples: List[dict] = []
 
     for i, row in enumerate(rows):
         if args.limit is not None and parsed >= args.limit:
             break
-        payload = build_payload(row, args.user_id, columns)
+        payload, stats = build_payload(row, args.user_id, columns)
         if payload is None:
             skipped += 1
             continue
         parsed += 1
+        if stats.missing_location:
+            rows_missing_location += 1
+        if stats.location_parse_failed:
+            rows_location_parse_failed += 1
+        if stats.date_parse_failed:
+            date_parse_failed += 1
 
         if args.dry_run:
             continue
@@ -299,12 +370,9 @@ def run(argv: Optional[Sequence[str]] = None) -> dict:
             post_remember(args.server, payload, api_key=args.api_key)
             posted += 1
         except urllib.error.HTTPError as e:
-            if e.code == 409:
-                duplicates += 1
-            else:
-                errors += 1
-                if len(error_samples) < 5:
-                    error_samples.append({"row": i, "status": e.code, "reason": str(e.reason)})
+            errors += 1
+            if len(error_samples) < 5:
+                error_samples.append({"row": i, "status": e.code, "reason": str(e.reason)})
         except urllib.error.URLError as e:
             errors += 1
             if len(error_samples) < 5:
@@ -314,8 +382,10 @@ def run(argv: Optional[Sequence[str]] = None) -> dict:
         "parsed": parsed,
         "skipped": skipped,
         "posted": posted,
-        "duplicates": duplicates,
         "errors": errors,
+        "rows_missing_location": rows_missing_location,
+        "rows_location_parse_failed": rows_location_parse_failed,
+        "date_parse_failed": date_parse_failed,
         "dry_run": args.dry_run,
     }
     if error_samples:
@@ -324,7 +394,10 @@ def run(argv: Optional[Sequence[str]] = None) -> dict:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    print(json.dumps(run(argv)))
+    summary = run(argv)
+    print(json.dumps(summary))
+    if "error" in summary:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
