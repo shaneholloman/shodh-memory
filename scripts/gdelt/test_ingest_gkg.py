@@ -13,15 +13,15 @@ from ingest_gkg import (
     parse_gkg_date,
     post_remember,
     run,
-    _normalize_locations_field,
     _DEFAULT_COLUMNS,
 )
 
-# type#fullname#countrycode#adm1code#lat#lon#featureid (V1-shaped block, as
-# accepted by v2locations.parse_v2locations)
+# type#fullname#countrycode#adm1code#lat#lon#featureid (legacy V1Locations shape)
 V1_LOCATIONS = "3#Baltimore, Maryland, United States#US#USMD#39.2904#-76.6122#4347778"
 
 # True GKG 2.1 V2Locations block: adds ADM2Code before lat, CharOffset after featureid.
+# v2locations.parse_v2locations() handles this shape natively (no adapter needed
+# in this module -- see v2locations.py's module docstring for the shape table).
 V2_LOCATIONS = "3#Baltimore, Maryland, United States#US#USMD#USMD005#39.2904#-76.6122#4347778#128"
 
 
@@ -39,25 +39,6 @@ def make_row(**overrides):
         "allnames", "Francis Scott Key Bridge,10;Baltimore,40"
     )
     return row
-
-
-# =============================================================================
-# _normalize_locations_field: the V1/V2 shape adapter
-# =============================================================================
-def test_normalize_drops_adm2_and_charoffset_from_true_v2_block():
-    normalized = _normalize_locations_field(V2_LOCATIONS)
-    assert normalized == V1_LOCATIONS
-
-
-def test_normalize_passes_through_v1_shaped_block_unchanged():
-    assert _normalize_locations_field(V1_LOCATIONS) == V1_LOCATIONS
-
-
-def test_normalize_handles_multiple_blocks_and_empty_field():
-    combined = V2_LOCATIONS + ";" + V1_LOCATIONS
-    normalized = _normalize_locations_field(combined)
-    assert normalized == V1_LOCATIONS + ";" + V1_LOCATIONS
-    assert _normalize_locations_field("") == ""
 
 
 # =============================================================================
@@ -96,6 +77,7 @@ def test_build_payload_resolves_true_v2_locations_not_v1_shaped():
     # This is the field-shape regression: parsing the *true* V2Locations
     # block (with ADM2Code) must still yield the correct coordinates, not
     # silently misread ADM2Code as latitude and not silently drop the block.
+    # (v2locations.parse_v2locations handles this shape natively.)
     row = make_row(v2locations=V2_LOCATIONS)
     payload = build_payload(row, "u")
     assert payload["geo_location"] == [39.2904, -76.6122, 0.0]

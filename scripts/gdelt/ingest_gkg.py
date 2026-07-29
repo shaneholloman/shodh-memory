@@ -3,8 +3,10 @@
 
 Reads a GKG export (tab-delimited, as GDELT ships it, or comma-delimited, as
 BigQuery CSV exports ship it), builds one memory per row using the
-V2Locations column for geo-tagging (v2locations.primary_location), and posts
-it to a running shodh-memory server.
+V2Locations column for geo-tagging (v2locations.parse_v2locations /
+primary_location, which natively handle both the legacy V1Locations shape
+and the true GKG 2.1 V2Locations shape), and posts it to a running
+shodh-memory server.
 
 Silent-data-loss rule: a row is only ever *skipped entirely* if it is
 genuinely empty. Any other defect (unparseable date, unparseable/missing
@@ -78,29 +80,6 @@ def looks_like_header(row: Sequence[str]) -> bool:
 def _col(row: Sequence[str], columns: Dict[str, int], name: str) -> str:
     idx = columns.get(name, _DEFAULT_COLUMNS[name])
     return row[idx].strip() if idx < len(row) and row[idx] is not None else ""
-
-
-# =============================================================================
-# V2Locations field-shape adapter
-# =============================================================================
-def _normalize_locations_field(raw: str) -> str:
-    """v2locations.parse_v2locations() expects the legacy 7-field V1Locations
-    block shape (type#name#cc#adm1#lat#lon#featureid). The true GKG 2.1
-    V2Locations column inserts an ADM2Code before lat and appends a
-    CharOffset (type#name#cc#adm1#adm2#lat#lon#featureid#charoffset, 8-9
-    fields). Blindly parsing that with the 7-field reader would either read
-    ADM2Code as latitude (silently wrong -- ADM2 GAUL codes are often bare
-    numerics) or fail every block outright (US ADM2 like 'USMD027' isn't a
-    float). Drop ADM2Code and CharOffset per block so downstream parsing
-    always sees the 7-field shape it was built for. 7-field (already V1
-    shaped, or test fixtures) blocks pass through unchanged."""
-    out_blocks = []
-    for block in (raw or "").split(";"):
-        parts = block.split("#")
-        if len(parts) >= 8:
-            parts = parts[0:4] + parts[5:8]
-        out_blocks.append("#".join(parts))
-    return ";".join(out_blocks)
 
 
 def _best_location_name(locs: List[GdeltLocation]) -> Optional[str]:
@@ -192,7 +171,7 @@ def build_payload(row: Sequence[str], user_id: str, columns: Optional[Dict[str, 
     if not row or all(not (c or "").strip() for c in row):
         return None
 
-    locations_raw = _normalize_locations_field(_col(row, columns, "v2locations"))
+    locations_raw = _col(row, columns, "v2locations")
     locs = parse_v2locations(locations_raw)
 
     content = build_content(row, columns, locs)
