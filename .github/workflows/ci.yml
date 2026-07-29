@@ -279,7 +279,7 @@ jobs:
       - name: Validate test count
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | awk '{s+=$1} END {print s+0}')
           PASSED=${PASSED:-0}
           echo "Unit tests passed: $PASSED"
           if [ "$PASSED" -lt 50 ]; then
@@ -290,11 +290,11 @@ jobs:
       - name: Generate test summary
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | awk '{s+=$1} END {print s+0}')
           PASSED=${PASSED:-0}
-          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | tail -1)
+          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | awk '{s+=$1} END {print s+0}')
           FAILED=${FAILED:-0}
-          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | tail -1)
+          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | awk '{s+=$1} END {print s+0}')
           IGNORED=${IGNORED:-0}
 
           echo "## Unit Test Results (Tier 1)" >> $GITHUB_STEP_SUMMARY
@@ -449,7 +449,7 @@ jobs:
       - name: Validate test count
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | awk '{s+=$1} END {print s+0}')
           PASSED=${PASSED:-0}
           echo "Integration tests passed: $PASSED"
           if [ "$PASSED" -lt 100 ]; then
@@ -460,11 +460,11 @@ jobs:
       - name: Generate test summary
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | awk '{s+=$1} END {print s+0}')
           PASSED=${PASSED:-0}
-          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | tail -1)
+          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | awk '{s+=$1} END {print s+0}')
           FAILED=${FAILED:-0}
-          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | tail -1)
+          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | awk '{s+=$1} END {print s+0}')
           IGNORED=${IGNORED:-0}
 
           echo "## Integration Test Results (Tier 2)" >> $GITHUB_STEP_SUMMARY
