@@ -924,11 +924,18 @@ const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 ///
 /// Returns `(edge, needs_migration)` where `needs_migration = true` means the
 /// record was in an older format and would benefit from being rewritten.
+///
+/// This is the single choke point every runtime read of a `RelationshipEdge`
+/// funnels through, so it is also where legacy string-typed relations get
+/// normalized to their first-class variant (`RelationType::normalize`) —
+/// e.g. a pre-promotion `Custom("Precedes")` edge reads back as `Precedes`.
 fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
-    crate::serialization::try_decode_compat::<RelationshipEdge>(
+    let (mut edge, needs_migration) = crate::serialization::try_decode_compat::<RelationshipEdge>(
         data,
         EDGE_PROVENANCE_DEFAULT_SUFFIX,
-    )
+    )?;
+    edge.relation_type = edge.relation_type.clone().normalize();
+    Ok((edge, needs_migration))
 }
 
 /// Postcard defaults for trailing `EntityNode` fields added after the postcard
@@ -1738,6 +1745,15 @@ pub enum RelationType {
 
     /// Custom relationship
     Custom(String),
+
+    /// Temporal order (CATENA): head event occurs before tail event. NOT
+    /// causation. Declared LAST, after `Custom`, deliberately: postcard (and
+    /// serde's default enum tagging in general) encodes a variant as the
+    /// varint of its DECLARATION INDEX, not its name — inserting a variant
+    /// anywhere but the end would shift every subsequent variant's on-disk
+    /// discriminant and mis-decode every existing stored edge (see the
+    /// "additive only" contract in this enum's doc comment above).
+    Precedes,
 }
 
 impl RelationType {
@@ -1781,6 +1797,25 @@ impl RelationType {
             Self::AssignedTo => "AssignedTo",
             Self::Approves => "Approves",
             Self::Custom(s) => s.as_str(),
+            Self::Precedes => "Precedes",
+        }
+    }
+
+    /// Normalize legacy string-typed relations to first-class variants. The
+    /// CATENA mint site (`mint_causal_spine_edges`) shipped straight to `main`
+    /// in 622eb10d (2026-07-10) minting `Custom("Precedes")` — the temporal-
+    /// order arm predates this promotion. The demo-server deploy gap that kept
+    /// the dependency-parser stack from actually firing in production closed
+    /// the next day (2026-07-11); since then, live stores accumulate real
+    /// `Custom("Precedes")` edges from CATENA temporal signals. Those legacy
+    /// edges are EXPECTED to exist and this normalization makes every runtime
+    /// read robust to them regardless of when they were minted. Also catches
+    /// the lowercase surface form (`export.rs` lowercases `Custom(_)` on MIF
+    /// export, so a round-tripped legacy edge can come back as `"precedes"`).
+    pub fn normalize(self) -> Self {
+        match self {
+            Self::Custom(ref s) if s.eq_ignore_ascii_case("precedes") => Self::Precedes,
+            other => other,
         }
     }
 
@@ -1810,7 +1845,10 @@ impl RelationType {
             AlternativeTo => 0.9,
             // Generic associations — progressively weaker evidence of meaning.
             AssociatedWith | CoRetrieved => 0.7,
-            RelatedTo => 0.6,
+            // Temporal order (CATENA `Precedes`) is weaker evidence than causation
+            // but stronger than bare co-occurrence — same weight as `RelatedTo`
+            // (spec decision, not measured).
+            RelatedTo | Precedes => 0.6,
             CoOccurs => 0.5,
             Custom(_) => 1.0,
         }
@@ -2699,6 +2737,17 @@ impl GraphMemory {
         }
     }
 
+    /// Map a CATENA `LinkRelation` to its graph `RelationType` — factored out
+    /// of the mint-site match (`mint_causal_spine_edges`) so it is unit-
+    /// testable without a live dependency parser, mirroring
+    /// `relation_type_from_label` above.
+    fn relation_type_from_link(rel: crate::causal_vocab::LinkRelation) -> RelationType {
+        match rel {
+            crate::causal_vocab::LinkRelation::Causes => RelationType::Causes,
+            crate::causal_vocab::LinkRelation::Precedes => RelationType::Precedes,
+        }
+    }
+
     /// Find or create an EVENT node for a CATENA event lemma. Exact-match reuse so
     /// repeated events (collapse, blackout) are one node; new events are added
     /// with `EntityLabel::Event`.
@@ -2859,12 +2908,7 @@ impl GraphMemory {
                 if from == to {
                     continue;
                 }
-                let rt = match link.relation {
-                    crate::causal_vocab::LinkRelation::Causes => RelationType::Causes,
-                    crate::causal_vocab::LinkRelation::Precedes => {
-                        RelationType::Custom("Precedes".to_string())
-                    }
-                };
+                let rt = Self::relation_type_from_link(link.relation);
                 let edge = self.build_spine_edge(
                     from,
                     to,
@@ -10877,6 +10921,99 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(minted, 0, "no parser → no causal-spine edges");
+    }
+
+    #[test]
+    fn precedes_is_first_class() {
+        assert_eq!(RelationType::Precedes.as_str(), "Precedes");
+        assert!(
+            !RelationType::Precedes.is_causal(),
+            "temporal order is not causation"
+        );
+
+        // Legacy edges (pre-promotion CATENA builds, or any store that predates
+        // this change) normalize on read; anything else passes through untouched.
+        assert_eq!(
+            RelationType::Custom("Precedes".into()).normalize(),
+            RelationType::Precedes
+        );
+        // export.rs lowercases Custom(_) on MIF export (`s.to_lowercase()`), so a
+        // round-tripped legacy edge can come back as the lowercase surface form —
+        // normalize must catch that too.
+        assert_eq!(
+            RelationType::Custom("precedes".into()).normalize(),
+            RelationType::Precedes
+        );
+        assert_eq!(
+            RelationType::Custom("Other".into()).normalize(),
+            RelationType::Custom("Other".into())
+        );
+
+        // A legacy Custom("Precedes") and the first-class variant must key
+        // identically in `typed_pair_key` (:3783, keyed on `as_str()`), or
+        // add_relationship's type-dedup silently doubles the edge instead of
+        // collapsing it.
+        assert_eq!(
+            RelationType::Custom("Precedes".into()).as_str(),
+            RelationType::Precedes.as_str()
+        );
+
+        // Serde/postcard round trip: Precedes is a plain unit variant.
+        let bytes = crate::serialization::encode(&RelationType::Precedes).unwrap();
+        let decoded: RelationType = crate::serialization::decode(&bytes).unwrap();
+        assert_eq!(decoded, RelationType::Precedes);
+
+        // A legacy store wrote Custom("Precedes") on disk; decode it back as-is
+        // (no normalize applied by serde itself), then normalize explicitly, the
+        // way `decode_relationship_edge` does for every runtime read.
+        let legacy = RelationType::Custom("Precedes".to_string());
+        let legacy_bytes = crate::serialization::encode(&legacy).unwrap();
+        let legacy_decoded: RelationType = crate::serialization::decode(&legacy_bytes).unwrap();
+        assert_eq!(legacy_decoded, legacy, "raw decode must not silently mutate");
+        assert_eq!(legacy_decoded.normalize(), RelationType::Precedes);
+    }
+
+    #[test]
+    fn catena_temporal_signal_mints_first_class_precedes() {
+        use crate::causal_vocab::LinkRelation;
+
+        // The CATENA mint-site mapping (factored into `relation_type_from_link`
+        // so it's testable without a live dependency parser) must produce the
+        // first-class variant for a temporal signal, not Custom("Precedes").
+        assert_eq!(
+            GraphMemory::relation_type_from_link(LinkRelation::Precedes),
+            RelationType::Precedes
+        );
+        assert_eq!(
+            GraphMemory::relation_type_from_link(LinkRelation::Causes),
+            RelationType::Causes
+        );
+
+        // End-to-end: build + persist + read back an edge exactly as
+        // `mint_causal_spine_edges` would for a CATENA temporal link, and
+        // confirm it survives the storage round trip (through
+        // `decode_relationship_edge`) as `Precedes`.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let collapse = make_entity(&graph, "collapse");
+        let closure = make_entity(&graph, "closure");
+        let rt = GraphMemory::relation_type_from_link(LinkRelation::Precedes);
+        let edge = graph.build_spine_edge(
+            collapse,
+            closure,
+            rt,
+            Uuid::new_v4(),
+            "the collapse happened, then the closure followed",
+            Utc::now(),
+            TypingMethod::Catena,
+        );
+        let edge_id = graph.add_relationship(edge).unwrap();
+        let stored = graph.get_relationship(&edge_id).unwrap().unwrap();
+        assert_eq!(
+            stored.relation_type,
+            RelationType::Precedes,
+            "CATENA temporal edges must persist as first-class Precedes, not Custom"
+        );
     }
 
     /// Helper: create a directed edge from → to
