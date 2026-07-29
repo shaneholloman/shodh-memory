@@ -44,6 +44,7 @@ fn advanced_search_finds_geo_memory_synchronously() {
             lat: 39.2904,
             lon: -76.6122,
             radius_meters: 25_000.0,
+            limit: None,
         })
         .expect("advanced_search should succeed");
 
@@ -159,26 +160,47 @@ fn hybrid_mode_geo_filter_composes() {
     );
 }
 
+/// Filler count for `geo_prefetch_respects_candidate_cap`, same discipline as
+/// `FILLER_COUNT` above (review finding: the first version of this test was
+/// vacuous). With no fillers, all `cap + 1` "sensor ping N" memories are the
+/// *entire* corpus, so `vector_top_k = query.max_results * 3 = 30` — barely
+/// smaller than the 31-memory corpus — lets the ordinary vector leg admit
+/// nearly all of them regardless of geo distance or the cap logic; whichever
+/// one the ANN's own tie-breaking happens to drop is unrelated to which one
+/// Layer 0.45's cap is supposed to drop, so the test could pass whether the
+/// cap works, is broken, or is deleted. These fillers are moderately
+/// relevant to the query ("wildlife"/"survey", never the exact phrase) so
+/// they outrank the zero-overlap "sensor ping N" entries on the ordinary
+/// vector/BM25 legs, push all `cap + 1` of them below `vector_top_k`, and
+/// make geo injection the *only* path any "sensor ping" content can reach
+/// results through — confirmed empirically below (temporarily neutralizing
+/// the cap flips this test red, restoring it flips back to green).
+const CAP_TEST_FILLER_COUNT: usize = 40;
+
 /// Verifies Layer 0.45's prefetch cap (`MAX_GEO_PREFETCH_CANDIDATES`, review
-/// finding on this task): `search_by_location`'s geohash scan returns EVERY
-/// in-radius memory uncapped, so without a cap the prefetch (and the
-/// GEO_INJECT_FLOOR truncation-widening it feeds) would fetch every in-radius
-/// memory from RocksDB regardless of corpus size within the radius.
+/// finding on this task): `search_by_location` must bound its candidate set
+/// BEFORE hydrating anything (storage.rs), not after — a stale cap enforced
+/// only on the already-hydrated `Vec<Memory>` would still fetch every
+/// in-radius memory from RocksDB regardless of corpus size within the
+/// radius.
 ///
 /// Stores `cap + 1` in-radius memories at strictly increasing haversine
 /// distance from the query center (`lat = base + i * 0.001`, i.e. ~111m
 /// steps — see `haversine_distance`), all semantically unrelated to the
-/// query text so they can only ever surface via geo injection, never the
-/// ordinary vector/BM25 legs. Layer 0.45 selects the nearest `cap` by
-/// distance (ties broken by MemoryId) before injecting, so the single
-/// farthest ("sensor ping {cap}", index `cap`, one step beyond the cap
-/// boundary) must never reach the fused pool and therefore can never appear
-/// in results — a real, deterministic assertion of the cap's effect, not an
-/// inference from aggregate counts. All `cap` in-cap candidates share the
-/// same GEO_INJECT_FLOOR score, so final ranking among them is by MemoryId
-/// tie-break (arbitrary distance-wise) — this test does not assert which of
-/// the nearest `cap` appear, only that the cap-excluded one never does, and
-/// that capping still leaves room for real results (correctness preserved).
+/// query text (so they can only ever surface via geo injection, never the
+/// ordinary vector/BM25 legs — see `CAP_TEST_FILLER_COUNT` doc for why
+/// filler crowding is required to make this true), plus `CAP_TEST_FILLER_COUNT`
+/// geo-less fillers crowding the ordinary candidate window. Layer 0.45
+/// selects the nearest `cap` by distance (ties broken by MemoryId) before
+/// injecting, so the single farthest ("sensor ping {cap}", index `cap`, one
+/// step beyond the cap boundary) must never reach the fused pool and
+/// therefore can never appear in results — a real, deterministic assertion
+/// of the cap's effect, not an inference from aggregate counts. All `cap`
+/// in-cap candidates share the same GEO_INJECT_FLOOR score, so final ranking
+/// among them is by MemoryId tie-break (arbitrary distance-wise) — this test
+/// does not assert which of the nearest `cap` appear, only that the
+/// cap-excluded one never does, and that capping still leaves room for real
+/// results (correctness preserved).
 #[test]
 fn geo_prefetch_respects_candidate_cap() {
     let (system, _temp) = setup_memory_system();
@@ -197,6 +219,17 @@ fn geo_prefetch_respects_candidate_cap() {
             &format!("sensor ping {i}"),
             Some([lat, base_lon, 0.0]),
         );
+    }
+
+    // Crowd the ordinary vector/BM25 window so none of the sensor-ping
+    // memories above can enter it — see CAP_TEST_FILLER_COUNT doc comment.
+    for i in 0..CAP_TEST_FILLER_COUNT {
+        let content = if i % 2 == 0 {
+            format!("annual wildlife population count near the nature reserve, case {i}")
+        } else {
+            format!("ecological survey team documented species migration patterns, case {i}")
+        };
+        store_with_geo(&system, &content, None);
     }
 
     let query = Query::builder()
@@ -223,10 +256,88 @@ fn geo_prefetch_respects_candidate_cap() {
 
     // (a) results still correct: capping must not break injection entirely —
     // some in-cap, semantically-unrelated sensor-ping memory must still
-    // surface via the geo prefetch (there are no other memories in this
-    // test's corpus that could fill the results otherwise).
+    // surface via the geo prefetch (fillers dominate the ordinary legs, so
+    // any "sensor ping" presence can only come from geo injection).
     assert!(
         texts.iter().any(|t| t.contains("sensor ping")),
         "capped geo prefetch surfaced nothing: {texts:?}"
+    );
+}
+
+/// Regression coverage for `RetrievalMode::Spatial` (`spatial_search`,
+/// retrieval.rs), the other `SearchCriteria::ByLocation` construction site
+/// touched by the review-finding-1 fix (passes `limit: None` deliberately,
+/// preserving pre-fix behavior). No test in this repo previously exercised
+/// `spatial_search` end-to-end against a live store (only JSON-deserialize
+/// and field-construction tests existed) — added here rather than assumed
+/// safe by inspection alone, since this is the exact call site the fix
+/// touched.
+///
+/// Also exercises `search_by_location`'s new always-sort-by-approx-distance
+/// behavior with `limit: None`: even though `spatial_search` re-sorts by
+/// EXACT distance itself after hydration (so the id order `search_by_location`
+/// returns is not directly observable), this confirms the combination still
+/// produces correct nearest-first, radius-filtered, limit-truncated results.
+#[test]
+fn spatial_mode_still_filters_sorts_and_limits() {
+    let (system, _temp) = setup_memory_system();
+
+    let base_lat = 39.2904_f64;
+    let base_lon = -76.6122_f64;
+    // Three in-radius memories at increasing distance, one clearly outside.
+    store_with_geo(&system, "nearest site", Some([base_lat, base_lon, 0.0]));
+    store_with_geo(
+        &system,
+        "middle site",
+        Some([base_lat + 0.01, base_lon, 0.0]),
+    ); // ~1.1km
+    store_with_geo(
+        &system,
+        "far site",
+        Some([base_lat + 0.02, base_lon, 0.0]),
+    ); // ~2.2km
+    store_with_geo(&system, "outside site", Some([51.5074, -0.1278, 0.0])); // London — far outside radius
+
+    let query = Query::builder()
+        // Spatial mode still requires query_text: `recall_inner` only routes
+        // into `semantic_retrieve_inner` (where the Spatial short-circuit
+        // that delegates to `spatial_search` lives) when `query_text` is
+        // `Some` — production Spatial callers always send one alongside
+        // lat/lon (see the zenoh spatial-recall fixture: `"query": "obstacles
+        // near entrance"`). Omitting it here would instead take
+        // `recall_inner`'s generic filter-based branch, which re-sorts by
+        // importance/temporal relevance and does not exercise `spatial_search`
+        // at all — confirmed by instrumentation while writing this test.
+        .query_text("obstacles near entrance")
+        .retrieval_mode(RetrievalMode::Spatial)
+        .geo_filter(GeoFilter::new(base_lat, base_lon, 5_000.0)) // covers the 3 in-radius sites, excludes London
+        .max_results(2)
+        .build();
+    let results = system
+        .recall_with_diagnostics(&query)
+        .expect("spatial recall should succeed");
+
+    let texts: Vec<&str> = results
+        .memories
+        .iter()
+        .map(|m| m.experience.content.as_str())
+        .collect();
+
+    assert_eq!(
+        texts.len(),
+        2,
+        "spatial mode should truncate to max_results: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("outside site")),
+        "out-of-radius memory leaked into spatial results: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|t| t.contains("far site")),
+        "spatial mode should keep the two NEAREST sites, not the farthest: {texts:?}"
+    );
+    assert_eq!(
+        texts[0], "nearest site",
+        "spatial mode should rank nearest-first: {texts:?}"
     );
 }

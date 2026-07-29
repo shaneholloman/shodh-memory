@@ -2218,25 +2218,32 @@ impl MemorySystem {
         // text never enter the Vamana/BM25 pool and the hard geo predicate at
         // hydration can only shrink results, never recover them.
         //
-        // CAP (review finding, geotemporal Task 2): `search_by_location`'s geohash
-        // scan returns EVERY in-radius memory uncapped — cost scales with corpus
-        // density inside the radius, not with `query.max_results`, and the
-        // high-water-mark truncate fix below would extend the hydration window to
-        // cover all of them, so every in-radius memory gets fetched from RocksDB
-        // regardless of how many actually matter. Bound the prefetch set the same
-        // way Layer 3 bounds vector_top_k (`query.max_results * 3`): select
-        // deterministically by nearest-haversine-distance-first (ties broken by
-        // MemoryId, never by geohash scan order, which is an implementation detail
-        // of RocksDB iteration and not a meaningful ordering), then take the
-        // nearest `query.max_results * MAX_GEO_PREFETCH_CANDIDATES`.
+        // CAP (review finding, geotemporal Task 2): bound the prefetch the same
+        // way Layer 3 bounds vector_top_k (`query.max_results * 3`), and enforce
+        // the bound INSIDE `search_by_location`, before any hydration — capping
+        // in this function is too late, since by the time `advanced_search`
+        // returns `Vec<Memory>`, every in-radius id has already been fetched
+        // (get + full deserialize) from RocksDB by `LongTermMemory::search`'s
+        // shared hydration loop (storage.rs). `search_by_location` sorts
+        // candidate ids by geohash-decoded APPROXIMATE distance (cell-center at
+        // precision 10 is within ~1m of the true position, accurate enough to
+        // cap on cheaply — nothing is hydrated for that sort) and truncates to
+        // the `limit` we pass here, so cost scales with `query.max_results`, not
+        // with corpus density inside the radius. The re-sort below, on the
+        // already-hydrated (and already-capped-to-`cap`-or-fewer) `Vec<Memory>`,
+        // is cheap (≤ `cap` items) and corrects any ordering imprecision from
+        // the geohash cell-center approximation using each memory's exact
+        // stored coordinates — it does not itself need to re-cap, since the
+        // storage layer already bounded the set.
         let geo_prefilter_ids: HashSet<MemoryId> = if let Some(gf) = &query.geo_filter {
+            let cap = query.max_results * crate::constants::MAX_GEO_PREFETCH_CANDIDATES;
             match self.advanced_search(storage::SearchCriteria::ByLocation {
                 lat: gf.lat,
                 lon: gf.lon,
                 radius_meters: gf.radius_meters,
+                limit: Some(cap),
             }) {
                 Ok(mut memories) => {
-                    let total_found = memories.len();
                     memories.sort_by(|a, b| {
                         let da = a
                             .experience
@@ -2250,16 +2257,15 @@ impl MemorySystem {
                             .unwrap_or(f64::MAX);
                         da.total_cmp(&db).then_with(|| a.id.cmp(&b.id))
                     });
-                    let cap = query.max_results * crate::constants::MAX_GEO_PREFETCH_CANDIDATES;
-                    let ids: HashSet<_> = memories.into_iter().take(cap).map(|m| m.id).collect();
+                    let ids: HashSet<_> = memories.into_iter().map(|m| m.id).collect();
                     if !ids.is_empty() {
                         tracing::info!(
-                            "Layer 0.45: Geo pre-filter found {} memories within {}m of ({}, {}), capped to {} nearest",
-                            total_found,
+                            "Layer 0.45: Geo pre-filter found {} memories within {}m of ({}, {}) (storage-capped to {} nearest)",
+                            ids.len(),
                             gf.radius_meters,
                             gf.lat,
                             gf.lon,
-                            ids.len()
+                            cap
                         );
                     }
                     ids

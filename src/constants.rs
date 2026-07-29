@@ -1291,16 +1291,33 @@ pub const GEO_INJECT_FLOOR: f32 = 0.05;
 /// prefetch candidates Layer 0.45 considers, mirroring Layer 3's
 /// `vector_top_k = query.max_results * 3` pattern.
 ///
-/// Without this cap, `search_by_location`'s geohash scan returns EVERY memory
-/// within the query radius uncapped — cost scales with corpus density inside
-/// the radius, not with `max_results`, and the GEO_INJECT_FLOOR truncation
-/// widening would then extend the hydration window to cover all of them,
-/// fetching every in-radius memory from RocksDB regardless of how many could
-/// ever matter. Candidates are selected deterministically before the cap is
-/// applied: nearest-haversine-distance-first (ties broken by MemoryId), never
-/// by geohash scan order, which is a RocksDB iteration artifact and not a
-/// meaningful ordering. `3` matches the vector leg's multiplier so a geo
+/// FIX HISTORY (review findings on this task — record so the mechanism isn't
+/// re-broken by a future edit): the cap must be enforced INSIDE
+/// `search_by_location` (storage.rs), passed down via
+/// `SearchCriteria::ByLocation { limit: Some(query.max_results *
+/// MAX_GEO_PREFETCH_CANDIDATES), .. }`, and applied to `MemoryId`s BEFORE
+/// `LongTermMemory::search()`'s shared hydration loop (get + full
+/// deserialize per id) ever runs. Capping in Layer 0.45 itself (on the
+/// already-`Vec<Memory>` result of `advanced_search`) is too late — by then
+/// every in-radius id has already been hydrated, so cost still scales with
+/// corpus density inside the radius, not with `max_results`, regardless of
+/// what happens to the returned `Vec<Memory>` afterward. `search_by_location`
+/// selects deterministically before its cap: nearest-geohash-decoded-
+/// APPROXIMATE-distance-first (cell-center at geohash precision 10 is within
+/// ~1m of the true position — accurate enough to sort/cap on without
+/// hydrating anything), tie-broken by MemoryId, never by raw geohash scan
+/// order (a RocksDB iteration artifact, not a meaningful ordering). Layer
+/// 0.45 then re-sorts the (already-capped, already-hydrated) result by each
+/// memory's EXACT stored coordinates — cheap on ≤cap items — purely to
+/// correct any ordering imprecision from the cell-center approximation; it
+/// does not need to re-cap. `3` matches the vector leg's multiplier so a geo
 /// query gets the same proportional headroom as a semantic query.
+///
+/// `SearchCriteria::ByLocation.limit` is `None` everywhere except Layer
+/// 0.45's call — in particular `spatial_search` (retrieval.rs,
+/// `RetrievalMode::Spatial`) passes `None` deliberately, since it already
+/// hydrates the full in-radius set and does its own filter/sort/truncate
+/// (API-compat: that mode's existing behavior must not change).
 pub const MAX_GEO_PREFETCH_CANDIDATES: usize = 3;
 
 /// Minimum confidence for temporal prefix injection into query embeddings

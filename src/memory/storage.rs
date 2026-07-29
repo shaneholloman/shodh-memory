@@ -1998,8 +1998,9 @@ impl MemoryStorage {
                 lat,
                 lon,
                 radius_meters,
+                limit,
             } => {
-                memory_ids = self.search_by_location(lat, lon, radius_meters)?;
+                memory_ids = self.search_by_location(lat, lon, radius_meters, limit)?;
             }
             SearchCriteria::ByActionType(action_type) => {
                 memory_ids = self.search_by_action_type(&action_type)?;
@@ -2329,16 +2330,28 @@ impl MemoryStorage {
     ///
     /// Performance: O(k) where k = memories in ~9 geohash cells covering the radius
     /// Previous approach was O(n) where n = all geo-indexed memories
+    ///
+    /// `limit`, if `Some`, bounds the number of ids returned to the nearest
+    /// `limit` by geohash-decoded APPROXIMATE distance (cell-center at
+    /// geohash precision 10 is within ~1m of the true position — plenty
+    /// accurate for this sort/cap; nothing here is hydrated). Capping must
+    /// happen here, before the caller's `search()` hydrates (get + full
+    /// deserialize) every returned id — capping after hydration doesn't
+    /// bound the hydration cost, which is the expensive part. `None`
+    /// preserves the historical uncapped, geohash-scan-order behavior.
     fn search_by_location(
         &self,
         center_lat: f64,
         center_lon: f64,
         radius_meters: f64,
+        limit: Option<usize>,
     ) -> Result<Vec<MemoryId>> {
         use super::types::{geohash_decode, geohash_search_prefixes, GeoFilter};
 
         let geo_filter = GeoFilter::new(center_lat, center_lon, radius_meters);
-        let mut ids = Vec::new();
+        // (id, approx_distance_meters) — distance kept so we can sort
+        // nearest-first before capping, without hydrating anything.
+        let mut candidates: Vec<(MemoryId, f64)> = Vec::new();
 
         // Get geohash prefixes for center + neighbors at appropriate precision
         let prefixes = geohash_search_prefixes(center_lat, center_lon, radius_meters);
@@ -2368,18 +2381,26 @@ impl MemoryStorage {
                     let (min_lat, min_lon, max_lat, max_lon) = geohash_decode(geohash);
                     let approx_lat = (min_lat + max_lat) / 2.0;
                     let approx_lon = (min_lon + max_lon) / 2.0;
+                    let approx_distance = geo_filter.haversine_distance(approx_lat, approx_lon);
 
                     // Final haversine check for edge cases at cell boundaries
-                    if geo_filter.contains(approx_lat, approx_lon) {
+                    if approx_distance <= radius_meters {
                         if let Ok(uuid) = uuid::Uuid::parse_str(parts[2]) {
-                            ids.push(MemoryId(uuid));
+                            candidates.push((MemoryId(uuid), approx_distance));
                         }
                     }
                 }
             }
         }
 
-        Ok(ids)
+        // Nearest-first, MemoryId tie-break (never raw geohash scan order,
+        // which is a RocksDB iteration artifact, not a meaningful ordering).
+        candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if let Some(n) = limit {
+            candidates.truncate(n);
+        }
+
+        Ok(candidates.into_iter().map(|(id, _)| id).collect())
     }
 
     /// Search memories by action type
@@ -3145,6 +3166,15 @@ pub enum SearchCriteria {
         lat: f64,
         lon: f64,
         radius_meters: f64,
+        /// Optional cap on the number of matching ids returned, nearest-first
+        /// by geohash-decoded approximate distance (tie-break MemoryId).
+        /// Bounding happens INSIDE `search_by_location`, before any
+        /// hydration — capping post-hydration is too late, since hydration
+        /// (get + deserialize) is the expensive part. `None` preserves the
+        /// historical uncapped behavior (used by robotics `spatial_search`,
+        /// which already re-sorts/re-filters/truncates the fully hydrated
+        /// result itself).
+        limit: Option<usize>,
     },
     /// Filter by action type
     ByActionType(String),
