@@ -1302,16 +1302,26 @@ pub const GEO_INJECT_FLOOR: f32 = 0.05;
 /// every in-radius id has already been hydrated, so cost still scales with
 /// corpus density inside the radius, not with `max_results`, regardless of
 /// what happens to the returned `Vec<Memory>` afterward. `search_by_location`
-/// selects deterministically before its cap: nearest-geohash-decoded-
-/// APPROXIMATE-distance-first (cell-center at geohash precision 10 is within
-/// ~1m of the true position — accurate enough to sort/cap on without
-/// hydrating anything), tie-broken by MemoryId, never by raw geohash scan
-/// order (a RocksDB iteration artifact, not a meaningful ordering). Layer
-/// 0.45 then re-sorts the (already-capped, already-hydrated) result by each
-/// memory's EXACT stored coordinates — cheap on ≤cap items — purely to
-/// correct any ordering imprecision from the cell-center approximation; it
-/// does not need to re-cap. `3` matches the vector leg's multiplier so a geo
-/// query gets the same proportional headroom as a semantic query.
+/// selects the nearest `limit` candidates by geohash-decoded APPROXIMATE
+/// distance (cell-center at geohash precision 10 is within ~1m of the true
+/// position — accurate enough to select on without hydrating anything),
+/// tie-broken by MemoryId, never by raw geohash scan order (a RocksDB
+/// iteration artifact, not a meaningful ordering).
+///
+/// Round-3 correction: Layer 0.45 does NOT re-sort the capped result by exact
+/// coordinates. An earlier version of this comment (and of the code) claimed
+/// it did, "to correct cell-center imprecision" — that re-sort fed a
+/// `.take(cap)` call that got moved into `search_by_location` in round 2,
+/// leaving the re-sort as dead code (it sorted a `Vec<Memory>` that was
+/// immediately consumed by `.collect::<HashSet<MemoryId>>()`, which is
+/// unordered — the sort had zero observable effect). It was deleted rather
+/// than fixed, because in-cap ORDER is irrelevant: every selected candidate
+/// is injected into `fused` at the same flat `GEO_INJECT_FLOOR` score (Layer
+/// 4.46), so there is no ranking among them for a sort to establish — only
+/// set MEMBERSHIP (which ids made the cap) matters, and that's decided
+/// entirely, and correctly, by `search_by_location`'s approximate-distance
+/// selection. `3` matches the vector leg's multiplier so a geo query gets
+/// the same proportional headroom as a semantic query.
 ///
 /// `SearchCriteria::ByLocation.limit` is `None` everywhere except Layer
 /// 0.45's call — in particular `spatial_search` (retrieval.rs,

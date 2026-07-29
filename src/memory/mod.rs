@@ -2224,17 +2224,25 @@ impl MemorySystem {
         // in this function is too late, since by the time `advanced_search`
         // returns `Vec<Memory>`, every in-radius id has already been fetched
         // (get + full deserialize) from RocksDB by `LongTermMemory::search`'s
-        // shared hydration loop (storage.rs). `search_by_location` sorts
-        // candidate ids by geohash-decoded APPROXIMATE distance (cell-center at
-        // precision 10 is within ~1m of the true position, accurate enough to
-        // cap on cheaply — nothing is hydrated for that sort) and truncates to
-        // the `limit` we pass here, so cost scales with `query.max_results`, not
-        // with corpus density inside the radius. The re-sort below, on the
-        // already-hydrated (and already-capped-to-`cap`-or-fewer) `Vec<Memory>`,
-        // is cheap (≤ `cap` items) and corrects any ordering imprecision from
-        // the geohash cell-center approximation using each memory's exact
-        // stored coordinates — it does not itself need to re-cap, since the
-        // storage layer already bounded the set.
+        // shared hydration loop (storage.rs). `search_by_location` selects the
+        // nearest `limit` candidates by geohash-decoded APPROXIMATE distance
+        // (cell-center at precision 10 is within ~1m of the true position,
+        // accurate enough to select on cheaply — nothing is hydrated for that
+        // comparison) and truncates BEFORE returning ids, so cost scales with
+        // `query.max_results`, not with corpus density inside the radius.
+        //
+        // In-cap ORDERING is irrelevant here (review round 3 finding — a prior
+        // version of this comment claimed a re-sort on the hydrated result
+        // "corrected cell-center imprecision"; that re-sort fed a `.take(cap)`
+        // that round 2 moved into `search_by_location`, so it became dead code
+        // sorting a `Vec` immediately consumed by `.collect::<HashSet<_>>()`,
+        // which is unordered — the sort had no observable effect and was
+        // deleted). It doesn't matter which of the `cap` selected candidates
+        // ends up "first": every one of them is injected into `fused` at the
+        // same flat `GEO_INJECT_FLOOR` score (Layer 4.46 below), so there is
+        // no ranking within this set for a sort to establish. Only set
+        // membership (which ids made the cap) matters, and that's decided
+        // entirely by `search_by_location`'s distance-based selection.
         let geo_prefilter_ids: HashSet<MemoryId> = if let Some(gf) = &query.geo_filter {
             let cap = query.max_results * crate::constants::MAX_GEO_PREFETCH_CANDIDATES;
             match self.advanced_search(storage::SearchCriteria::ByLocation {
@@ -2243,20 +2251,7 @@ impl MemorySystem {
                 radius_meters: gf.radius_meters,
                 limit: Some(cap),
             }) {
-                Ok(mut memories) => {
-                    memories.sort_by(|a, b| {
-                        let da = a
-                            .experience
-                            .geo_location
-                            .map(|g| gf.haversine_distance(g[0], g[1]))
-                            .unwrap_or(f64::MAX);
-                        let db = b
-                            .experience
-                            .geo_location
-                            .map(|g| gf.haversine_distance(g[0], g[1]))
-                            .unwrap_or(f64::MAX);
-                        da.total_cmp(&db).then_with(|| a.id.cmp(&b.id))
-                    });
+                Ok(memories) => {
                     let ids: HashSet<_> = memories.into_iter().map(|m| m.id).collect();
                     if !ids.is_empty() {
                         tracing::info!(
@@ -5696,6 +5691,17 @@ impl MemorySystem {
                 for id in &flagged_ids {
                     self.retriever.remove_memory(id);
                     let _ = self.hybrid_search.remove_memory(id);
+                    // Geo index (review finding, geotemporal Task 2 round 3):
+                    // mark_forgotten_by_age flags metadata only, never touching
+                    // RocksDB's geo: entry — without this, a soft-forgotten
+                    // in-radius memory keeps occupying a slot in
+                    // search_by_location's MAX_GEO_PREFETCH_CANDIDATES cap,
+                    // then gets dropped by is_forgotten() at hydration, silently
+                    // shrinking the live candidate pool. See remove_geo_index's
+                    // doc comment for the no-restore-path precedent this follows.
+                    if let Err(e) = self.long_term_memory.remove_geo_index(id) {
+                        tracing::warn!("Failed to remove geo index for forgotten memory {}: {}", id.0, e);
+                    }
                 }
                 self.cleanup_graph_for_ids(&flagged_ids);
                 self.cleanup_interference_for_ids(&flagged_ids);
@@ -5735,6 +5741,11 @@ impl MemorySystem {
                 for id in &flagged_ids {
                     self.retriever.remove_memory(id);
                     let _ = self.hybrid_search.remove_memory(id);
+                    // Geo index — see the identical comment in the OlderThan
+                    // branch above and remove_geo_index's doc comment.
+                    if let Err(e) = self.long_term_memory.remove_geo_index(id) {
+                        tracing::warn!("Failed to remove geo index for forgotten memory {}: {}", id.0, e);
+                    }
                 }
                 self.cleanup_graph_for_ids(&flagged_ids);
                 self.cleanup_interference_for_ids(&flagged_ids);

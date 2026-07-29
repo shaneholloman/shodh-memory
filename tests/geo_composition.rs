@@ -21,7 +21,8 @@
 use shodh_memory::constants::{DEFAULT_MAX_RESULTS, MAX_GEO_PREFETCH_CANDIDATES};
 use shodh_memory::memory::storage::SearchCriteria;
 use shodh_memory::memory::{
-    Experience, ExperienceType, GeoFilter, MemoryConfig, MemorySystem, Query, RetrievalMode,
+    Experience, ExperienceType, ForgetCriteria, GeoFilter, MemoryConfig, MemorySystem, Query,
+    RetrievalMode,
 };
 use tempfile::TempDir;
 
@@ -78,6 +79,28 @@ fn store_with_geo(system: &MemorySystem, content: &str, geo: Option<[f64; 3]>) {
         content: content.to_string(),
         experience_type: ExperienceType::Observation,
         geo_location: geo,
+        ..Default::default()
+    };
+    system
+        .remember(experience, None)
+        .expect("remember should succeed");
+}
+
+/// Store a memory with an explicit `importance_override`, so
+/// `ForgetCriteria::LowImportance` can be used to soft-forget a specific,
+/// deterministically-chosen memory without depending on the calculated
+/// importance heuristic.
+fn store_with_geo_and_importance(
+    system: &MemorySystem,
+    content: &str,
+    geo: Option<[f64; 3]>,
+    importance: f32,
+) {
+    let experience = Experience {
+        content: content.to_string(),
+        experience_type: ExperienceType::Observation,
+        geo_location: geo,
+        importance_override: Some(importance),
         ..Default::default()
     };
     system
@@ -340,4 +363,92 @@ fn spatial_mode_still_filters_sorts_and_limits() {
         texts[0], "nearest site",
         "spatial mode should rank nearest-first: {texts:?}"
     );
+}
+
+/// Verifies review finding 2 (round 3): soft-forget (`ForgetCriteria::LowImportance`
+/// / `OlderThan`) must remove the memory's `geo:` index entry, or a
+/// soft-forgotten in-radius memory silently consumes one of
+/// `search_by_location`'s `MAX_GEO_PREFETCH_CANDIDATES` cap slots and
+/// displaces a live memory that would otherwise have survived the cap on
+/// its own merits.
+///
+/// Tests the storage-layer mechanism directly via `advanced_search` with an
+/// explicit small `limit` (the same call shape Layer 0.45 uses), rather
+/// than through the full Hybrid retrieval pipeline: past the cap, every
+/// live in-cap candidate is injected at the same flat `GEO_INJECT_FLOOR`
+/// score and tie-broken by `MemoryId` for final ranking, so "did memory X
+/// survive the cap" is not reliably observable from a top-`max_results`
+/// results list alone (which of ~30 equal-score candidates lands in the
+/// top 10 is arbitrary). The direct storage call has no such ambiguity:
+/// `LongTermMemory::search`'s hydration loop drops forgotten memories
+/// (`!memory.is_forgotten()`) unconditionally, so if the soft-forgotten
+/// memory's geo index entry isn't removed at forget-time, it still counts
+/// toward the `limit` nearest candidates `search_by_location` selects —
+/// and since it's placed at the exact query center (nearest of all), it
+/// bumps the single FARTHEST live memory out of the cap entirely (not
+/// merely "absent from a later tie-break" — never even attempted).
+#[test]
+fn soft_forgotten_memory_does_not_consume_geo_cap_slot() {
+    let (system, _temp) = setup_memory_system();
+
+    let base_lat = 39.2904_f64;
+    let base_lon = -76.6122_f64;
+    const CAP_N: usize = 5;
+
+    // CAP_N live, high-importance in-radius memories at increasing distance
+    // (none at the exact center — that's reserved for the forgotten one).
+    for i in 0..CAP_N {
+        let lat = base_lat + (i as f64 + 1.0) * 0.001; // ~111m, ~222m, ...
+        store_with_geo_and_importance(
+            &system,
+            &format!("beacon {i}"),
+            Some([lat, base_lon, 0.0]),
+            0.9,
+        );
+    }
+
+    // One NEARER (exact query center — distance 0, nearest of all),
+    // low-importance memory. Soft-forgotten below.
+    store_with_geo_and_importance(
+        &system,
+        "will be forgotten",
+        Some([base_lat, base_lon, 0.0]),
+        0.05,
+    );
+
+    let forgotten_count = system
+        .forget(ForgetCriteria::LowImportance(0.5))
+        .expect("forget should succeed");
+    assert_eq!(
+        forgotten_count, 1,
+        "expected to soft-forget exactly the one low-importance memory"
+    );
+
+    let found = system
+        .advanced_search(SearchCriteria::ByLocation {
+            lat: base_lat,
+            lon: base_lon,
+            radius_meters: 5_000.0,
+            limit: Some(CAP_N), // mirrors Layer 0.45's cap call shape
+        })
+        .expect("advanced_search should succeed");
+
+    let texts: Vec<&str> = found.iter().map(|m| m.experience.content.as_str()).collect();
+
+    assert!(
+        !texts.iter().any(|t| t.contains("will be forgotten")),
+        "soft-forgotten memory leaked into results: {texts:?}"
+    );
+    assert_eq!(
+        texts.len(),
+        CAP_N,
+        "soft-forgotten memory silently consumed a cap slot, excluding a live memory: {texts:?}"
+    );
+    for i in 0..CAP_N {
+        let marker = format!("beacon {i}");
+        assert!(
+            texts.iter().any(|t| t.contains(&marker)),
+            "expected live memory '{marker}' missing (cap slot likely consumed by the forgotten one): {texts:?}"
+        );
+    }
 }
