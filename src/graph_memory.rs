@@ -10983,7 +10983,10 @@ mod tests {
         let legacy = RelationType::Custom("Precedes".to_string());
         let legacy_bytes = crate::serialization::encode(&legacy).unwrap();
         let legacy_decoded: RelationType = crate::serialization::decode(&legacy_bytes).unwrap();
-        assert_eq!(legacy_decoded, legacy, "raw decode must not silently mutate");
+        assert_eq!(
+            legacy_decoded, legacy,
+            "raw decode must not silently mutate"
+        );
         assert_eq!(legacy_decoded.normalize(), RelationType::Precedes);
 
         // Pin backward compatibility with bytes actually written by a
