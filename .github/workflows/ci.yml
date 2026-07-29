@@ -170,9 +170,108 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-dev libclang-dev clang
 
+      # Real models, hermetically pinned — see recall.yml/batched-guard.yml for
+      # the pattern this mirrors. SHODH_OFFLINE=1 below only blocks auto-download
+      # of *missing* assets; ORT_DYLIB_PATH / SHODH_MODEL_PATH /
+      # SHODH_GLINER_MODEL_PATH are all read as explicit local paths first, so
+      # pre-supplying them keeps the run fully offline while using the real
+      # NER/embedder — never the silent fallback (SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS
+      # is deliberately never set here).
+      - name: Determine pinned ONNX Runtime version
+        id: ort-version
+        run: |
+          VERSION=$(grep -oP 'ONNX_RUNTIME_VERSION: &str = "\K[0-9.]+' src/embeddings/downloader.rs)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract ONNX_RUNTIME_VERSION from src/embeddings/downloader.rs"
+            exit 1
+          fi
+          echo "Pinned ONNX Runtime version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v4
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Cache ONNX Runtime
+        id: ort-cache
+        uses: actions/cache@v4
+        with:
+          path: models/onnxruntime
+          key: onnxruntime-v${{ steps.ort-version.outputs.version }}-linux-x64
+
+      - name: Fetch ONNX Runtime
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          V="${{ steps.ort-version.outputs.version }}"
+          mkdir -p models/onnxruntime
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o /tmp/ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${V}/onnxruntime-linux-x64-${V}.tgz"
+          tar -xzf /tmp/ort.tgz -C /tmp
+          # Pick the largest real (non-symlink) libonnxruntime.so* file, excluding
+          # libonnxruntime_providers_shared.so stubs — mirrors the selection logic
+          # in src/embeddings/downloader.rs::extract_onnx_runtime (fixes #223/#250:
+          # entry ordering and provider stubs must never clobber the real lib).
+          REAL=$(find "/tmp/onnxruntime-linux-x64-${V}/lib" -maxdepth 1 -type f -name 'libonnxruntime.so*' ! -name 'libonnxruntime_*' -printf '%s %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+          if [ -z "$REAL" ]; then
+            echo "::error::Could not find libonnxruntime.so in extracted archive"
+            exit 1
+          fi
+          cp "$REAL" models/onnxruntime/libonnxruntime.so
+          SIZE=$(stat -c%s models/onnxruntime/libonnxruntime.so)
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "::error::Extracted libonnxruntime.so is only $SIZE bytes — expected >1MB real runtime"
+            exit 1
+          fi
+          ls -la models/onnxruntime
+
+      - name: Cache MiniLM embedder weights
+        id: minilm-cache
+        uses: actions/cache@v4
+        with:
+          path: models/minilm-l6
+          key: minilm-l6-c9745ed1-v1
+
+      - name: Fetch MiniLM embedder weights
+        if: steps.minilm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p models/minilm-l6
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/model_quantized.onnx "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/tokenizer.json "$BASE/tokenizer.json"
+          ls -la models/minilm-l6
+
+      - name: Verify model assets (hard gate — refuse to run on missing/degraded assets)
+        run: |
+          ORT_DYLIB_PATH="${{ github.workspace }}/models/onnxruntime/libonnxruntime.so"
+          SHODH_MODEL_PATH="${{ github.workspace }}/models/minilm-l6"
+          SHODH_GLINER_MODEL_PATH="${{ github.workspace }}/models/gliner-bi-edge"
+          test -s "$ORT_DYLIB_PATH" || { echo "::error::ONNX Runtime missing — embedder would hard-fail"; exit 1; }
+          test -s "$SHODH_MODEL_PATH/model_quantized.onnx" || { echo "::error::MiniLM weights missing"; exit 1; }
+          test -s "$SHODH_MODEL_PATH/tokenizer.json" || { echo "::error::MiniLM tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/model.onnx" || { echo "::error::GLiNER model missing — refusing to run on fallback NER"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+
       - name: Run unit tests
         env:
-          SHODH_OFFLINE: "1"   # no GLiNER auto-download in CI; smoke job fetches release assets
+          SHODH_OFFLINE: "1"   # hermetic: all model/runtime paths below are pre-supplied and verified, so offline mode costs nothing and guards against an accidental new auto-download dependency
+          ORT_DYLIB_PATH: ${{ github.workspace }}/models/onnxruntime/libonnxruntime.so
+          SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: |
           set -o pipefail
           cargo test --lib --no-fail-fast 2>&1 | tee test-output.txt
@@ -219,9 +318,108 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-dev libclang-dev clang
 
+      # Real models, hermetically pinned — see recall.yml/batched-guard.yml for
+      # the pattern this mirrors. SHODH_OFFLINE=1 below only blocks auto-download
+      # of *missing* assets; ORT_DYLIB_PATH / SHODH_MODEL_PATH /
+      # SHODH_GLINER_MODEL_PATH are all read as explicit local paths first, so
+      # pre-supplying them keeps the run fully offline while using the real
+      # NER/embedder — never the silent fallback (SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS
+      # is deliberately never set here).
+      - name: Determine pinned ONNX Runtime version
+        id: ort-version
+        run: |
+          VERSION=$(grep -oP 'ONNX_RUNTIME_VERSION: &str = "\K[0-9.]+' src/embeddings/downloader.rs)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract ONNX_RUNTIME_VERSION from src/embeddings/downloader.rs"
+            exit 1
+          fi
+          echo "Pinned ONNX Runtime version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v4
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Cache ONNX Runtime
+        id: ort-cache
+        uses: actions/cache@v4
+        with:
+          path: models/onnxruntime
+          key: onnxruntime-v${{ steps.ort-version.outputs.version }}-linux-x64
+
+      - name: Fetch ONNX Runtime
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          V="${{ steps.ort-version.outputs.version }}"
+          mkdir -p models/onnxruntime
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o /tmp/ort.tgz \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${V}/onnxruntime-linux-x64-${V}.tgz"
+          tar -xzf /tmp/ort.tgz -C /tmp
+          # Pick the largest real (non-symlink) libonnxruntime.so* file, excluding
+          # libonnxruntime_providers_shared.so stubs — mirrors the selection logic
+          # in src/embeddings/downloader.rs::extract_onnx_runtime (fixes #223/#250:
+          # entry ordering and provider stubs must never clobber the real lib).
+          REAL=$(find "/tmp/onnxruntime-linux-x64-${V}/lib" -maxdepth 1 -type f -name 'libonnxruntime.so*' ! -name 'libonnxruntime_*' -printf '%s %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+          if [ -z "$REAL" ]; then
+            echo "::error::Could not find libonnxruntime.so in extracted archive"
+            exit 1
+          fi
+          cp "$REAL" models/onnxruntime/libonnxruntime.so
+          SIZE=$(stat -c%s models/onnxruntime/libonnxruntime.so)
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "::error::Extracted libonnxruntime.so is only $SIZE bytes — expected >1MB real runtime"
+            exit 1
+          fi
+          ls -la models/onnxruntime
+
+      - name: Cache MiniLM embedder weights
+        id: minilm-cache
+        uses: actions/cache@v4
+        with:
+          path: models/minilm-l6
+          key: minilm-l6-c9745ed1-v1
+
+      - name: Fetch MiniLM embedder weights
+        if: steps.minilm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p models/minilm-l6
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/model_quantized.onnx "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/tokenizer.json "$BASE/tokenizer.json"
+          ls -la models/minilm-l6
+
+      - name: Verify model assets (hard gate — refuse to run on missing/degraded assets)
+        run: |
+          ORT_DYLIB_PATH="${{ github.workspace }}/models/onnxruntime/libonnxruntime.so"
+          SHODH_MODEL_PATH="${{ github.workspace }}/models/minilm-l6"
+          SHODH_GLINER_MODEL_PATH="${{ github.workspace }}/models/gliner-bi-edge"
+          test -s "$ORT_DYLIB_PATH" || { echo "::error::ONNX Runtime missing — embedder would hard-fail"; exit 1; }
+          test -s "$SHODH_MODEL_PATH/model_quantized.onnx" || { echo "::error::MiniLM weights missing"; exit 1; }
+          test -s "$SHODH_MODEL_PATH/tokenizer.json" || { echo "::error::MiniLM tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/model.onnx" || { echo "::error::GLiNER model missing — refusing to run on fallback NER"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+
       - name: Run integration tests
         env:
-          SHODH_OFFLINE: "1"   # no GLiNER auto-download in CI; smoke job fetches release assets
+          SHODH_OFFLINE: "1"   # hermetic: all model/runtime paths below are pre-supplied and verified, so offline mode costs nothing and guards against an accidental new auto-download dependency
+          ORT_DYLIB_PATH: ${{ github.workspace }}/models/onnxruntime/libonnxruntime.so
+          SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: |
           set -o pipefail
           cargo test \
