@@ -1952,55 +1952,6 @@ impl MemoryStorage {
         Ok(())
     }
 
-    /// Remove ONLY the geo index entry for a memory (review finding, geotemporal
-    /// Task 2 round 3): soft-forget (`mark_forgotten_by_age`/
-    /// `mark_forgotten_by_importance`) flags a memory's metadata but — unlike
-    /// hard-delete's `remove_from_indices`, which this function's body mirrors
-    /// for the geo key specifically — never touched any RocksDB secondary
-    /// index. The mod.rs soft-forget cleanup path already removes the memory
-    /// from the vector index, BM25 index, and graph (see `retriever.remove_memory`,
-    /// `hybrid_search.remove_memory`, `cleanup_graph_for_ids`); this is geo's
-    /// equivalent, added because `search_by_location`'s new cap
-    /// (`MAX_GEO_PREFETCH_CANDIDATES`) made a stale `geo:` entry costly for the
-    /// first time — before that cap existed, a soft-forgotten memory still
-    /// consumed a geohash-scan iteration but never displaced a live one from a
-    /// bounded result set, since there was no bound. Now that there is, an
-    /// unindexed soft-forgotten memory occupies a cap slot and then gets
-    /// dropped by the `is_forgotten()` check at hydration, silently shrinking
-    /// the live candidate pool by one for every stale `geo:` entry inside the
-    /// cap window.
-    ///
-    /// NOTE on restoration: there is no un-forget/restore path anywhere in
-    /// this codebase for ANY secondary index (grepped for
-    /// restore/recover/unforget across src/ — nothing reverses
-    /// `mark_forgotten_by_*`, and the `"forgotten"` metadata flag is only ever
-    /// set to `"true"`, never cleared). Vector, BM25, and graph cleanup on
-    /// soft-forget are therefore already one-way, unrestorable operations;
-    /// removing the geo index entry here matches that existing precedent
-    /// exactly rather than introducing a new (and currently unsupported)
-    /// restoration contract for geo alone.
-    pub fn remove_geo_index(&self, id: &MemoryId) -> Result<()> {
-        let memory = match self.get(id) {
-            Ok(m) => m,
-            Err(_) => {
-                tracing::debug!("Memory {} not found, skipping geo index cleanup", id.0);
-                return Ok(());
-            }
-        };
-
-        if let Some(geo) = memory.experience.geo_location {
-            let geohash = super::types::geohash_encode(geo[0], geo[1], 10);
-            let geo_key = format!("geo:{}:{}", geohash, id.0);
-            let mut batch = WriteBatch::default();
-            batch.delete_cf(self.index_cf(), geo_key.as_bytes());
-            let mut write_opts = WriteOptions::default();
-            write_opts.set_sync(self.write_mode == WriteMode::Sync);
-            self.db.write_opt(batch, &write_opts)?;
-        }
-
-        Ok(())
-    }
-
     /// Search memories by various criteria
     pub fn search(&self, criteria: SearchCriteria) -> Result<Vec<Memory>> {
         let mut memory_ids = Vec::new();
@@ -2719,10 +2670,40 @@ impl MemoryStorage {
     /// Mark memories as forgotten (soft delete) with atomic batch write.
     /// Returns the IDs of memories that were flagged, so callers can clean up
     /// secondary indices (vector, BM25, graph).
+    ///
+    /// Also deletes each flagged memory's `geo:` index entry, if it has one,
+    /// in the SAME batch as the flag update (review finding, geotemporal Task
+    /// 2 round 4): the scan already has the full `Memory` in hand, so this
+    /// costs no extra RocksDB read/deserialize, and riding in the existing
+    /// per-sweep `WriteBatch` costs no extra fsync — a sweep flagging N
+    /// memories still does exactly one `write_opt`, not N. (Round 3 instead
+    /// added a `remove_geo_index(&self, id)` function, called per id in the
+    /// caller's loop over `flagged_ids` — that re-fetched and
+    /// re-deserialized each memory via `self.get(id)`, even though the
+    /// scan right here already had it, and issued its own
+    /// WriteBatch+write_opt per id, so under `WriteMode::Sync` a single
+    /// `OlderThan`/`LowImportance` sweep could cost up to N fsync'd writes.
+    /// `remove_geo_index` has been removed — this function's own batch is
+    /// the only place the geo key needs deleting, since nothing else in
+    /// this codebase soft-forgets memories one at a time; hard-delete
+    /// (`ForgetCriteria::ById`, `delete()`/`remove_from_indices`) already
+    /// handles geo cleanup for the single-id case.)
+    ///
+    /// NOTE on restoration (still true, carried over from the round-3 doc
+    /// comment this replaces): there is no un-forget/restore path anywhere
+    /// in this codebase for ANY secondary index — grepped for
+    /// restore/recover/unforget across src/; nothing reverses
+    /// `mark_forgotten_by_*`, and the `"forgotten"` metadata flag is only
+    /// ever set to `"true"`, never cleared. Vector, BM25, and graph cleanup
+    /// on soft-forget are therefore already one-way, unrestorable
+    /// operations; deleting the geo index entry here matches that existing
+    /// precedent rather than inventing a new (and currently unsupported)
+    /// restoration contract for geo alone.
     pub fn mark_forgotten_by_age(&self, cutoff: DateTime<Utc>) -> Result<Vec<MemoryId>> {
         let mut batch = rocksdb::WriteBatch::default();
         let mut flagged_ids = Vec::new();
         let now = Utc::now().to_rfc3339();
+        let idx = self.index_cf();
 
         let iter = self.db.iterator(IteratorMode::Start);
         for (key, value) in iter.flatten() {
@@ -2735,6 +2716,11 @@ impl MemoryStorage {
                 }
                 if memory.created_at < cutoff {
                     flagged_ids.push(memory.id.clone());
+                    if let Some(geo) = memory.experience.geo_location {
+                        let geohash = super::types::geohash_encode(geo[0], geo[1], 10);
+                        let geo_key = format!("geo:{}:{}", geohash, memory.id.0);
+                        batch.delete_cf(idx, geo_key.as_bytes());
+                    }
                     memory
                         .experience
                         .metadata
@@ -2762,10 +2748,16 @@ impl MemoryStorage {
     /// Mark memories with low importance as forgotten with atomic batch write.
     /// Returns the IDs of memories that were flagged, so callers can clean up
     /// secondary indices (vector, BM25, graph).
+    ///
+    /// Also deletes each flagged memory's `geo:` index entry, if it has one,
+    /// in the same batch as the flag update — see `mark_forgotten_by_age`'s
+    /// doc comment for the full rationale (one sweep, one write, no
+    /// redundant re-fetch; this mirrors it exactly).
     pub fn mark_forgotten_by_importance(&self, threshold: f32) -> Result<Vec<MemoryId>> {
         let mut batch = rocksdb::WriteBatch::default();
         let mut flagged_ids = Vec::new();
         let now = Utc::now().to_rfc3339();
+        let idx = self.index_cf();
 
         let iter = self.db.iterator(IteratorMode::Start);
         for (key, value) in iter.flatten() {
@@ -2778,6 +2770,11 @@ impl MemoryStorage {
                 }
                 if memory.importance() < threshold {
                     flagged_ids.push(memory.id.clone());
+                    if let Some(geo) = memory.experience.geo_location {
+                        let geohash = super::types::geohash_encode(geo[0], geo[1], 10);
+                        let geo_key = format!("geo:{}:{}", geohash, memory.id.0);
+                        batch.delete_cf(idx, geo_key.as_bytes());
+                    }
                     memory
                         .experience
                         .metadata

@@ -1315,10 +1315,8 @@ pub const GEO_INJECT_FLOOR: f32 = 0.05;
 /// leaving the re-sort as dead code (it sorted a `Vec<Memory>` that was
 /// immediately consumed by `.collect::<HashSet<MemoryId>>()`, which is
 /// unordered — the sort had zero observable effect). It was deleted rather
-/// than fixed, because in-cap ORDER is irrelevant: every selected candidate
-/// is injected into `fused` at the same flat `GEO_INJECT_FLOOR` score (Layer
-/// 4.46), so there is no ranking among them for a sort to establish — only
-/// set MEMBERSHIP (which ids made the cap) matters, and that's decided
+/// than fixed, because in-cap ORDER is irrelevant: what matters is set
+/// MEMBERSHIP (which ids made the cap), not order, and that's decided
 /// entirely, and correctly, by `search_by_location`'s approximate-distance
 /// selection. `3` matches the vector leg's multiplier so a geo query gets
 /// the same proportional headroom as a semantic query.

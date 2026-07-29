@@ -2238,11 +2238,15 @@ impl MemorySystem {
         // sorting a `Vec` immediately consumed by `.collect::<HashSet<_>>()`,
         // which is unordered — the sort had no observable effect and was
         // deleted). It doesn't matter which of the `cap` selected candidates
-        // ends up "first": every one of them is injected into `fused` at the
-        // same flat `GEO_INJECT_FLOOR` score (Layer 4.46 below), so there is
-        // no ranking within this set for a sort to establish. Only set
-        // membership (which ids made the cap) matters, and that's decided
-        // entirely by `search_by_location`'s distance-based selection.
+        // ends up "first": what matters is set MEMBERSHIP, not order — and
+        // that's decided entirely by `search_by_location`'s distance-based
+        // selection. Layer 4.46 below is `fused.entry(id).or_insert(...)`
+        // (insert-if-absent): an id already in `fused` via the vector/BM25
+        // legs keeps its real semantic score untouched; only an id NOT
+        // already pooled gets injected at the flat `GEO_INJECT_FLOOR` floor.
+        // Either way, no per-candidate ordering within the capped set could
+        // change which score a given id ends up with, so there's nothing
+        // for a pre-injection sort here to establish.
         let geo_prefilter_ids: HashSet<MemoryId> = if let Some(gf) = &query.geo_filter {
             let cap = query.max_results * crate::constants::MAX_GEO_PREFETCH_CANDIDATES;
             match self.advanced_search(storage::SearchCriteria::ByLocation {
@@ -5683,7 +5687,12 @@ impl MemorySystem {
                 // Remove from session memory
                 let session_removed = self.session_memory.write().remove_older_than(cutoff)?;
 
-                // Mark as forgotten in long-term (don't delete, just flag)
+                // Mark as forgotten in long-term (don't delete, just flag).
+                // As of geotemporal Task 2 round 4, this ALSO deletes each
+                // flagged memory's geo: index entry, batched into the same
+                // write as the flag update — see mark_forgotten_by_age's doc
+                // comment. (Round 3 did this here instead, per id in a loop;
+                // moved into the sweep itself to avoid O(N) fsync'd writes.)
                 let flagged_ids = self.long_term_memory.mark_forgotten_by_age(cutoff)?;
                 let lt_flagged = flagged_ids.len();
 
@@ -5691,17 +5700,6 @@ impl MemorySystem {
                 for id in &flagged_ids {
                     self.retriever.remove_memory(id);
                     let _ = self.hybrid_search.remove_memory(id);
-                    // Geo index (review finding, geotemporal Task 2 round 3):
-                    // mark_forgotten_by_age flags metadata only, never touching
-                    // RocksDB's geo: entry — without this, a soft-forgotten
-                    // in-radius memory keeps occupying a slot in
-                    // search_by_location's MAX_GEO_PREFETCH_CANDIDATES cap,
-                    // then gets dropped by is_forgotten() at hydration, silently
-                    // shrinking the live candidate pool. See remove_geo_index's
-                    // doc comment for the no-restore-path precedent this follows.
-                    if let Err(e) = self.long_term_memory.remove_geo_index(id) {
-                        tracing::warn!("Failed to remove geo index for forgotten memory {}: {}", id.0, e);
-                    }
                 }
                 self.cleanup_graph_for_ids(&flagged_ids);
                 self.cleanup_interference_for_ids(&flagged_ids);
@@ -5732,6 +5730,9 @@ impl MemorySystem {
                     .session_memory
                     .write()
                     .remove_below_importance(threshold)?;
+                // ALSO deletes each flagged memory's geo: index entry, batched
+                // into the same write as the flag update — see
+                // mark_forgotten_by_age's doc comment (identical rationale).
                 let flagged_ids = self
                     .long_term_memory
                     .mark_forgotten_by_importance(threshold)?;
@@ -5741,11 +5742,6 @@ impl MemorySystem {
                 for id in &flagged_ids {
                     self.retriever.remove_memory(id);
                     let _ = self.hybrid_search.remove_memory(id);
-                    // Geo index — see the identical comment in the OlderThan
-                    // branch above and remove_geo_index's doc comment.
-                    if let Err(e) = self.long_term_memory.remove_geo_index(id) {
-                        tracing::warn!("Failed to remove geo index for forgotten memory {}: {}", id.0, e);
-                    }
                 }
                 self.cleanup_graph_for_ids(&flagged_ids);
                 self.cleanup_interference_for_ids(&flagged_ids);
