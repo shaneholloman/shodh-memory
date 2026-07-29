@@ -59,16 +59,25 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
       - name: Run Clippy
         run: |
+          set -o pipefail
+          # clippy runs -W: 30 pre-existing lints tracked for cleanup; flip to -D when cleared (see repo issue)
           cargo clippy --all-targets -- -W clippy::all 2>&1 | tee clippy-output.txt
           WARNINGS=$(grep -c "warning:" clippy-output.txt || true)
+          WARNINGS=${WARNINGS:-0}
           echo "### Clippy Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Warnings | $WARNINGS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Status | Passed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | $WARNINGS warning(s) — non-blocking (-W mode) |" >> $GITHUB_STEP_SUMMARY
 
   build:
     name: Build (${{ matrix.os }})
@@ -156,16 +165,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
       - name: Run unit tests
         env:
           SHODH_OFFLINE: "1"   # no GLiNER auto-download in CI; smoke job fetches release assets
         run: |
+          set -o pipefail
           cargo test --lib --no-fail-fast 2>&1 | tee test-output.txt
 
       - name: Validate test count
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1 || echo "0")
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=${PASSED:-0}
           echo "Unit tests passed: $PASSED"
           if [ "$PASSED" -lt 50 ]; then
             echo "::error::Only $PASSED unit tests passed — expected at least 50. Tests may be silently skipped."
@@ -175,9 +191,12 @@ jobs:
       - name: Generate test summary
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1 || echo "0")
-          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | tail -1 || echo "0")
-          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | tail -1 || echo "0")
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=${PASSED:-0}
+          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | tail -1)
+          FAILED=${FAILED:-0}
+          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | tail -1)
+          IGNORED=${IGNORED:-0}
 
           echo "## Unit Test Results (Tier 1)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -195,10 +214,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
       - name: Run integration tests
         env:
           SHODH_OFFLINE: "1"   # no GLiNER auto-download in CI; smoke job fetches release assets
         run: |
+          set -o pipefail
           cargo test \
             --test adaptive_memory_tests \
             --test bug_regression_tests \
@@ -226,7 +251,8 @@ jobs:
       - name: Validate test count
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1 || echo "0")
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=${PASSED:-0}
           echo "Integration tests passed: $PASSED"
           if [ "$PASSED" -lt 100 ]; then
             echo "::error::Only $PASSED integration tests passed — expected at least 100. Tests may be silently skipped."
@@ -236,9 +262,12 @@ jobs:
       - name: Generate test summary
         if: always()
         run: |
-          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1 || echo "0")
-          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | tail -1 || echo "0")
-          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | tail -1 || echo "0")
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1)
+          PASSED=${PASSED:-0}
+          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | tail -1)
+          FAILED=${FAILED:-0}
+          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | tail -1)
+          IGNORED=${IGNORED:-0}
 
           echo "## Integration Test Results (Tier 2)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
