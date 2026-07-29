@@ -1302,7 +1302,10 @@ fn test_decay_synapse_persists() {
         stored.strength
     );
     assert!(
-        (stored.last_activated - thirty_days_ago).num_seconds().abs() <= 1,
+        (stored.last_activated - thirty_days_ago)
+            .num_seconds()
+            .abs()
+            <= 1,
         "add_relationship must preserve last_activated (30 days ago), got {}",
         stored.last_activated
     );
