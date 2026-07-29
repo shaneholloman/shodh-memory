@@ -355,17 +355,17 @@ def test_build_precedence_queries_gold_is_strictly_before_anchor():
         _row("too-early", 10.0, 20.0, base - timedelta(days=30)),
     ]
     clusters = build_clusters(rows, cell_deg=1.0)
+    # All 5 rows share one grid cell -- cluster-level dedup (see
+    # build_precedence_queries) means only the FIRST anchor (sorted by id)
+    # with non-empty gold produces a query. Anchors sorted alphabetically:
+    # "after" < "before-3d" < "record-x" < "same-instant" < "too-early", so
+    # "after" (date = base + 1 day) is that first anchor.
     queries = build_precedence_queries(rows, clusters, n=15)
-    assert len(queries) >= 1
-    # The query anchored on "record-x"/"same-instant"'s own timestamp (base):
-    # its window ends exactly at `base`, so this is the query to inspect for
-    # the strictly-before-anchor invariant.
-    anchor_query = next(q for q in queries if q["window"]["end"] == base.isoformat())
-    assert "before-3d" in anchor_query["gold_ids"]
-    assert "record-x" not in anchor_query["gold_ids"]
-    assert "same-instant" not in anchor_query["gold_ids"]
-    assert "after" not in anchor_query["gold_ids"]
-    assert "too-early" not in anchor_query["gold_ids"]
+    assert len(queries) == 1
+    q = queries[0]
+    assert set(q["gold_ids"]) == {"record-x", "before-3d", "same-instant"}
+    assert "after" not in q["gold_ids"]  # end exclusive: anchor's own instant excluded
+    assert "too-early" not in q["gold_ids"]  # outside the 7-day lookback
 
 
 def test_build_precedence_queries_skips_anchors_with_empty_gold():
@@ -375,15 +375,67 @@ def test_build_precedence_queries_skips_anchors_with_empty_gold():
     assert queries == []
 
 
+def test_build_precedence_queries_dedupes_by_cluster_collapses_to_one():
+    # A single-event-dominated corpus (many records, one location) must not
+    # collapse most of `n` requested queries onto near-identical copies of
+    # the same centroid/radius -- see build_precedence_queries' docstring.
+    base = _dt("2020-06-01T00:00:00Z")
+    rows = [_row(f"id{i:03d}", 10.0, 20.0, base + timedelta(days=i)) for i in range(20)]
+    clusters = build_clusters(rows, cell_deg=1.0)
+    queries = build_precedence_queries(rows, clusters, n=15)
+    assert len(queries) == 1
+
+
 def test_build_precedence_queries_respects_n_cap():
+    # 6 distinct clusters (10 degrees apart -- well outside a 1-degree
+    # cell), 2 members each: the earlier member has no "before" gold and is
+    # skipped without consuming the cluster's slot; the later member
+    # succeeds and marks the cluster used. Cap n=5 to verify the 6th
+    # cluster is never reached.
     base = _dt("2020-06-01T00:00:00Z")
     rows = []
-    for i in range(20):
-        rows.append(_row(f"id{i:03d}", 10.0, 20.0, base + timedelta(days=i)))
+    for cluster_idx in range(6):
+        lat = 10.0 + cluster_idx * 10.0
+        rows.append(_row(f"c{cluster_idx}-early", lat, 20.0, base))
+        rows.append(_row(f"c{cluster_idx}-late", lat, 20.0, base + timedelta(days=1)))
     clusters = build_clusters(rows, cell_deg=1.0)
     queries = build_precedence_queries(rows, clusters, n=5)
     assert len(queries) == 5
     assert [q["qid"] for q in queries] == ["pr_0001", "pr_0002", "pr_0003", "pr_0004", "pr_0005"]
+    # Each built query's gold is exactly its own cluster's "early" member.
+    for i, q in enumerate(queries):
+        assert q["gold_ids"] == [f"c{i}-early"]
+
+
+def test_build_precedence_queries_text_uses_cluster_centroid_not_raw_anchor():
+    # The centroid can differ from the anchor's own raw coordinates once a
+    # cluster has >1 member; the query text must describe the location
+    # actually used as the geo filter center, not the anchor's raw point.
+    base = _dt("2020-01-10T00:00:00Z")
+    rows = [
+        _row("anchor", 10.0, 20.0, base),
+        _row("neighbor", 10.02, 20.02, base - timedelta(days=1)),
+    ]
+    clusters = build_clusters(rows, cell_deg=1.0)
+    queries = build_precedence_queries(rows, clusters, n=15)
+    assert len(queries) == 1
+    q = queries[0]
+    center_lat, center_lon = q["geo"]["lat"], q["geo"]["lon"]
+    assert f"{center_lat:.4f}" in q["text"]
+    assert f"{center_lon:.4f}" in q["text"]
+    assert center_lat != 10.0 or center_lon != 20.0  # centroid, not the raw anchor point
+
+
+def test_build_precedence_queries_window_carries_end_exclusive_flag():
+    base = _dt("2020-06-01T00:00:00Z")
+    rows = [
+        _row("early", 10.0, 20.0, base - timedelta(days=1)),
+        _row("late", 10.0, 20.0, base),
+    ]
+    clusters = build_clusters(rows, cell_deg=1.0)
+    queries = build_precedence_queries(rows, clusters, n=15)
+    assert len(queries) == 1
+    assert queries[0]["window"]["end_inclusive"] is False
 
 
 # =============================================================================
@@ -617,6 +669,145 @@ def test_run_end_to_end_with_stubbed_server(monkeypatch, tmp_path):
     assert len(lines) == 3  # 1 radius_window + 1 precedence + 1 negative
     families = {json.loads(line)["family"] for line in lines}
     assert families == {"radius_window", "precedence", "negative"}
+
+
+def test_run_gates_on_correlation_loss_above_threshold(monkeypatch, tmp_path):
+    from ingest_gkg import _DEFAULT_COLUMNS
+
+    def make_row(gkgrecordid, lat_lon_block, date):
+        row = [""] * len(_DEFAULT_COLUMNS)
+        row[_DEFAULT_COLUMNS["gkgrecordid"]] = gkgrecordid
+        row[_DEFAULT_COLUMNS["date"]] = date
+        row[_DEFAULT_COLUMNS["v2locations"]] = lat_lon_block
+        row[_DEFAULT_COLUMNS["allnames"]] = f"Name{gkgrecordid},1"
+        return row
+
+    v2 = "3#Place#US#USMD#USMD005#{lat}#{lon}#fid"
+    rows = [
+        make_row("0", v2.format(lat="10.0", lon="20.0"), "20200101000000"),
+        make_row("1", v2.format(lat="10.01", lon="20.01"), "20200102000000"),
+    ]
+    gkg_path = tmp_path / "sample.tsv"
+    gkg_path.write_text("\n".join("\t".join(r) for r in rows), encoding="utf-8")
+    out_path = tmp_path / "queries.jsonl"
+
+    # Server has NOTHING matching this content -- 100% unmatched, well over
+    # the 5% MAX_UNMATCHED_FRACTION gate.
+    def fake_urlopen(request, timeout=None):
+        return _FakeResponse(json.dumps({"memories": [], "total": 0}).encode("utf-8"))
+
+    monkeypatch.setattr(build_queries.urllib.request, "urlopen", fake_urlopen)
+
+    summary = run([
+        "--server", "http://localhost:9944", "--user-id", "gdelt-user",
+        "--gkg-input", str(gkg_path), "--output", str(out_path),
+    ])
+
+    assert "error" in summary
+    assert "correlation loss" in summary["error"]
+    assert summary["correlation_unmatched_fraction"] == pytest.approx(1.0)
+    assert not out_path.exists()  # must not emit a query set from a partially-correlated corpus
+
+
+def test_run_below_threshold_correlation_loss_still_succeeds(monkeypatch, tmp_path):
+    # Regression guard for the gate above: a corpus that correlates
+    # completely (0% unmatched) must not be caught by the >5% threshold.
+    from ingest_gkg import _DEFAULT_COLUMNS, build_payload, iter_gkg_rows
+
+    def make_row(gkgrecordid, lat_lon_block, date):
+        row = [""] * len(_DEFAULT_COLUMNS)
+        row[_DEFAULT_COLUMNS["gkgrecordid"]] = gkgrecordid
+        row[_DEFAULT_COLUMNS["date"]] = date
+        row[_DEFAULT_COLUMNS["v2locations"]] = lat_lon_block
+        row[_DEFAULT_COLUMNS["allnames"]] = f"Name{gkgrecordid},1"
+        return row
+
+    v2 = "3#Place#US#USMD#USMD005#{lat}#{lon}#fid"
+    rows = [
+        make_row("0", v2.format(lat="10.0", lon="20.0"), "20200101000000"),
+        make_row("1", v2.format(lat="10.01", lon="20.01"), "20200102000000"),
+        make_row("2", v2.format(lat="10.02", lon="20.02"), "20200103000000"),
+    ]
+    gkg_path = tmp_path / "sample.tsv"
+    gkg_path.write_text("\n".join("\t".join(r) for r in rows), encoding="utf-8")
+    out_path = tmp_path / "queries.jsonl"
+
+    columns, parsed_rows = iter_gkg_rows(str(gkg_path))
+    server_items = []
+    for i, r in enumerate(parsed_rows):
+        payload, _ = build_payload(r, "gdelt-user", columns)
+        server_items.append({
+            "id": f"srv-{i}",
+            "content": payload["content"][:500],
+            "content_truncated": len(payload["content"]) > 500,
+            "content_length": len(payload["content"]),
+        })
+
+    def fake_urlopen(request, timeout=None):
+        return _FakeResponse(json.dumps({"memories": server_items, "total": len(server_items)}).encode("utf-8"))
+
+    monkeypatch.setattr(build_queries.urllib.request, "urlopen", fake_urlopen)
+
+    summary = run([
+        "--server", "http://localhost:9944", "--user-id", "gdelt-user",
+        "--gkg-input", str(gkg_path), "--output", str(out_path),
+    ])
+    assert "error" not in summary
+    assert summary["correlation_unmatched_fraction"] == pytest.approx(0.0)
+    assert out_path.exists()
+
+
+def test_run_success_summary_reports_requested_counts_alongside_built(monkeypatch, tmp_path):
+    from ingest_gkg import _DEFAULT_COLUMNS, build_payload, iter_gkg_rows
+
+    def make_row(gkgrecordid, lat_lon_block, date):
+        row = [""] * len(_DEFAULT_COLUMNS)
+        row[_DEFAULT_COLUMNS["gkgrecordid"]] = gkgrecordid
+        row[_DEFAULT_COLUMNS["date"]] = date
+        row[_DEFAULT_COLUMNS["v2locations"]] = lat_lon_block
+        row[_DEFAULT_COLUMNS["allnames"]] = f"Name{gkgrecordid},1"
+        return row
+
+    v2 = "3#Place#US#USMD#USMD005#{lat}#{lon}#fid"
+    rows = [
+        make_row("0", v2.format(lat="10.0", lon="20.0"), "20200101000000"),
+        make_row("1", v2.format(lat="10.01", lon="20.01"), "20200102000000"),
+        make_row("2", v2.format(lat="10.02", lon="20.02"), "20200103000000"),
+    ]
+    gkg_path = tmp_path / "sample.tsv"
+    gkg_path.write_text("\n".join("\t".join(r) for r in rows), encoding="utf-8")
+    out_path = tmp_path / "queries.jsonl"
+
+    columns, parsed_rows = iter_gkg_rows(str(gkg_path))
+    server_items = []
+    for i, r in enumerate(parsed_rows):
+        payload, _ = build_payload(r, "gdelt-user", columns)
+        server_items.append({
+            "id": f"srv-{i}",
+            "content": payload["content"][:500],
+            "content_truncated": len(payload["content"]) > 500,
+            "content_length": len(payload["content"]),
+        })
+
+    def fake_urlopen(request, timeout=None):
+        return _FakeResponse(json.dumps({"memories": server_items, "total": len(server_items)}).encode("utf-8"))
+
+    monkeypatch.setattr(build_queries.urllib.request, "urlopen", fake_urlopen)
+
+    summary = run([
+        "--server", "http://localhost:9944", "--user-id", "gdelt-user",
+        "--gkg-input", str(gkg_path), "--output", str(out_path),
+        "--num-radius-window", "25", "--num-precedence", "15", "--num-negative", "10",
+    ])
+
+    assert "error" not in summary
+    assert summary["radius_window_requested"] == 25
+    assert summary["precedence_requested"] == 15
+    assert summary["negative_requested"] == 10
+    # This tiny 3-record single-cluster corpus can't possibly yield 25/15/10
+    # distinct results -- the shortfall must be visible, not padded.
+    assert summary["radius_window_built"] < summary["radius_window_requested"]
+    assert summary["precedence_built"] < summary["precedence_requested"]
 
 
 def test_main_exits_nonzero_on_missing_gkg_input(tmp_path, capsys):

@@ -10,6 +10,10 @@ Three query families, mechanically derived -- never from retrieval:
     the window, computed over the FULL corpus (not just the cluster).
   - precedence (default 15): "what preceded X near Y" -- gold = in-radius
     records dated strictly before X's date, within a 7-day lookback window.
+    Anchors are deduped by cluster (grid cell): once a cluster has produced
+    one precedence query, later anchors in the same cluster are skipped, so
+    a single-event-dominated corpus can't collapse most of `n` onto
+    near-identical copies of the same query.
   - negative controls (default 10): clone an existing query's text/window
     verbatim but move the geo center by >2000km (verified empty against the
     full corpus at build time); expect_empty=true.
@@ -17,6 +21,15 @@ Three query families, mechanically derived -- never from retrieval:
 Determinism: no clock, no RNG, no seeds. Cluster/anchor selection is always
 sorted by a deterministic key (the minimum member id in a cluster; a
 record's own id for precedence anchors) before taking the first N.
+
+Correlation-loss gate: gold sets and negative-control "verified empty"
+checks are computed over `matched_rows` -- the subset of the corpus that
+successfully correlated to a server-assigned id (see
+`correlate_with_server`). If more than `MAX_UNMATCHED_FRACTION` (5%) of
+usable GKG rows failed to correlate, `run()` refuses to build a query set
+at all: a gold set derived from an incomplete view of the corpus
+under-derives (inflating measured recall) and weakens the negative
+controls' empty-radius guarantee, silently, unless this is gated.
 
 Gold derivation reuses scripts/gdelt/v2locations.py and
 scripts/gdelt/ingest_gkg.py's `build_payload` -- the exact same
@@ -90,6 +103,21 @@ shift lands in another populated cluster."""
 DEFAULT_NUM_RADIUS_WINDOW = 25
 DEFAULT_NUM_PRECEDENCE = 15
 DEFAULT_NUM_NEGATIVE = 10
+
+MAX_UNMATCHED_FRACTION = 0.05
+"""Correlation-loss gate. `correlate_with_server` links each locally-parsed
+GKG row to a server-assigned memory id by content (see its docstring for
+why content is the only available key); rows that fail to correlate are
+simply absent from `matched_rows`, which is the population gold sets and
+negative-control "verified empty" checks are computed over. If too large a
+fraction of the corpus failed to correlate, gold sets are derived from an
+incomplete view of the corpus -- gold under-derives (a record that should
+be gold but didn't correlate silently inflates measured recall) and a
+negative control's empty-radius guarantee is only as good as the rows it
+could see (an out-of-radius record that failed to correlate can't be
+caught by the overlap check either). Past this threshold, `run()` refuses
+to build a query set at all rather than emit a queries.jsonl that would
+produce a misleading headline recall number."""
 
 _EARTH_RADIUS_M = 6_371_000.0
 """Must match src/memory/types.rs's GeoFilter::haversine_distance exactly
@@ -402,7 +430,14 @@ def build_radius_window_queries(
                 f"{start.isoformat()} and {end.isoformat()}?"
             ),
             "geo": {"lat": center_lat, "lon": center_lon, "radius_m": radius_m},
-            "window": {"start": start.isoformat(), "end": end.isoformat()},
+            # end_inclusive=True: gold was computed with the end bound
+            # inclusive (compute_in_radius_window_ids' default). run_eval.py
+            # reads this flag so its client-side window filter uses the SAME
+            # inclusivity as the gold it's being scored against, rather than
+            # a hardcoded assumption that could silently diverge from
+            # whichever family emitted the query (see precedence's
+            # end_inclusive=False below).
+            "window": {"start": start.isoformat(), "end": end.isoformat(), "end_inclusive": True},
             "gold_ids": gold_ids,
             "expect_empty": False,
         })
@@ -420,13 +455,29 @@ def build_precedence_queries(
     strictly before X, within a `window_days`-day lookback. Anchors whose
     resulting gold set is empty are skipped (a query with no possible
     positive answer isn't a meaningful precedence test); iteration
-    continues until `n` are built or anchors are exhausted."""
+    continues until `n` are built or anchors are exhausted.
+
+    Cluster-level dedup: once a cluster (grid cell) has produced one
+    precedence query, further anchors that fall in the SAME cluster are
+    skipped. Without this, a single-event-dominated corpus (many records
+    in one cell) would collapse most of the `n` requested queries onto
+    near-identical centroid/radius/gold, which isn't a held-out set of
+    `n` distinct tests -- it's one test copy-pasted. A cluster is only
+    marked used once a query is actually built from it (not on every
+    anchor visited), so an earlier anchor with empty gold doesn't burn the
+    cluster's slot for a later anchor in the same cell that would have
+    non-empty gold. If the corpus can't yield `n` distinct clusters, this
+    returns fewer queries -- callers (see `run()`) surface that shortfall
+    explicitly rather than padding with near-duplicates."""
     anchors_sorted = sorted(all_rows, key=lambda r: r.id)
     queries: List[dict] = []
+    used_cluster_keys: set = set()
     for anchor in anchors_sorted:
         if len(queries) >= n:
             break
         key = grid_cell(anchor.lat, anchor.lon)
+        if key in used_cluster_keys:
+            continue
         members = clusters.get(key, [anchor])
         center_lat, center_lon, radius_m = cluster_centroid_and_radius(members)
         end = anchor.created_at
@@ -436,16 +487,27 @@ def build_precedence_queries(
         )
         if not gold_ids:
             continue
+        used_cluster_keys.add(key)
         idx = len(queries) + 1
         queries.append({
             "qid": f"pr_{idx:04d}",
             "family": "precedence",
             "text": (
-                f"What preceded the event near ({anchor.lat:.4f}, {anchor.lon:.4f}) "
+                # Uses the cluster CENTROID (center_lat/center_lon), not
+                # the anchor's own raw coordinates -- the centroid is what
+                # actually gets sent as the geo filter center, so the
+                # query text must describe the location the server will
+                # actually search around.
+                f"What preceded the event near ({center_lat:.4f}, {center_lon:.4f}) "
                 f"on {anchor.created_at.isoformat()}, in the {window_days} days prior?"
             ),
             "geo": {"lat": center_lat, "lon": center_lon, "radius_m": radius_m},
-            "window": {"start": start.isoformat(), "end": end.isoformat()},
+            # end_inclusive=False: gold excludes the anchor's own instant
+            # (and any other record at exactly that timestamp) -- "preceded
+            # X" is strictly before X, not inclusive of X. run_eval.py reads
+            # this flag so its client-side window filter matches (see
+            # radius_window's end_inclusive=True above for the contrast).
+            "window": {"start": start.isoformat(), "end": end.isoformat(), "end_inclusive": False},
             "gold_ids": gold_ids,
             "expect_empty": False,
         })
@@ -593,6 +655,22 @@ def run(argv: Optional[Sequence[str]] = None) -> dict:
 
     matched_rows, corr_stats = correlate_with_server(local_rows, server_items)
 
+    unmatched_fraction = (corr_stats.unmatched / load_stats.usable) if load_stats.usable else 0.0
+    if unmatched_fraction > MAX_UNMATCHED_FRACTION:
+        return {
+            "error": (
+                f"correlation loss too high: {unmatched_fraction:.1%} of usable GKG rows "
+                f"({corr_stats.unmatched}/{load_stats.usable}) did not correlate to a "
+                f"server-assigned id, exceeding the {MAX_UNMATCHED_FRACTION:.0%} threshold "
+                "-- refusing to build a query set from a partially-correlated corpus"
+            ),
+            "correlation_unmatched_fraction": unmatched_fraction,
+            "rows_matched": corr_stats.matched,
+            "rows_unmatched": corr_stats.unmatched,
+            "ambiguous_keys": corr_stats.ambiguous_keys,
+            "gkg_rows_usable": load_stats.usable,
+        }
+
     clusters = build_clusters(matched_rows, cell_deg=args.cell_deg)
     radius_window_queries, clusters_used_size_1 = build_radius_window_queries(
         matched_rows, clusters, n=args.num_radius_window,
@@ -615,9 +693,13 @@ def run(argv: Optional[Sequence[str]] = None) -> dict:
         "server_corpus_total": corr_stats.server_total,
         "rows_matched": corr_stats.matched,
         "rows_unmatched": corr_stats.unmatched,
+        "correlation_unmatched_fraction": unmatched_fraction,
         "ambiguous_keys": corr_stats.ambiguous_keys,
+        "radius_window_requested": args.num_radius_window,
         "radius_window_built": len(radius_window_queries),
+        "precedence_requested": args.num_precedence,
         "precedence_built": len(precedence_queries),
+        "negative_requested": args.num_negative,
         "negative_built": len(negative_queries),
         "clusters_used_size_1": clusters_used_size_1,
     }

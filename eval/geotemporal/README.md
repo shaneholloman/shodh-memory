@@ -28,17 +28,25 @@ retrieval mode, not just `mode=spatial`).
 
 | Family          | Count | Gold definition |
 |------------------|------:|------------------|
-| `radius_window`  | 25    | Pick a location cluster (1°×1° grid cell, by default) + the date window spanning its members. Gold = every corpus record whose primary location is within the cluster's radius **and** whose date falls in the window — recomputed over the *full* corpus, not just the cluster (other clusters can legitimately overlap). |
-| `precedence`     | 15    | "What preceded record X near Y" — gold = in-radius records dated **strictly before** X, within a 7-day lookback window. Anchors with no possible gold are skipped. |
+| `radius_window`  | 25    | Pick a location cluster (1°×1° grid cell, by default) + the date window spanning its members. Gold = every corpus record whose primary location is within the cluster's radius **and** whose date falls in the window (end inclusive) — recomputed over the *full* corpus, not just the cluster (other clusters can legitimately overlap). |
+| `precedence`     | 15    | "What preceded record X near Y" — gold = in-radius records dated **strictly before** X (end exclusive), within a 7-day lookback window. Anchors with no possible gold are skipped. Deduped by cluster (grid cell): once a cluster has produced one precedence query, later anchors in the same cluster are skipped, so a single-event-dominated corpus can't collapse most of the 15 onto near-identical copies of the same query. |
 | `negative`       | 10    | Clone an existing query's text and window **verbatim**, but move the geo center's latitude by ≥20° (>2000km at any longitude). Verified empty against the full corpus at *build* time before being accepted — this is a real negative control, not just a labeled one. `expect_empty=true`. |
+
+Every query's `window` (when non-null) carries an explicit `end_inclusive`
+flag: `true` for `radius_window` (gold's end bound is inclusive), `false`
+for `precedence` (gold excludes the anchor's own instant). `run_eval.py`
+reads this flag rather than hardcoding one inclusivity for both families —
+see "Known limitation: window-bound inclusivity" below.
 
 All selection is deterministic: no clock, no RNG, no seeds. Clusters and
 precedence anchors are always sorted by a stable id-derived key (a
 cluster's smallest member id; a record's own id) before taking the first
 N. If the corpus doesn't have enough distinct multi-record clusters to
-fill 25 `radius_window` queries, the builder falls back to single-record
-clusters (reported as `clusters_used_size_1` in its summary) rather than
-under-filling silently.
+fill 25 `radius_window` (or 15 `precedence`) queries, the builder produces
+fewer rather than padding with near-duplicates or under-filling silently
+— compare `*_built` against `*_requested` in the builder's summary to see
+any shortfall (`clusters_used_size_1` additionally reports how many
+`radius_window` queries fell back to a degenerate single-record cluster).
 
 ## Known limitation: no server-side time filter
 
@@ -74,6 +82,39 @@ If a future PR adds `time_range_start`/`time_range_end` (or equivalent) to
 this client-side filter (and the diagnostic-limit split) should be
 retired.
 
+### Reading `recall_at_10` alongside `precision_at_10` and gold size
+
+`recall_at_10` has a hard ceiling whenever a query's gold set is larger
+than the request limit: with `|gold| = gold_count` and a fixed top-10
+request, the best any retrieval quality can achieve is
+`min(1.0, 10 / gold_count)`. A `radius_window` query over a dense cluster
+can easily have `gold_count > 10`, in which case a "perfect" system still
+reports `recall_at_10 < 1.0` — that is the metric doing its job, not a
+regression. The runner reports `gold_count_distribution` (`min`/`max`/`mean`
+`|gold_ids|` across scored positive-family queries) in the summary
+specifically so a low `recall_at_10` can be checked against whether it's
+capped by gold size before being read as a quality problem.
+
+`precision_at_10` (hits in the top 10 requested / 10, fixed denominator)
+is reported alongside recall for the same reason: it is not capped by
+`gold_count`, so it stays informative exactly where `recall_at_10`
+understates a genuinely good top-10 on a high-gold-count query.
+
+## Known limitation: window-bound inclusivity
+
+`build_queries.py`'s two positive families compute gold with different
+end-bound inclusivity: `radius_window` treats a query's `window.end` as
+inclusive (a record dated exactly at the window's end date is gold);
+`precedence` treats it as exclusive (a record dated exactly at the
+anchor's own instant is not "before" it, so it's excluded from gold).
+Rather than leaving `run_eval.py`'s client-side window filter hardcoded to
+one of those and silently disagreeing with the other family, every query
+in `queries.jsonl` carries an explicit `window.end_inclusive` boolean, and
+`evaluate_query` reads it per-query and passes it through to
+`filter_by_window`. A `queries.jsonl` written before this flag existed is
+still handled: `window.end_inclusive` defaults to `true` (matching the
+pre-existing hardcoded behavior) when absent.
+
 ## Known limitation: GKG-row → server-id correlation
 
 `/api/memories` has no way to ask "which memory id came from GKG record
@@ -91,6 +132,34 @@ id). Every row that fails to match, and every `(prefix, length)` key
 claimed by more than one distinct server id, is counted
 (`rows_unmatched`, `ambiguous_keys`) in the builder's summary rather than
 silently dropped or silently mismatched.
+
+**Correlation-loss gate:** gold sets and negative-control "verified empty"
+checks are computed only over rows that successfully correlated
+(`matched_rows`) — an unmatched row is invisible to both. If too large a
+fraction of the corpus fails to correlate, gold under-derives (a record
+that should be gold but didn't correlate silently inflates measured
+recall) and a negative control's empty-radius guarantee weakens (an
+out-of-radius record that failed to correlate can't be caught by the
+overlap check either). `build_queries.py` refuses to build a query set at
+all when `rows_unmatched / gkg_rows_usable` exceeds `MAX_UNMATCHED_FRACTION`
+(5%, a module constant): it returns `{"error": ..., "correlation_unmatched_fraction": ...}`
+and does not write `queries.jsonl` — a partially-correlated corpus must
+not produce a headline number. The fraction is also reported
+(`correlation_unmatched_fraction`) in a *successful* run's summary, so a
+below-threshold-but-nonzero loss is still visible.
+
+## `expect_empty` is the scoring source of truth, not `family`
+
+`run_eval.py`'s `evaluate_query` branches on each query's `expect_empty`
+field (not its `family` string) to decide whether it's scored as a
+negative control. `family` is still required to agree
+(`family == "negative"` iff `expect_empty` is true); if a `queries.jsonl`
+row has them disagree, `evaluate_query` raises before making any HTTP
+call, and `run()` surfaces that as a clean `{"error": ...}` rather than
+silently picking one field to trust. This only fires on a hand-edited or
+stale queries file — `build_queries.py` always emits them consistently —
+but scoring a disagreement silently either way would hide exactly the
+kind of bug this eval set exists to catch.
 
 ## Running it (requires a live server — user-gated)
 
@@ -117,18 +186,32 @@ python eval/geotemporal/run_eval.py \
   --queries eval/geotemporal/queries.jsonl
 ```
 
-`run_eval.py` exits 1 if `negative_pass_rate < 1.0` (binding requirement —
-any wrong-region leakage fails the run) or if the queries file can't be
-read. It always prints one JSON summary line:
+`run_eval.py` exits 1 if:
+- `negative_pass_rate < 1.0` (binding requirement — any wrong-region
+  leakage fails the run), **or**
+- `negative_pass_rate is None`, i.e. `queries.jsonl` contained **zero**
+  negative-control queries — a run that performed no leakage validation
+  at all is a FAILED run, not a vacuous pass, **or**
+- the queries file can't be read, or a query row is malformed
+  (`expect_empty`/`family` inconsistency; see above).
+
+`build_queries.py` additionally exits 1 (before even attempting to build
+a query set) if the correlation-loss gate trips — see "GKG-row →
+server-id correlation" above.
+
+`run_eval.py` always prints one JSON summary line:
 
 ```json
 {
   "recall_at_10": 0.0,
   "recall_at_10_diagnostic_limit50": 0.0,
+  "precision_at_10": 0.0,
+  "gold_count_distribution": {"min": 2, "max": 14, "mean": 5.4},
   "negative_pass_rate": 1.0,
+  "skipped_no_gold": 0,
   "per_family": {
-    "radius_window": {"n": 25, "recall_at_10": 0.0, "recall_at_10_diagnostic_limit50": 0.0},
-    "precedence": {"n": 15, "recall_at_10": 0.0, "recall_at_10_diagnostic_limit50": 0.0},
+    "radius_window": {"n": 25, "recall_at_10": 0.0, "recall_at_10_diagnostic_limit50": 0.0, "precision_at_10": 0.0},
+    "precedence": {"n": 15, "recall_at_10": 0.0, "recall_at_10_diagnostic_limit50": 0.0, "precision_at_10": 0.0},
     "negative": {"n": 10, "negative_pass_rate": 1.0}
   },
   "n_queries": 50
