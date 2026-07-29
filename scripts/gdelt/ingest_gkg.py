@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Ingest a GDELT GKG 2.1 CSV/TSV export into shodh-memory via POST /api/remember.
+
+Reads a GKG export (tab-delimited, as GDELT ships it, or comma-delimited, as
+BigQuery CSV exports ship it), builds one memory per row using the
+V2Locations column for geo-tagging (v2locations.primary_location), and posts
+it to a running shodh-memory server.
+
+Silent-data-loss rule: a row is only ever *skipped entirely* if it is
+genuinely empty. Any other defect (unparseable date, unparseable/missing
+coordinates, truncated column count) causes that one field to be dropped
+from the payload -- the record itself is always ingested.
+
+stdlib-only (urllib), no third-party HTTP dependency.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+
+from v2locations import GdeltLocation, parse_v2locations, primary_location
+
+# =============================================================================
+# GKG 2.1 column layout
+# =============================================================================
+# Canonical column order for the headerless daily GKG export (data.gdeltproject.org)
+# and the header names used by the BigQuery `gdelt-bq.gdeltv2.gkg` CSV export
+# (case-insensitive, matched against a candidate header row).
+_CANONICAL_COLUMNS = [
+    "gkgrecordid", "date", "sourcecollectionidentifier", "sourcecommonname",
+    "documentidentifier", "v1counts", "v2counts", "v1themes", "v2themes",
+    "v1locations", "v2locations", "v1persons", "v2persons", "v1organizations",
+    "v2organizations", "v15tone", "dates", "gcam", "sharingimage",
+    "relatedimages", "socialimageembeds", "socialvideoembeds", "quotations",
+    "allnames", "amounts", "translationinfo", "extras",
+]
+_DEFAULT_COLUMNS: Dict[str, int] = {name: i for i, name in enumerate(_CANONICAL_COLUMNS)}
+
+# Ranking mirrored from v2locations._SPECIFICITY, used here only to pick a
+# human-readable place name for the memory's content text. primary_location()
+# remains the sole source of truth for the coordinates that get POSTed.
+_SPECIFICITY = {3: 0, 4: 0, 2: 1, 5: 1, 1: 2}
+
+
+def detect_columns(header_row: Optional[Sequence[str]]) -> Dict[str, int]:
+    """Resolve column-name -> index. If `header_row` names recognizable GKG
+    columns, use those positions (BigQuery CSV export order can differ from
+    the canonical layout); otherwise fall back to the fixed GKG 2.1 layout.
+    Missing names always fall back to their canonical position so a partial
+    or unrecognized header never leaves a column unresolved."""
+    columns = dict(_DEFAULT_COLUMNS)
+    if not header_row:
+        return columns
+    found = False
+    for i, cell in enumerate(header_row):
+        key = (cell or "").strip().lower()
+        if key in _DEFAULT_COLUMNS:
+            columns[key] = i
+            found = True
+    return columns if found else dict(_DEFAULT_COLUMNS)
+
+
+def looks_like_header(row: Sequence[str]) -> bool:
+    """A GKG data row's first cell is a GKGRECORDID like '20150326000000-0';
+    a header row's first cell is the literal column name."""
+    if not row:
+        return False
+    return row[0].strip().lower() in ("gkgrecordid",)
+
+
+def _col(row: Sequence[str], columns: Dict[str, int], name: str) -> str:
+    idx = columns.get(name, _DEFAULT_COLUMNS[name])
+    return row[idx].strip() if idx < len(row) and row[idx] is not None else ""
+
+
+# =============================================================================
+# V2Locations field-shape adapter
+# =============================================================================
+def _normalize_locations_field(raw: str) -> str:
+    """v2locations.parse_v2locations() expects the legacy 7-field V1Locations
+    block shape (type#name#cc#adm1#lat#lon#featureid). The true GKG 2.1
+    V2Locations column inserts an ADM2Code before lat and appends a
+    CharOffset (type#name#cc#adm1#adm2#lat#lon#featureid#charoffset, 8-9
+    fields). Blindly parsing that with the 7-field reader would either read
+    ADM2Code as latitude (silently wrong -- ADM2 GAUL codes are often bare
+    numerics) or fail every block outright (US ADM2 like 'USMD027' isn't a
+    float). Drop ADM2Code and CharOffset per block so downstream parsing
+    always sees the 7-field shape it was built for. 7-field (already V1
+    shaped, or test fixtures) blocks pass through unchanged."""
+    out_blocks = []
+    for block in (raw or "").split(";"):
+        parts = block.split("#")
+        if len(parts) >= 8:
+            parts = parts[0:4] + parts[5:8]
+        out_blocks.append("#".join(parts))
+    return ";".join(out_blocks)
+
+
+def _best_location_name(locs: List[GdeltLocation]) -> Optional[str]:
+    if not locs:
+        return None
+    best = min(locs, key=lambda l: (_SPECIFICITY.get(l.loc_type, 3), locs.index(l)))
+    return best.name or None
+
+
+# =============================================================================
+# Date parsing
+# =============================================================================
+def parse_gkg_date(raw: str) -> Optional[str]:
+    """GKG DATE is YYYYMMDDHHMMSS (2.1) or YYYYMMDD (1.0). Returns ISO8601 UTC,
+    or None if unparseable -- never raises."""
+    raw = (raw or "").strip()
+    try:
+        if len(raw) == 14 and raw.isdigit():
+            dt = datetime(
+                int(raw[0:4]), int(raw[4:6]), int(raw[6:8]),
+                int(raw[8:10]), int(raw[10:12]), int(raw[12:14]),
+                tzinfo=timezone.utc,
+            )
+        elif len(raw) == 8 and raw.isdigit():
+            dt = datetime(int(raw[0:4]), int(raw[4:6]), int(raw[6:8]), tzinfo=timezone.utc)
+        else:
+            return None
+    except ValueError:
+        return None
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+# =============================================================================
+# Content synthesis
+# =============================================================================
+def _extract_names(field: str, limit: int = 6) -> List[str]:
+    """AllNames/V2Persons/V2Organizations share the 'name,offset;name,offset'
+    shape. Extract unique names in file order, deterministically."""
+    names: List[str] = []
+    seen = set()
+    for chunk in (field or "").split(";"):
+        name = chunk.split(",")[0].strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return names
+
+
+def build_content(row: Sequence[str], columns: Dict[str, int], locs: List[GdeltLocation]) -> str:
+    """Build embeddable memory text from the GKG row. Falls back down a
+    chain of increasingly generic descriptions so content is never empty
+    (the API requires minLength 1)."""
+    loc_name = _best_location_name(locs)
+    gkg_id = _col(row, columns, "gkgrecordid")
+
+    parts: List[str] = []
+    if loc_name:
+        parts.append(f"GDELT GKG event near {loc_name}")
+    elif gkg_id:
+        parts.append(f"GDELT GKG record {gkg_id}")
+    else:
+        parts.append("GDELT GKG event")
+
+    names = _extract_names(_col(row, columns, "allnames"))
+    if names:
+        parts.append("involving " + ", ".join(names))
+
+    source = _col(row, columns, "sourcecommonname")
+    if source:
+        parts.append(f"(source: {source})")
+
+    doc_id = _col(row, columns, "documentidentifier")
+    if doc_id:
+        parts.append(doc_id)
+
+    return " ".join(p for p in parts if p).strip() or "GDELT GKG record (no data)"
+
+
+# =============================================================================
+# Row -> payload transform
+# =============================================================================
+def build_payload(row: Sequence[str], user_id: str, columns: Optional[Dict[str, int]] = None) -> Optional[dict]:
+    """Transform one GKG row into a /api/remember payload. Returns None only
+    for a genuinely empty row -- every other defect degrades gracefully
+    (drop the one bad field, keep the record)."""
+    columns = columns or _DEFAULT_COLUMNS
+    if not row or all(not (c or "").strip() for c in row):
+        return None
+
+    locations_raw = _normalize_locations_field(_col(row, columns, "v2locations"))
+    locs = parse_v2locations(locations_raw)
+
+    content = build_content(row, columns, locs)
+    payload: dict = {
+        "user_id": user_id,
+        "content": content,
+        "tags": ["gdelt", "gkg"],
+    }
+
+    source = _col(row, columns, "sourcecommonname")
+    if source:
+        payload["tags"].append(source.lower())
+
+    coords = primary_location(locations_raw)
+    if coords is not None:
+        lat, lon = coords
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+            payload["geo_location"] = [lat, lon, 0.0]
+
+    iso_date = parse_gkg_date(_col(row, columns, "date"))
+    if iso_date:
+        payload["created_at"] = iso_date
+
+    return payload
+
+
+# =============================================================================
+# File reading (deterministic order)
+# =============================================================================
+def _detect_delimiter(sample_line: str) -> str:
+    return "\t" if "\t" in sample_line else ","
+
+
+def iter_gkg_rows(path: str) -> Tuple[Dict[str, int], Iterator[List[str]]]:
+    """Read a GKG CSV/TSV export. Returns (columns, rows) where `rows` yields
+    data rows in file order (a leading header row, if present, is consumed
+    to build `columns` and is not yielded as data)."""
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        first_line = fh.readline()
+        if not first_line:
+            return dict(_DEFAULT_COLUMNS), iter(())
+        delimiter = _detect_delimiter(first_line)
+        fh.seek(0)
+        reader = csv.reader(fh, delimiter=delimiter)
+        rows = list(reader)
+
+    if not rows:
+        return dict(_DEFAULT_COLUMNS), iter(())
+
+    if not looks_like_header(rows[0]) and any(
+        (cell or "").strip().lower() in _DEFAULT_COLUMNS for cell in rows[0]
+    ):
+        columns = detect_columns(rows[0])
+        data_rows = rows[1:]
+    elif looks_like_header(rows[0]):
+        columns = dict(_DEFAULT_COLUMNS)
+        data_rows = rows[1:]
+    else:
+        columns = dict(_DEFAULT_COLUMNS)
+        data_rows = rows
+
+    return columns, iter(data_rows)
+
+
+# =============================================================================
+# HTTP (stdlib urllib only)
+# =============================================================================
+def post_remember(server: str, payload: dict, api_key: Optional[str] = None, timeout: float = 10.0) -> dict:
+    """POST payload to {server}/api/remember. Raises urllib.error.HTTPError
+    on non-2xx (callers distinguish 409 duplicate from other failures)."""
+    url = server.rstrip("/") + "/api/remember"
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=data, method="POST", headers={"Content-Type": "application/json"}
+    )
+    if api_key:
+        request.add_header("Authorization", f"Bearer {api_key}")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read().decode("utf-8")
+        return json.loads(body) if body else {}
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--server", required=True, help="shodh-memory server base URL, e.g. http://localhost:9944")
+    parser.add_argument("--user-id", required=True, help="user_id to attribute ingested memories to")
+    parser.add_argument("--input", required=True, help="path to a GKG CSV/TSV export")
+    parser.add_argument("--limit", type=int, default=None, help="max rows to ingest (default: all)")
+    parser.add_argument("--dry-run", action="store_true", help="parse and print the summary but do not POST")
+    parser.add_argument(
+        "--api-key", default=os.environ.get("SHODH_API_KEY"),
+        help="bearer token for SHODH_API_KEYS-protected servers (default: $SHODH_API_KEY)",
+    )
+    return parser
+
+
+def run(argv: Optional[Sequence[str]] = None) -> dict:
+    args = _build_arg_parser().parse_args(argv)
+
+    columns, rows = iter_gkg_rows(args.input)
+
+    parsed = 0
+    skipped = 0
+    posted = 0
+    duplicates = 0
+    errors = 0
+    error_samples: List[dict] = []
+
+    for i, row in enumerate(rows):
+        if args.limit is not None and parsed >= args.limit:
+            break
+        payload = build_payload(row, args.user_id, columns)
+        if payload is None:
+            skipped += 1
+            continue
+        parsed += 1
+
+        if args.dry_run:
+            continue
+
+        try:
+            post_remember(args.server, payload, api_key=args.api_key)
+            posted += 1
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                duplicates += 1
+            else:
+                errors += 1
+                if len(error_samples) < 5:
+                    error_samples.append({"row": i, "status": e.code, "reason": str(e.reason)})
+        except urllib.error.URLError as e:
+            errors += 1
+            if len(error_samples) < 5:
+                error_samples.append({"row": i, "status": None, "reason": str(e.reason)})
+
+    summary = {
+        "parsed": parsed,
+        "skipped": skipped,
+        "posted": posted,
+        "duplicates": duplicates,
+        "errors": errors,
+        "dry_run": args.dry_run,
+    }
+    if error_samples:
+        summary["error_samples"] = error_samples
+    return summary
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    print(json.dumps(run(argv)))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
