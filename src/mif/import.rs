@@ -518,6 +518,7 @@ pub(crate) fn parse_relation_type(s: &str) -> RelationType {
         "alternative_to" | "alternativeto" => RelationType::AlternativeTo,
         "assigned_to" | "assignedto" => RelationType::AssignedTo,
         "approves" => RelationType::Approves,
+        "precedes" => RelationType::Precedes,
         other => RelationType::Custom(other.to_string()),
     }
 }
