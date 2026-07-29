@@ -885,6 +885,45 @@ fn test_concurrent_tier_reads() {
 // =============================================================================
 // CONSOLIDATION INTROSPECTION TESTS (SHO-28)
 // =============================================================================
+//
+// SHIPPED-SEMANTICS NOTE for the introspection tests below that used co-retrieval
+// as their event source.
+//
+// `f6b730ee` (2026-07-10) flipped `SHODH_COACT_STRENGTHEN_ONLY` to default-ON
+// ("strengthen-not-create"): `GraphMemory::record_memory_coactivation` only
+// STRENGTHENS a memory-to-memory edge that already exists between a co-active
+// pair, it no longer mints a `CoRetrieved` edge per co-retrieved pair (that
+// un-gated all-pairs minting was ~80% of all graph edges and the recall-time
+// OOM driver). The mint branch is the only writer of the `mem_edge:` pair index
+// the strengthen branch reads, so with minting off the lookup always misses and
+// `record_memory_coactivation` returns 0 for freshly stored memories.
+//
+// The introspection consequence: the recall path only records
+// `ConsolidationEvent::EdgeStrengthened` when that call returns `> 0`
+// (src/memory/mod.rs:5210-5228). Under the shipped default it never does, so
+// recall produces no association events, `formed_associations` and
+// `strengthened_associations` stay empty, and — because these scenarios happen
+// to produce no `MemoryStrengthened` events either — recall alone leaves the
+// event buffer empty. This is the current, intentional contract; a
+// remove-vs-revive decision on the memory-to-memory coactivation layer is
+// PENDING, so these tests pin CURRENT behavior and pre-empt nothing.
+//
+// The both-modes coactivation contract is pinned by the unit tests in
+// src/graph_memory.rs (`coactivation_strengthen_only_creates_no_new_edges`,
+// `coactivation_strengthen_only_still_strengthens_existing`,
+// `coactivation_strengthen_only_actually_increments_activation_and_strength`,
+// plus the three `coactivation_*_survives_graph_reopen` durability tests).
+// Those reach the mint path by PARAMETER (`record_memory_coactivation_impl`);
+// integration tests only have the `SHODH_COACT_STRENGTHEN_ONLY` env var, and
+// `std::env::set_var` is process-global — it would corrupt sibling tests
+// running concurrently in this binary, so it is deliberately not used here.
+//
+// Tests below whose real subject is the EVENT BUFFER API rather than
+// coactivation now source their events from `run_maintenance`, which emits
+// `ConsolidationEvent::MaintenanceCycleCompleted` into the same buffer
+// (src/memory/mod.rs:9132 -> `record_consolidation_event` -> the buffer read by
+// `get_all_consolidation_events`). That keeps their assertions real instead of
+// degenerating into "the buffer is empty", which would pass forever.
 
 use chrono::{Duration, TimeZone, Utc};
 use shodh_memory::memory::{ConsolidationEvent, Query};
@@ -933,14 +972,42 @@ fn test_consolidation_report_after_retrieval() {
     // Get report (epoch = all time)
     let report = system.get_consolidation_report(epoch(), None);
 
-    // Should have strengthening events recorded
-    // Note: strengthening only occurs when importance actually changes
-    // which happens after 5+ accesses
+    // Association events: none. Both of these memories are fresh, so there is
+    // no pre-existing memory-to-memory edge for the recall-path coactivation to
+    // strengthen, and minting is off by default (see the module note above).
     assert!(
-        !report.strengthened_memories.is_empty()
-            || !report.formed_associations.is_empty()
-            || !report.strengthened_associations.is_empty(),
-        "Expected at least one strengthening or association event"
+        report.formed_associations.is_empty(),
+        "strengthen-only default (f6b730ee, 2026-07-10) forms no associations \
+         on recall: {} formed",
+        report.formed_associations.len()
+    );
+    assert!(
+        report.strengthened_associations.is_empty(),
+        "strengthen-only default strengthens no memory-to-memory associations \
+         for pairs with no prior edge: {} strengthened",
+        report.strengthened_associations.len()
+    );
+
+    // `strengthened_memories` is deliberately NOT pinned to a count here: it is
+    // driven by `update_access_count_instrumented`, which only emits when
+    // importance actually moves (multiplicative `boost_importance`, gated on
+    // access_count > 5) — an independent axis from the coactivation gate. What
+    // IS pinned is that the report stays internally consistent whichever way
+    // that goes: the statistics counters must match the vectors they summarize.
+    assert_eq!(
+        report.statistics.memories_strengthened,
+        report.strengthened_memories.len(),
+        "memories_strengthened stat must match its vector"
+    );
+    assert_eq!(
+        report.statistics.edges_formed,
+        report.formed_associations.len(),
+        "edges_formed stat must match its vector"
+    );
+    assert_eq!(
+        report.statistics.edges_strengthened,
+        report.strengthened_associations.len(),
+        "edges_strengthened stat must match its vector"
     );
 }
 
@@ -1000,11 +1067,30 @@ fn test_consolidation_report_hebbian_learning() {
     // Get report
     let report = system.get_consolidation_report(epoch(), None);
 
-    // Should have edge formation events from Hebbian learning
-    // Note: edges form when 2+ memories are retrieved together
+    // Before 2026-07-10, retrieving 2+ memories together minted an edge per
+    // pair and this asserted the resulting formation events existed. Under the
+    // shipped strengthen-only default (see the module note above) recall-time
+    // Hebbian learning is inert for memories with no prior edge between them:
+    // `record_memory_coactivation` returns 0, so src/memory/mod.rs:5210 never
+    // reaches its `EdgeStrengthened` emit, and no association event of any kind
+    // is recorded. Pinned positively so a future revive of the layer will trip
+    // this test rather than silently passing.
     assert!(
-        !report.formed_associations.is_empty() || !report.strengthened_associations.is_empty(),
-        "Expected Hebbian edge formation/strengthening events"
+        report.formed_associations.is_empty(),
+        "shipped strengthen-only default must record zero edge-formation \
+         events on recall: {}",
+        report.formed_associations.len()
+    );
+    assert!(
+        report.strengthened_associations.is_empty(),
+        "shipped strengthen-only default must record zero edge-strengthening \
+         events for co-retrieved memories with no prior edge: {}",
+        report.strengthened_associations.len()
+    );
+    assert_eq!(
+        report.statistics.edges_formed + report.statistics.edges_strengthened,
+        0,
+        "the association statistics counters must agree with the empty vectors"
     );
 }
 
@@ -1051,7 +1137,13 @@ fn test_consolidation_report_time_filtering() {
 fn test_consolidation_event_buffer_clear() {
     let (system, _temp) = setup_memory_system();
 
-    // Generate some events (need 2+ memories for coactivation)
+    // This test's subject is the buffer's clear() semantics, not coactivation.
+    // It used to source its events from co-retrieval, which is inert under the
+    // shipped strengthen-only default (see the module note) — leaving
+    // `before=0, after=0` and making the clear assertion untestable. Events are
+    // now sourced from `run_maintenance`, which emits
+    // `MaintenanceCycleCompleted` into the same buffer, so "clear actually
+    // clears a NON-EMPTY buffer" is genuinely exercised.
     system
         .remember(
             create_experience("Buffer clear test with important data"),
@@ -1071,9 +1163,17 @@ fn test_consolidation_event_buffer_clear() {
     for _ in 0..7 {
         let _ = system.recall(&query);
     }
+    for _ in 0..3 {
+        system.run_maintenance(0.95, "test-user", false).unwrap();
+    }
 
     // Count events before clear
     let events_before = system.get_all_consolidation_events().len();
+    assert!(
+        events_before > 0,
+        "the buffer must be non-empty before the clear, otherwise this test is \
+         vacuous: {events_before}"
+    );
 
     // Clear the buffer
     system.clear_consolidation_events();
@@ -1081,7 +1181,6 @@ fn test_consolidation_event_buffer_clear() {
     // Count events after clear
     let events_after = system.get_all_consolidation_events().len();
 
-    // Second count should be zero or fewer
     assert!(
         events_after < events_before,
         "Events should be cleared: before={}, after={}",
@@ -1089,6 +1188,11 @@ fn test_consolidation_event_buffer_clear() {
         events_after
     );
     assert_eq!(events_after, 0, "Events should be completely cleared");
+    assert_eq!(
+        system.consolidation_event_count(),
+        0,
+        "the count accessor must agree with the emptied event list"
+    );
 }
 
 #[test]
@@ -1256,6 +1360,10 @@ fn test_consolidation_events_list() {
         };
         let _ = system.recall(&query);
     }
+    // Recall alone records nothing under the shipped strengthen-only default
+    // (see the module note), so the event source for this buffer-API test is
+    // maintenance, which emits `MaintenanceCycleCompleted` into the same buffer.
+    system.run_maintenance(0.95, "test-user", false).unwrap();
 
     // Get all events directly
     let events = system.get_all_consolidation_events();
@@ -1264,6 +1372,11 @@ fn test_consolidation_events_list() {
     assert!(
         !events.is_empty(),
         "Expected some consolidation events to be recorded"
+    );
+    assert_eq!(
+        events.len(),
+        system.consolidation_event_count(),
+        "get_all_consolidation_events() and consolidation_event_count() must agree"
     );
 
     // Verify each event has a valid timestamp
@@ -1335,11 +1448,23 @@ fn test_consolidation_event_count() {
         };
         let _ = system.recall(&query);
     }
+    // Recall alone records nothing under the shipped strengthen-only default
+    // (see the module note); maintenance is the event source that makes the
+    // "count increases" contract testable. Two cycles, so the counter is shown
+    // to accumulate rather than merely become non-zero once.
+    system.run_maintenance(0.95, "test-user", false).unwrap();
+    let after_one_cycle = system.consolidation_event_count();
+    system.run_maintenance(0.95, "test-user", false).unwrap();
 
     // Should have more events now
     let final_count = system.consolidation_event_count();
     assert!(
-        final_count > initial_count,
-        "Event count should increase after operations"
+        after_one_cycle > initial_count,
+        "Event count should increase after operations: {initial_count} -> {after_one_cycle}"
+    );
+    assert!(
+        final_count > after_one_cycle,
+        "Event count should keep accumulating across cycles: \
+         {after_one_cycle} -> {final_count}"
     );
 }
