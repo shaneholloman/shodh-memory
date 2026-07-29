@@ -3631,6 +3631,7 @@ mod geo_filter_builder_tests {
             .is_some());
         assert!(build_geo_filter(None, None, None).unwrap().is_none());
         assert!(build_geo_filter(Some(39.0), None, None).is_err()); // partial → 400
-        assert!(build_geo_filter(Some(999.0), Some(-76.0), Some(1000.0)).is_err()); // invalid lat
+        assert!(build_geo_filter(Some(999.0), Some(-76.0), Some(1000.0)).is_err());
+        // invalid lat
     }
 }

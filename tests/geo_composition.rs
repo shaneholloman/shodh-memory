@@ -49,7 +49,10 @@ fn advanced_search_finds_geo_memory_synchronously() {
         })
         .expect("advanced_search should succeed");
 
-    let texts: Vec<&str> = found.iter().map(|m| m.experience.content.as_str()).collect();
+    let texts: Vec<&str> = found
+        .iter()
+        .map(|m| m.experience.content.as_str())
+        .collect();
     assert!(
         texts.iter().any(|t| t.contains("harbor patrol")),
         "advanced_search(ByLocation) did not find the geo-tagged memory: {texts:?}"
@@ -314,11 +317,7 @@ fn spatial_mode_still_filters_sorts_and_limits() {
         "middle site",
         Some([base_lat + 0.01, base_lon, 0.0]),
     ); // ~1.1km
-    store_with_geo(
-        &system,
-        "far site",
-        Some([base_lat + 0.02, base_lon, 0.0]),
-    ); // ~2.2km
+    store_with_geo(&system, "far site", Some([base_lat + 0.02, base_lon, 0.0])); // ~2.2km
     store_with_geo(&system, "outside site", Some([51.5074, -0.1278, 0.0])); // London — far outside radius
 
     let query = Query::builder()
@@ -433,7 +432,10 @@ fn soft_forgotten_memory_does_not_consume_geo_cap_slot() {
         })
         .expect("advanced_search should succeed");
 
-    let texts: Vec<&str> = found.iter().map(|m| m.experience.content.as_str()).collect();
+    let texts: Vec<&str> = found
+        .iter()
+        .map(|m| m.experience.content.as_str())
+        .collect();
 
     assert!(
         !texts.iter().any(|t| t.contains("will be forgotten")),

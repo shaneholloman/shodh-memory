@@ -4293,7 +4293,10 @@ impl MemorySystem {
                     });
                 }
                 if injected > 0 {
-                    tracing::debug!("Layer 4.46: injected {} geo candidates at floor score", injected);
+                    tracing::debug!(
+                        "Layer 4.46: injected {} geo candidates at floor score",
+                        injected
+                    );
                 }
             }
 
