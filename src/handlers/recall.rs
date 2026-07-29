@@ -42,6 +42,28 @@ use crate::validation;
 /// Application state type alias
 pub type AppState = std::sync::Arc<MultiUserMemoryManager>;
 
+/// Validate and build a `GeoFilter` from the `geo_lat`/`geo_lon`/`geo_radius_meters` triple
+/// shared by `recall` and `paginated_recall`. All three must be provided together, or none —
+/// a partial triple is a 400 `InvalidInput`, not a silent no-op.
+pub(crate) fn build_geo_filter(
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+) -> Result<Option<GeoFilter>, AppError> {
+    match (lat, lon, radius) {
+        (Some(lat), Some(lon), Some(radius)) => {
+            validation::validate_geo_filter(lat, lon, radius).map_validation_err("geo_filter")?;
+            Ok(Some(GeoFilter::new(lat, lon, radius)))
+        }
+        (None, None, None) => Ok(None),
+        _ => Err(AppError::InvalidInput {
+            field: "geo_filter".to_string(),
+            reason: "geo_lat, geo_lon, and geo_radius_meters must all be provided together"
+                .to_string(),
+        }),
+    }
+}
+
 /// Map API mode string to RetrievalMode enum.
 /// Defaults to Hybrid for unknown values (backward compat).
 fn parse_retrieval_mode(mode: &str) -> RetrievalMode {
@@ -389,20 +411,7 @@ pub async fn recall(
     }
 
     // Validate and build geo_filter from lat/lon/radius triple
-    let geo_filter = match (req.geo_lat, req.geo_lon, req.geo_radius_meters) {
-        (Some(lat), Some(lon), Some(radius)) => {
-            validation::validate_geo_filter(lat, lon, radius).map_validation_err("geo_filter")?;
-            Some(GeoFilter::new(lat, lon, radius))
-        }
-        (None, None, None) => None,
-        _ => {
-            return Err(AppError::InvalidInput {
-                field: "geo_filter".to_string(),
-                reason: "geo_lat, geo_lon, and geo_radius_meters must all be provided together"
-                    .to_string(),
-            });
-        }
-    };
+    let geo_filter = build_geo_filter(req.geo_lat, req.geo_lon, req.geo_radius_meters)?;
 
     // Build reward range from min/max pair
     let reward_range = match (req.reward_min, req.reward_max) {
@@ -3462,20 +3471,26 @@ pub async fn paginated_recall(
     let retrieval_mode = parse_retrieval_mode(&req.mode);
 
     // Validate and build geo_filter
-    let geo_filter = match (req.geo_lat, req.geo_lon, req.geo_radius_meters) {
-        (Some(lat), Some(lon), Some(radius)) => {
-            validation::validate_geo_filter(lat, lon, radius).map_validation_err("geo_filter")?;
-            Some(GeoFilter::new(lat, lon, radius))
-        }
-        (None, None, None) => None,
-        _ => {
+    let geo_filter = build_geo_filter(req.geo_lat, req.geo_lon, req.geo_radius_meters)?;
+
+    // Pre-flight validation for robotics retrieval modes.
+    // Catch missing required parameters here (400) instead of deep in the retrieval
+    // engine where errors get wrapped as INTERNAL_ERROR (500). Mirrors `recall`'s guard.
+    match retrieval_mode {
+        RetrievalMode::Spatial if geo_filter.is_none() => {
             return Err(AppError::InvalidInput {
                 field: "geo_filter".to_string(),
-                reason: "geo_lat, geo_lon, and geo_radius_meters must all be provided together"
-                    .to_string(),
+                reason: "spatial mode requires geo_lat, geo_lon, and geo_radius_meters".to_string(),
             });
         }
-    };
+        RetrievalMode::Mission if req.mission_id.is_none() => {
+            return Err(AppError::InvalidInput {
+                field: "mission_id".to_string(),
+                reason: "mission mode requires mission_id parameter".to_string(),
+            });
+        }
+        _ => {}
+    }
 
     let reward_range = match (req.reward_min, req.reward_max) {
         (Some(min), Some(max)) => Some((min, max)),
@@ -3602,5 +3617,21 @@ mod layer_mode_parsing_tests {
         assert_eq!(parse_layer_mode("Full"), None); // case-sensitive on purpose
         assert_eq!(parse_layer_mode("+SPREADING"), None);
         assert_eq!(parse_layer_mode(""), None);
+    }
+}
+
+#[cfg(test)]
+mod geo_filter_builder_tests {
+    use super::build_geo_filter;
+
+    #[test]
+    fn build_geo_filter_all_or_none() {
+        assert!(build_geo_filter(Some(39.0), Some(-76.0), Some(1000.0))
+            .unwrap()
+            .is_some());
+        assert!(build_geo_filter(None, None, None).unwrap().is_none());
+        assert!(build_geo_filter(Some(39.0), None, None).is_err()); // partial → 400
+        assert!(build_geo_filter(Some(999.0), Some(-76.0), Some(1000.0)).is_err());
+        // invalid lat
     }
 }

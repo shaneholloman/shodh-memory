@@ -1998,8 +1998,9 @@ impl MemoryStorage {
                 lat,
                 lon,
                 radius_meters,
+                limit,
             } => {
-                memory_ids = self.search_by_location(lat, lon, radius_meters)?;
+                memory_ids = self.search_by_location(lat, lon, radius_meters, limit)?;
             }
             SearchCriteria::ByActionType(action_type) => {
                 memory_ids = self.search_by_action_type(&action_type)?;
@@ -2329,16 +2330,28 @@ impl MemoryStorage {
     ///
     /// Performance: O(k) where k = memories in ~9 geohash cells covering the radius
     /// Previous approach was O(n) where n = all geo-indexed memories
+    ///
+    /// `limit`, if `Some`, bounds the number of ids returned to the nearest
+    /// `limit` by geohash-decoded APPROXIMATE distance (cell-center at
+    /// geohash precision 10 is within ~1m of the true position — plenty
+    /// accurate for this sort/cap; nothing here is hydrated). Capping must
+    /// happen here, before the caller's `search()` hydrates (get + full
+    /// deserialize) every returned id — capping after hydration doesn't
+    /// bound the hydration cost, which is the expensive part. `None`
+    /// preserves the historical uncapped, geohash-scan-order behavior.
     fn search_by_location(
         &self,
         center_lat: f64,
         center_lon: f64,
         radius_meters: f64,
+        limit: Option<usize>,
     ) -> Result<Vec<MemoryId>> {
         use super::types::{geohash_decode, geohash_search_prefixes, GeoFilter};
 
         let geo_filter = GeoFilter::new(center_lat, center_lon, radius_meters);
-        let mut ids = Vec::new();
+        // (id, approx_distance_meters) — distance kept so we can sort
+        // nearest-first before capping, without hydrating anything.
+        let mut candidates: Vec<(MemoryId, f64)> = Vec::new();
 
         // Get geohash prefixes for center + neighbors at appropriate precision
         let prefixes = geohash_search_prefixes(center_lat, center_lon, radius_meters);
@@ -2368,18 +2381,26 @@ impl MemoryStorage {
                     let (min_lat, min_lon, max_lat, max_lon) = geohash_decode(geohash);
                     let approx_lat = (min_lat + max_lat) / 2.0;
                     let approx_lon = (min_lon + max_lon) / 2.0;
+                    let approx_distance = geo_filter.haversine_distance(approx_lat, approx_lon);
 
                     // Final haversine check for edge cases at cell boundaries
-                    if geo_filter.contains(approx_lat, approx_lon) {
+                    if approx_distance <= radius_meters {
                         if let Ok(uuid) = uuid::Uuid::parse_str(parts[2]) {
-                            ids.push(MemoryId(uuid));
+                            candidates.push((MemoryId(uuid), approx_distance));
                         }
                     }
                 }
             }
         }
 
-        Ok(ids)
+        // Nearest-first, MemoryId tie-break (never raw geohash scan order,
+        // which is a RocksDB iteration artifact, not a meaningful ordering).
+        candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if let Some(n) = limit {
+            candidates.truncate(n);
+        }
+
+        Ok(candidates.into_iter().map(|(id, _)| id).collect())
     }
 
     /// Search memories by action type
@@ -2649,10 +2670,40 @@ impl MemoryStorage {
     /// Mark memories as forgotten (soft delete) with atomic batch write.
     /// Returns the IDs of memories that were flagged, so callers can clean up
     /// secondary indices (vector, BM25, graph).
+    ///
+    /// Also deletes each flagged memory's `geo:` index entry, if it has one,
+    /// in the SAME batch as the flag update (review finding, geotemporal Task
+    /// 2 round 4): the scan already has the full `Memory` in hand, so this
+    /// costs no extra RocksDB read/deserialize, and riding in the existing
+    /// per-sweep `WriteBatch` costs no extra fsync — a sweep flagging N
+    /// memories still does exactly one `write_opt`, not N. (Round 3 instead
+    /// added a `remove_geo_index(&self, id)` function, called per id in the
+    /// caller's loop over `flagged_ids` — that re-fetched and
+    /// re-deserialized each memory via `self.get(id)`, even though the
+    /// scan right here already had it, and issued its own
+    /// WriteBatch+write_opt per id, so under `WriteMode::Sync` a single
+    /// `OlderThan`/`LowImportance` sweep could cost up to N fsync'd writes.
+    /// `remove_geo_index` has been removed — this function's own batch is
+    /// the only place the geo key needs deleting, since nothing else in
+    /// this codebase soft-forgets memories one at a time; hard-delete
+    /// (`ForgetCriteria::ById`, `delete()`/`remove_from_indices`) already
+    /// handles geo cleanup for the single-id case.)
+    ///
+    /// NOTE on restoration (still true, carried over from the round-3 doc
+    /// comment this replaces): there is no un-forget/restore path anywhere
+    /// in this codebase for ANY secondary index — grepped for
+    /// restore/recover/unforget across src/; nothing reverses
+    /// `mark_forgotten_by_*`, and the `"forgotten"` metadata flag is only
+    /// ever set to `"true"`, never cleared. Vector, BM25, and graph cleanup
+    /// on soft-forget are therefore already one-way, unrestorable
+    /// operations; deleting the geo index entry here matches that existing
+    /// precedent rather than inventing a new (and currently unsupported)
+    /// restoration contract for geo alone.
     pub fn mark_forgotten_by_age(&self, cutoff: DateTime<Utc>) -> Result<Vec<MemoryId>> {
         let mut batch = rocksdb::WriteBatch::default();
         let mut flagged_ids = Vec::new();
         let now = Utc::now().to_rfc3339();
+        let idx = self.index_cf();
 
         let iter = self.db.iterator(IteratorMode::Start);
         for (key, value) in iter.flatten() {
@@ -2665,6 +2716,11 @@ impl MemoryStorage {
                 }
                 if memory.created_at < cutoff {
                     flagged_ids.push(memory.id.clone());
+                    if let Some(geo) = memory.experience.geo_location {
+                        let geohash = super::types::geohash_encode(geo[0], geo[1], 10);
+                        let geo_key = format!("geo:{}:{}", geohash, memory.id.0);
+                        batch.delete_cf(idx, geo_key.as_bytes());
+                    }
                     memory
                         .experience
                         .metadata
@@ -2692,10 +2748,16 @@ impl MemoryStorage {
     /// Mark memories with low importance as forgotten with atomic batch write.
     /// Returns the IDs of memories that were flagged, so callers can clean up
     /// secondary indices (vector, BM25, graph).
+    ///
+    /// Also deletes each flagged memory's `geo:` index entry, if it has one,
+    /// in the same batch as the flag update — see `mark_forgotten_by_age`'s
+    /// doc comment for the full rationale (one sweep, one write, no
+    /// redundant re-fetch; this mirrors it exactly).
     pub fn mark_forgotten_by_importance(&self, threshold: f32) -> Result<Vec<MemoryId>> {
         let mut batch = rocksdb::WriteBatch::default();
         let mut flagged_ids = Vec::new();
         let now = Utc::now().to_rfc3339();
+        let idx = self.index_cf();
 
         let iter = self.db.iterator(IteratorMode::Start);
         for (key, value) in iter.flatten() {
@@ -2708,6 +2770,11 @@ impl MemoryStorage {
                 }
                 if memory.importance() < threshold {
                     flagged_ids.push(memory.id.clone());
+                    if let Some(geo) = memory.experience.geo_location {
+                        let geohash = super::types::geohash_encode(geo[0], geo[1], 10);
+                        let geo_key = format!("geo:{}:{}", geohash, memory.id.0);
+                        batch.delete_cf(idx, geo_key.as_bytes());
+                    }
                     memory
                         .experience
                         .metadata
@@ -3145,6 +3212,15 @@ pub enum SearchCriteria {
         lat: f64,
         lon: f64,
         radius_meters: f64,
+        /// Optional cap on the number of matching ids returned, nearest-first
+        /// by geohash-decoded approximate distance (tie-break MemoryId).
+        /// Bounding happens INSIDE `search_by_location`, before any
+        /// hydration — capping post-hydration is too late, since hydration
+        /// (get + deserialize) is the expensive part. `None` preserves the
+        /// historical uncapped behavior (used by robotics `spatial_search`,
+        /// which already re-sorts/re-filters/truncates the fully hydrated
+        /// result itself).
+        limit: Option<usize>,
     },
     /// Filter by action type
     ByActionType(String),

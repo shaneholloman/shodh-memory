@@ -9078,6 +9078,260 @@ mod tests {
         assert_eq!(origins[0].0, a);
     }
 
+    // ------------------------------------------------------------------
+    // record_memory_coactivation_impl: strengthen-only contract (2026-07-10,
+    // f6b730ee). The both-modes contract (mint on strengthen_only=false;
+    // strengthen-not-mint on strengthen_only=true given a prior edge; mint
+    // nothing on strengthen_only=true given no prior edge) is already
+    // pinned by the pre-existing `coactivation_strengthen_only_creates_no_new_edges`
+    // and `coactivation_strengthen_only_still_strengthens_existing` tests
+    // above/below in this module. Neither of those, however, verifies that
+    // "strengthen" actually mutates the edge — only that the impl's return
+    // count matches. That gap is what the test below fills. Together, these
+    // three are the mode-contract holder that
+    // tests/brutal_stress_tests.rs::test_brutal_dense_graph now points back
+    // to instead of asserting a specific pair count itself.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn coactivation_strengthen_only_actually_increments_activation_and_strength() {
+        // Complements `coactivation_strengthen_only_still_strengthens_existing`,
+        // which only checks the impl's returned count (3). This test checks
+        // the actual edge mutation: activation_count increments and strength
+        // increases (Hebbian `RelationshipEdge::strengthen()`), and that
+        // relationship_count does NOT grow across the strengthen-only pass
+        // (no edge minted on top of the seeded ones).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect(); // 3 pairs
+
+        // Seed pre-existing edges via strengthen_only=false (the only way to
+        // populate the `mem_edge:` index `find_edge_between_entities` reads —
+        // see the diagnosis's "Flagged finding": nothing else writes it).
+        let minted = graph.record_memory_coactivation_impl(&ids, false).unwrap();
+        assert_eq!(minted, 3, "seed step should mint all 3 pairs");
+        let seeded_count = graph.get_stats().unwrap().relationship_count;
+        assert_eq!(seeded_count, 3);
+
+        let (a, b) = (ids[0], ids[1]);
+        let before = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must exist after seeding");
+        assert_eq!(before.activation_count, 1);
+
+        // Re-run co-activation for the same pairs under the DEFAULT gate.
+        let strengthened = graph.record_memory_coactivation_impl(&ids, true).unwrap();
+
+        assert_eq!(
+            strengthened, 3,
+            "all 3 pre-existing edges should be strengthened, none skipped"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            seeded_count,
+            "strengthen_only=true must NOT mint any new edge on top of the seeded ones"
+        );
+
+        let after = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must still exist");
+        assert_eq!(
+            after.activation_count, 2,
+            "the pre-existing edge must be strengthened (activation_count incremented)"
+        );
+        assert!(
+            after.strength > before.strength,
+            "Hebbian strengthening must increase edge strength: before={}, after={}",
+            before.strength,
+            after.strength
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Memory-to-memory coactivation DURABILITY contract.
+    //
+    // These three tests hold the intent that
+    // tests/hebbian_learning_tests.rs::test_hebbian_graph_persists_across_restart,
+    // ::test_hebbian_edge_strength_persists and ::test_ltp_persists_across_restart
+    // used to hold. Those integration tests reached the durability question
+    // only THROUGH minting: they called `reinforce_recall` to create
+    // CoRetrieved edges, then restarted the `MemorySystem` and asserted the
+    // edges were still there. Since `f6b730ee` (2026-07-10) flipped
+    // `SHODH_COACT_STRENGTHEN_ONLY` to default-ON, `record_memory_coactivation`
+    // no longer mints memory-to-memory edges, so those tests' setup produces
+    // an empty graph and the restart assertions became unreachable — pinning
+    // them at zero on both sides would have silently deleted three
+    // persistence tests. The durability question is real and independent of
+    // the gate, so it is tested here instead, where
+    // `record_memory_coactivation_impl(&ids, false)` is reachable by
+    // parameter (no env var, no process-global state, hermetic under
+    // parallel test execution — nothing outside the mint branch writes the
+    // `mem_edge:` pair index these edges are found through, so `tests/` has
+    // no public seeding API).
+    //
+    // A remove-vs-revive decision on the memory-to-memory coactivation layer
+    // is PENDING. These tests deliberately pin durability only; they say
+    // nothing about whether the layer should mint by default. If the layer is
+    // revived, the integration tests can point back at minting; if it is
+    // removed, these go with it.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn coactivation_edges_survive_graph_reopen() {
+        // Durability half of `test_hebbian_graph_persists_across_restart`:
+        // memory-to-memory CoRetrieved edges written by coactivation are
+        // durable across a close/reopen of the same RocksDB path, and remain
+        // reachable through the `mem_edge:` pair index (not merely present in
+        // the relationships CF).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        let (a, b) = (ids[0], ids[1]);
+
+        let edge_uuid;
+        let relationship_count_before;
+        {
+            let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+            let minted = graph.record_memory_coactivation_impl(&ids, false).unwrap();
+            assert_eq!(minted, 3, "C(3,2) = 3 pairs should be minted");
+            relationship_count_before = graph.get_stats().unwrap().relationship_count;
+            assert_eq!(relationship_count_before, 3);
+            edge_uuid = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must exist after minting")
+                .uuid;
+        }
+        // Graph dropped — simulates a process restart on the same store.
+
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            relationship_count_before,
+            "coactivation edges must survive a reopen of the same store"
+        );
+        let reopened = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("the mem_edge: pair index must survive the reopen too");
+        assert_eq!(
+            reopened.uuid, edge_uuid,
+            "the reopened edge must be the same edge, not a re-mint"
+        );
+        assert_eq!(reopened.relation_type, RelationType::CoRetrieved);
+    }
+
+    #[test]
+    fn coactivation_edge_strength_survives_graph_reopen() {
+        // Durability half of `test_hebbian_edge_strength_persists`: repeated
+        // co-activation raises Hebbian edge strength, and the RAISED value —
+        // not the initial tier weight — is what comes back after a reopen.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        let (a, b) = (ids[0], ids[1]);
+
+        let strength_before;
+        let activation_count_before;
+        {
+            let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+            // Mint once, then strengthen 9 more times through the shipped
+            // default path (strengthen_only=true) — the edge now exists, so
+            // the default gate reinforces it rather than skipping it.
+            graph.record_memory_coactivation_impl(&ids, false).unwrap();
+            let initial = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must exist after minting")
+                .strength;
+            for _ in 0..9 {
+                graph.record_memory_coactivation_impl(&ids, true).unwrap();
+            }
+            let edge = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must still exist");
+            strength_before = edge.strength;
+            activation_count_before = edge.activation_count;
+            assert!(
+                strength_before > initial,
+                "10 co-activations must raise strength above the initial tier weight: \
+                 initial={initial}, after={strength_before}"
+            );
+            assert_eq!(activation_count_before, 10);
+        }
+
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let edge = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must exist after reopen");
+        assert!(
+            (edge.strength - strength_before).abs() < 1e-6,
+            "edge strength must persist exactly across reopen: before={}, after={}",
+            strength_before,
+            edge.strength
+        );
+        assert_eq!(
+            edge.activation_count, activation_count_before,
+            "activation_count must persist across reopen"
+        );
+    }
+
+    #[test]
+    fn coactivation_ltp_status_survives_graph_reopen() {
+        // Durability half of `test_ltp_persists_across_restart`: whatever LTP
+        // state many co-activations produced is the state that comes back.
+        // Asserted as an equality against the pre-restart value rather than
+        // against a hard-coded LtpStatus, because promotion depends on
+        // `detect_ltp_status` thresholds (activation timestamps are only
+        // recorded for L2+ edges; a freshly minted CoRetrieved edge is
+        // L1Working) — this test pins DURABILITY, not the promotion rule.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        let (a, b) = (ids[0], ids[1]);
+
+        let ltp_before;
+        let strength_before;
+        {
+            let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+            graph.record_memory_coactivation_impl(&ids, false).unwrap();
+            for _ in 0..14 {
+                graph.record_memory_coactivation_impl(&ids, true).unwrap();
+            }
+            let edge = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must exist");
+            ltp_before = edge.ltp_status;
+            strength_before = edge.strength;
+            assert_eq!(edge.activation_count, 15);
+            assert!(
+                strength_before > 0.8,
+                "15 co-activations must drive strength high: {strength_before}"
+            );
+        }
+
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let edge = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must exist after reopen");
+        assert_eq!(
+            edge.ltp_status.priority(),
+            ltp_before.priority(),
+            "LTP status must persist across reopen: before={:?}, after={:?}",
+            ltp_before,
+            edge.ltp_status
+        );
+        assert!(
+            (edge.strength - strength_before).abs() < 1e-6,
+            "potentiated strength must persist across reopen: before={}, after={}",
+            strength_before,
+            edge.strength
+        );
+    }
+
     #[test]
     fn typed_neighbors_respects_relation_and_direction() {
         let temp_dir = tempfile::tempdir().unwrap();
