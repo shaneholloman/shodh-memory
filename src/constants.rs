@@ -1255,6 +1255,79 @@ pub const TEMPORAL_MATCH_BOOST_MONTH: f32 = 0.1;
 /// but gives temporal-range memories a meaningful advantage.
 pub const TEMPORAL_PREFILTER_BOOST: f32 = 0.15;
 
+/// Floor score for geo-prefetched candidates injected into the fused pool.
+/// Injection is additive-only: ids already in the pool keep their semantic score
+/// (entry().or_insert), so this can never displace or re-rank semantic candidates
+/// under the DEFAULT fusion mode (SHODH_FUSION_FLAT, calibrated-max magnitude
+/// scoring — real candidates enter at their full leg weight, e.g. up to
+/// graph_w/semantic_w, comfortably above 0.05).
+///
+/// CAVEAT (review finding): under the legacy `SHODH_FUSION_RRF` escape-hatch
+/// mode, scores are rank-reciprocal — `weight / (RRF_K_GRAPH_FUSION + rank)`
+/// with `RRF_K_GRAPH_FUSION = 30.0` — so even a rank-1 real candidate can score
+/// as low as `~0.6 / 31 ≈ 0.019`, which is BELOW 0.05. In that mode a
+/// floor-injected candidate can outrank a genuine top semantic result, i.e.
+/// "enters at the bottom of the ranking" is only true under the default
+/// (non-RRF) fusion mode, not universally. This is a pre-existing property of
+/// choosing a fixed floor against a mode-dependent score scale, not something
+/// this feature can fully close without reading the active fusion mode at
+/// injection time; documented here so it isn't rediscovered as a bug later.
+///
+/// The fusion pipeline truncates `res` to `query.max_results` BEFORE the hard
+/// geo predicate runs (predicate lives in the per-candidate hydration loop, via
+/// `matches_filters`/`Query::matches`); a floor-scored, bottom-ranked candidate
+/// would otherwise be cut on rank alone and never reach that predicate. The
+/// truncation length is extended to the deepest-ranked geo-injected id's
+/// actual position in the sorted list (see "GEO INJECTION SURVIVAL" at the
+/// `res.truncate` call site) — not merely by the count of injected ids past
+/// the window, since real candidates can occupy positions between the window
+/// edge and an injected id's true rank. This lets injected candidates always
+/// reach the predicate — which is what actually decides whether they survive
+/// — without displacing or re-ranking any real candidate ranked above them
+/// (again, under the default fusion mode; see the RRF-mode caveat above).
+pub const GEO_INJECT_FLOOR: f32 = 0.05;
+
+/// Multiplier applied to `query.max_results` to bound the number of geo
+/// prefetch candidates Layer 0.45 considers, mirroring Layer 3's
+/// `vector_top_k = query.max_results * 3` pattern.
+///
+/// FIX HISTORY (review findings on this task — record so the mechanism isn't
+/// re-broken by a future edit): the cap must be enforced INSIDE
+/// `search_by_location` (storage.rs), passed down via
+/// `SearchCriteria::ByLocation { limit: Some(query.max_results *
+/// MAX_GEO_PREFETCH_CANDIDATES), .. }`, and applied to `MemoryId`s BEFORE
+/// `LongTermMemory::search()`'s shared hydration loop (get + full
+/// deserialize per id) ever runs. Capping in Layer 0.45 itself (on the
+/// already-`Vec<Memory>` result of `advanced_search`) is too late — by then
+/// every in-radius id has already been hydrated, so cost still scales with
+/// corpus density inside the radius, not with `max_results`, regardless of
+/// what happens to the returned `Vec<Memory>` afterward. `search_by_location`
+/// selects the nearest `limit` candidates by geohash-decoded APPROXIMATE
+/// distance (cell-center at geohash precision 10 is within ~1m of the true
+/// position — accurate enough to select on without hydrating anything),
+/// tie-broken by MemoryId, never by raw geohash scan order (a RocksDB
+/// iteration artifact, not a meaningful ordering).
+///
+/// Round-3 correction: Layer 0.45 does NOT re-sort the capped result by exact
+/// coordinates. An earlier version of this comment (and of the code) claimed
+/// it did, "to correct cell-center imprecision" — that re-sort fed a
+/// `.take(cap)` call that got moved into `search_by_location` in round 2,
+/// leaving the re-sort as dead code (it sorted a `Vec<Memory>` that was
+/// immediately consumed by `.collect::<HashSet<MemoryId>>()`, which is
+/// unordered — the sort had zero observable effect). It was deleted rather
+/// than fixed, because in-cap ORDER is irrelevant: what matters is set
+/// MEMBERSHIP (which ids made the cap), not order, and that's decided
+/// entirely, and correctly, by `search_by_location`'s approximate-distance
+/// selection. `3` matches the vector leg's multiplier so a geo query gets
+/// the same proportional headroom as a semantic query.
+///
+/// `SearchCriteria::ByLocation.limit` is `None` everywhere except Layer
+/// 0.45's call — in particular `spatial_search` (retrieval.rs,
+/// `RetrievalMode::Spatial`) passes `None` deliberately, since it already
+/// hydrates the full in-radius set and does its own filter/sort/truncate
+/// (API-compat: that mode's existing behavior must not change).
+pub const MAX_GEO_PREFETCH_CANDIDATES: usize = 3;
+
 /// Minimum confidence for temporal prefix injection into query embeddings
 ///
 /// Only inject a temporal context prefix (e.g., "[March 2026]") into the query
