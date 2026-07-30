@@ -370,6 +370,7 @@ pub struct RecallByDateRequest {
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query))]
 pub async fn recall(
     State(state): State<AppState>,
+    trace: Option<axum::Extension<crate::handlers::trace::OpTrace>>,
     Json(req): Json<RecallRequest>,
 ) -> Result<Json<RecallResponse>, AppError> {
     let op_start = std::time::Instant::now();
@@ -1114,6 +1115,18 @@ pub async fn recall(
                 avg_score,
             },
         );
+    }
+
+    // Trace enrichment (witnessed-op capture): identity + the evidence set —
+    // which memories this recall actually surfaced. The middleware owns the
+    // rest of the record.
+    if let Some(axum::Extension(trace)) = &trace {
+        trace.set_identity(&req.user_id, req.session_id.as_deref());
+        trace.push_evidence(recall_memories.iter().map(|m| m.id.clone()));
+        trace.set_summary(format!(
+            "query: {}",
+            req.query.chars().take(200).collect::<String>()
+        ));
     }
 
     // Build reminder count for response
@@ -3462,6 +3475,7 @@ pub struct PaginatedRecallResponse {
 /// Useful for large memory stores where results need to be paged through.
 pub async fn paginated_recall(
     State(state): State<AppState>,
+    trace: Option<axum::Extension<crate::handlers::trace::OpTrace>>,
     Json(req): Json<RecallRequest>,
 ) -> Result<Json<PaginatedRecallResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
@@ -3564,6 +3578,16 @@ pub async fn paginated_recall(
             }
         })
         .collect();
+
+    // Trace enrichment (witnessed-op capture): identity + surfaced page ids.
+    if let Some(axum::Extension(trace)) = &trace {
+        trace.set_identity(&req.user_id, req.session_id.as_deref());
+        trace.push_evidence(memories.iter().map(|m| m.id.clone()));
+        trace.set_summary(format!(
+            "query: {}",
+            req.query.chars().take(200).collect::<String>()
+        ));
+    }
 
     Ok(Json(PaginatedRecallResponse {
         memories,

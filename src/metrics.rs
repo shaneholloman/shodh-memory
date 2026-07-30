@@ -74,6 +74,18 @@ pub static HTTP_REQUESTS_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("HTTP_REQUESTS_TOTAL metric must be valid at compile time")
 });
 
+/// Trace-capture failures: oplog append errors, uncached-user drops, and
+/// unnamed identity-less routes (traceability slice 1). No user_id/session_id
+/// labels — cardinality rule below. A nonzero rate here means session traces
+/// are incomplete; the affected sessions are flagged `integrity: incomplete`.
+pub static TRACE_CAPTURE_FAILURES_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new(
+        "shodh_trace_capture_failures_total",
+        "Trace capture failures (dropped or failed oplog appends)",
+    )
+    .expect("TRACE_CAPTURE_FAILURES_TOTAL metric must be valid at compile time")
+});
+
 // ============================================================================
 // Memory Operation Metrics
 // NOTE: No user_id in labels to prevent cardinality explosion
@@ -684,6 +696,7 @@ fn do_register_metrics() -> Result<(), MetricsError> {
     // Request metrics
     register!(HTTP_REQUEST_DURATION, "HTTP_REQUEST_DURATION");
     register!(HTTP_REQUESTS_TOTAL, "HTTP_REQUESTS_TOTAL");
+    register!(TRACE_CAPTURE_FAILURES_TOTAL, "TRACE_CAPTURE_FAILURES_TOTAL");
 
     // Memory operation metrics
     register!(MEMORY_STORE_TOTAL, "MEMORY_STORE_TOTAL");

@@ -276,3 +276,133 @@ fn reported_attestation_round_trips() {
     assert_eq!(sealed.source.as_deref(), Some("claude-code-hook"));
     assert!(oplog::verify_chain(&read_back, "s1", "alice").is_ok());
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Task 3: end-to-end witnessed-op capture through the protected router
+// (middleware inserts OpTrace → handlers enrich → middleware appends).
+// build_protected_routes is used directly WITHOUT the auth layer: capture
+// mounts inside that function (audit amendment 9), so this exercises the
+// exact production wiring while keeping the test self-contained.
+// ═══════════════════════════════════════════════════════════════════════
+
+mod capture_e2e {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use shodh_memory::config::ServerConfig;
+    use shodh_memory::handlers::{build_protected_routes, MultiUserMemoryManager};
+    use shodh_memory::memory::oplog::{self, ATTESTATION_WITNESSED};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    fn post_json(path: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request builds")
+    }
+
+    #[tokio::test]
+    async fn remember_then_recall_are_witnessed_with_evidence() {
+        let dir = TempDir::new().expect("temp dir");
+        let cfg = ServerConfig {
+            storage_path: dir.path().to_path_buf(),
+            ..ServerConfig::default()
+        };
+        let mgr = Arc::new(
+            MultiUserMemoryManager::new(dir.path().to_path_buf(), cfg)
+                .expect("create MultiUserMemoryManager"),
+        );
+        let app = build_protected_routes(mgr.clone());
+        let user = "trace-e2e";
+
+        // 1) remember (no session_id field exists on RememberRequest → the
+        //    middleware's session-store fallback covers it).
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/remember",
+                json!({"user_id": user, "content": "trace e2e: the harbor crane moved at dawn"}),
+            ))
+            .await
+            .expect("remember request");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let remember_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let stored_id = remember_json["id"]
+            .as_str()
+            .expect("id in response")
+            .to_string();
+
+        // 2) recall WITH an explicit session id. /api/recall parses session_id
+        //    as a UUID (src/handlers/recall.rs:475) and 400s otherwise, so the
+        //    fixture uses a fixed UUID literal — fixed, not random, to keep the
+        //    test deterministic. No such session exists in the session store,
+        //    so get_session_time_range returns None and recall stays in its
+        //    default mode; the id still reaches the oplog verbatim.
+        let recall_session = "3f2b7c14-9d5e-4a61-8b02-6e7d1c4f9a83";
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                "/api/recall",
+                json!({"user_id": user, "query": "harbor crane", "session_id": recall_session}),
+            ))
+            .await
+            .expect("recall request");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 3) Inspect the oplog via the cache-only accessor (never creates).
+        let system = mgr
+            .cached_user_memory(user)
+            .expect("user must be cached after its own ops");
+        let guard = system.read();
+        let storage = guard.storage();
+
+        // recall's record: explicit session, witnessed, evidence ⊆ stored ids.
+        let recall_records = storage
+            .oplog_read(recall_session, 0, 10)
+            .expect("read recall session");
+        assert_eq!(
+            recall_records.len(),
+            1,
+            "exactly one op in the recall session"
+        );
+        let r = &recall_records[0];
+        assert_eq!(r.op, "recall");
+        assert_eq!(r.attestation, ATTESTATION_WITNESSED);
+        assert_eq!(r.user_id, user);
+        assert_eq!(r.outcome, "ok");
+        assert!(
+            !r.evidence_refs.is_empty(),
+            "recall must carry surfaced memory ids as evidence"
+        );
+        assert!(
+            r.evidence_refs.contains(&stored_id),
+            "recall evidence {:?} must include the stored id {stored_id}",
+            r.evidence_refs
+        );
+        assert!(oplog::verify_chain(&recall_records, recall_session, user).is_ok());
+
+        // remember's record: lives in the session-store fallback session.
+        let sessions = storage.oplog_sessions(10, 0).expect("session list");
+        let fallback: Vec<_> = sessions.iter().filter(|s| *s != recall_session).collect();
+        assert_eq!(
+            fallback.len(),
+            1,
+            "exactly one fallback session for the remember op, got {sessions:?}"
+        );
+        let remember_records = storage
+            .oplog_read(fallback[0], 0, 10)
+            .expect("read fallback");
+        assert_eq!(remember_records.len(), 1);
+        let m = &remember_records[0];
+        assert_eq!(m.op, "remember");
+        assert_eq!(m.attestation, ATTESTATION_WITNESSED);
+        assert_eq!(m.evidence_refs, vec![stored_id.clone()]);
+        assert!(oplog::verify_chain(&remember_records, fallback[0], user).is_ok());
+    }
+}

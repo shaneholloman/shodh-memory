@@ -398,6 +398,7 @@ pub fn build_rich_context(
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
 pub async fn remember(
     State(state): State<AppState>,
+    trace: Option<axum::Extension<crate::handlers::trace::OpTrace>>,
     Json(req): Json<RememberRequest>,
 ) -> Result<Json<RememberResponse>, AppError> {
     let op_start = std::time::Instant::now();
@@ -869,6 +870,14 @@ pub async fn remember(
         });
     }
 
+    // Trace enrichment (witnessed-op capture): the stored memory id is this
+    // op's evidence. RememberRequest carries no session_id — the middleware's
+    // session-store fallback covers it (same store this handler already uses).
+    if let Some(axum::Extension(trace)) = &trace {
+        trace.set_identity(&req.user_id, None);
+        trace.push_evidence([response_id.clone()]);
+    }
+
     Ok(Json(RememberResponse {
         id: response_id,
         success: true,
@@ -879,6 +888,7 @@ pub async fn remember(
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id, batch_size = req.memories.len()))]
 pub async fn batch_remember(
     State(state): State<AppState>,
+    trace: Option<axum::Extension<crate::handlers::trace::OpTrace>>,
     Json(req): Json<BatchRememberRequest>,
 ) -> Result<Json<BatchRememberResponse>, AppError> {
     let op_start = std::time::Instant::now();
@@ -1092,6 +1102,13 @@ pub async fn batch_remember(
         metrics::MEMORY_STORE_TOTAL
             .with_label_values(&["error"])
             .inc();
+    }
+
+    // Trace enrichment (witnessed-op capture): all created ids are evidence.
+    if let Some(axum::Extension(trace)) = &trace {
+        trace.set_identity(&req.user_id, None);
+        trace.push_evidence(memory_ids.iter().cloned());
+        trace.set_summary(format!("batch: {created} created, {failed} failed"));
     }
 
     Ok(Json(BatchRememberResponse {
