@@ -248,10 +248,12 @@ pub struct GraphDataStats {
 /// `front/` (the `shodh-front` crate) now owns, and they had drifted apart —
 /// `/dashboard` was ~773 lines behind the canonical page and lacked the
 /// identity selector and multi-user union-merge entirely, while `/graph/view`
-/// predated the current graph API and still called the retired
-/// `/api/graph/data/{user}` + `/api/events/sse` pair. Keeping three copies of
-/// one UI in sync cost real commits (e.g. a colour-map change that had to touch
-/// two files), so the forks are retired rather than forked again.
+/// predated the current graph API and still read the older
+/// `/api/graph/data/{user}` + `/api/events/sse` pair rather than
+/// `/api/graph/{user}/universe` + `/api/events` (both older endpoints remain
+/// mounted and are unaffected by this change). Keeping three copies of one UI in
+/// sync cost real commits (e.g. a colour-map change that had to touch two
+/// files), so the forks are retired rather than forked again.
 ///
 /// This page is deliberately **static**: it interpolates nothing from the
 /// request, so — unlike the HTML it replaces, which had to escape `user_id`
