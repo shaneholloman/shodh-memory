@@ -123,6 +123,38 @@ pub struct OpRecord {
     pub hash: String,
 }
 
+/// Caller-supplied fields for a new [`OpRecord`], i.e. every field except the
+/// three the storage layer computes at append time under the per-session
+/// head lock: `seq`, `prev_hash`, and `hash`.
+///
+/// See `MemoryStorage::oplog_append` (`memory/storage.rs`), which turns a
+/// draft into a sealed, chained `OpRecord` and persists it in `CF_OPLOG`.
+#[derive(Debug, Clone)]
+pub struct OpRecordDraft {
+    /// Engine arrival time (server clock) — authoritative ordering source.
+    pub ts: chrono::DateTime<chrono::Utc>,
+    /// Session this record belongs to. Must pass `validate_session_id`
+    /// (rejects `:`, which would otherwise break the `op:{session_id}:`
+    /// prefix scan) — enforced by `oplog_append`, not by this type.
+    pub session_id: String,
+    /// Acting agent identity, as asserted by the request (see [`OpRecord::user_id`]).
+    pub user_id: String,
+    /// Operation name, e.g. `"recall"`, `"remember"`, `"report:file_edit"`.
+    pub op: String,
+    /// [`ATTESTATION_WITNESSED`] or [`ATTESTATION_REPORTED`]. Never blended.
+    pub attestation: String,
+    /// Bounded request summary — build it with [`bound_payload_summary`].
+    pub payload_summary: String,
+    /// Memory ids touched (returned by a recall, stored by a write).
+    pub evidence_refs: Vec<String>,
+    /// `"ok"` or `"error:<status>"`.
+    pub outcome: String,
+    /// Reporter's own clock, preserved alongside `ts`. Reported records only.
+    pub reported_ts: Option<chrono::DateTime<chrono::Utc>>,
+    /// Reporter identifier (e.g. `"claude-code-hook"`). Reported records only.
+    pub source: Option<String>,
+}
+
 /// Why chain verification failed, and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainError {

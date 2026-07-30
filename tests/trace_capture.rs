@@ -1,0 +1,208 @@
+//! Integration tests for Task 2 of the agent-traceability slice-1 plan:
+//! `CF_OPLOG` storage — append, read, integrity flag (audit
+//! `docs/superpowers/audits/2026-07-30-traceability-slice1-audit.md`).
+//!
+//! Storage lives under `std::env::temp_dir()` via `tempfile::TempDir`, NOT
+//! under any OneDrive-watched path — mirrors `tests/geo_composition.rs`'s
+//! temp-dir setup (see the BM25 onedrive finding for why).
+//!
+//! `MemoryStorage` is constructed directly (it is `pub`, and
+//! `MemoryStorage::new` is a `pub fn`) rather than through `MemorySystem`:
+//! the oplog interface (`oplog_append`/`oplog_read`/...) lives on
+//! `MemoryStorage` itself, so testing at that layer avoids pulling in the
+//! full memory system (embedder, retriever, etc.) for a storage-only test.
+
+use chrono::{TimeZone, Utc};
+use shodh_memory::memory::oplog::{
+    self, OpRecordDraft, ATTESTATION_REPORTED, ATTESTATION_WITNESSED,
+};
+use shodh_memory::memory::storage::MemoryStorage;
+use tempfile::TempDir;
+
+/// Fixed epoch second so test data (and any failure output) is reproducible.
+fn fixed_ts(offset_secs: i64) -> chrono::DateTime<chrono::Utc> {
+    Utc.timestamp_opt(1_785_412_800 + offset_secs, 0)
+        .single()
+        .expect("fixed test timestamp must be valid")
+}
+
+fn draft(session_id: &str, user_id: &str, op: &str, offset_secs: i64) -> OpRecordDraft {
+    OpRecordDraft {
+        ts: fixed_ts(offset_secs),
+        session_id: session_id.to_string(),
+        user_id: user_id.to_string(),
+        op: op.to_string(),
+        attestation: ATTESTATION_WITNESSED.to_string(),
+        payload_summary: format!("payload for {op}"),
+        evidence_refs: vec![format!("mem-{offset_secs}")],
+        outcome: "ok".to_string(),
+        reported_ts: None,
+        source: None,
+    }
+}
+
+fn setup_storage() -> (MemoryStorage, TempDir) {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let storage = MemoryStorage::new(temp_dir.path(), None).expect("Failed to create storage");
+    (storage, temp_dir)
+}
+
+#[test]
+fn append_read_roundtrip_and_chain() {
+    let (storage, _temp) = setup_storage();
+
+    let r0 = storage
+        .oplog_append(draft("s1", "alice", "recall", 0))
+        .expect("append 0 should succeed");
+    let r1 = storage
+        .oplog_append(draft("s1", "alice", "remember", 1))
+        .expect("append 1 should succeed");
+    let r2 = storage
+        .oplog_append(draft("s1", "alice", "recall", 2))
+        .expect("append 2 should succeed");
+
+    assert_eq!(r0.seq, 0);
+    assert_eq!(r1.seq, 1);
+    assert_eq!(r2.seq, 2);
+    assert_eq!(r0.prev_hash, oplog::genesis_hash("s1", "alice"));
+    assert_eq!(r1.prev_hash, r0.hash);
+    assert_eq!(r2.prev_hash, r1.hash);
+
+    let read_back = storage
+        .oplog_read("s1", 0, 10)
+        .expect("read should succeed");
+    assert_eq!(read_back, vec![r0, r1, r2]);
+    assert!(oplog::verify_chain(&read_back, "s1", "alice").is_ok());
+}
+
+#[test]
+fn sessions_isolated() {
+    let (storage, _temp) = setup_storage();
+
+    // Interleave appends to two different sessions.
+    let a0 = storage
+        .oplog_append(draft("session-a", "alice", "recall", 0))
+        .expect("append a0");
+    let b0 = storage
+        .oplog_append(draft("session-b", "bob", "remember", 1))
+        .expect("append b0");
+    let a1 = storage
+        .oplog_append(draft("session-a", "alice", "remember", 2))
+        .expect("append a1");
+    let b1 = storage
+        .oplog_append(draft("session-b", "bob", "recall", 3))
+        .expect("append b1");
+
+    let reads_a = storage
+        .oplog_read("session-a", 0, 100)
+        .expect("read session-a");
+    let reads_b = storage
+        .oplog_read("session-b", 0, 100)
+        .expect("read session-b");
+
+    assert_eq!(reads_a, vec![a0, a1]);
+    assert_eq!(reads_b, vec![b0, b1]);
+
+    // No cross-session bleed: each session's records carry only its own
+    // session_id/user_id.
+    assert!(reads_a
+        .iter()
+        .all(|r| r.session_id == "session-a" && r.user_id == "alice"));
+    assert!(reads_b
+        .iter()
+        .all(|r| r.session_id == "session-b" && r.user_id == "bob"));
+
+    // Each chain verifies independently against its own header.
+    assert!(oplog::verify_chain(&reads_a, "session-a", "alice").is_ok());
+    assert!(oplog::verify_chain(&reads_b, "session-b", "bob").is_ok());
+
+    // Distinct session listing surfaces both, newest-first by head write time.
+    let sessions = storage.oplog_sessions(10, 0).expect("oplog_sessions");
+    assert_eq!(
+        sessions,
+        vec!["session-b".to_string(), "session-a".to_string()]
+    );
+}
+
+#[test]
+fn incomplete_flag_roundtrip() {
+    let (storage, _temp) = setup_storage();
+
+    let r0 = storage
+        .oplog_append(draft("s1", "alice", "recall", 0))
+        .expect("append should succeed");
+
+    assert!(
+        !storage.oplog_is_incomplete("s1").expect("is_incomplete"),
+        "flag must be unset before marking"
+    );
+
+    storage
+        .oplog_mark_incomplete("s1")
+        .expect("mark_incomplete should succeed");
+
+    assert!(
+        storage.oplog_is_incomplete("s1").expect("is_incomplete"),
+        "flag must be set after marking"
+    );
+
+    // Marking incomplete must NEVER touch records: re-read equals pre-mark bytes.
+    let reread = storage.oplog_read("s1", 0, 10).expect("re-read");
+    assert_eq!(reread, vec![r0]);
+}
+
+#[test]
+fn oplog_survives_reopen() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    let (r0, r1) = {
+        let storage = MemoryStorage::new(temp_dir.path(), None).expect("Failed to create storage");
+        let r0 = storage
+            .oplog_append(draft("s1", "alice", "recall", 0))
+            .expect("append 0");
+        let r1 = storage
+            .oplog_append(draft("s1", "alice", "remember", 1))
+            .expect("append 1");
+        (r0, r1)
+        // storage dropped here
+    };
+
+    let reopened = MemoryStorage::new(temp_dir.path(), None).expect("Failed to reopen storage");
+    let read_back = reopened.oplog_read("s1", 0, 10).expect("read after reopen");
+
+    assert_eq!(read_back, vec![r0, r1]);
+    assert!(oplog::verify_chain(&read_back, "s1", "alice").is_ok());
+}
+
+#[test]
+fn invalid_session_id_is_rejected() {
+    let (storage, _temp) = setup_storage();
+
+    // A colon would bleed op:{session}: prefix scans across sessions (audit
+    // Finding F) — the storage layer must reject it outright, not merely
+    // rely on verify_chain's identity check as a backstop.
+    let bad = draft("has:colon", "alice", "recall", 0);
+    assert!(storage.oplog_append(bad).is_err());
+
+    assert!(storage.oplog_read("has:colon", 0, 10).is_err());
+    assert!(storage.oplog_mark_incomplete("has:colon").is_err());
+    assert!(storage.oplog_is_incomplete("has:colon").is_err());
+}
+
+#[test]
+fn reported_attestation_round_trips() {
+    let (storage, _temp) = setup_storage();
+
+    let mut d = draft("s1", "alice", "report:file_edit", 0);
+    d.attestation = ATTESTATION_REPORTED.to_string();
+    d.reported_ts = Some(fixed_ts(7));
+    d.source = Some("claude-code-hook".to_string());
+
+    let sealed = storage.oplog_append(d).expect("append reported record");
+    let read_back = storage.oplog_read("s1", 0, 10).expect("read back");
+
+    assert_eq!(read_back, vec![sealed.clone()]);
+    assert_eq!(sealed.attestation, ATTESTATION_REPORTED);
+    assert_eq!(sealed.source.as_deref(), Some("claude-code-hook"));
+    assert!(oplog::verify_chain(&read_back, "s1", "alice").is_ok());
+}

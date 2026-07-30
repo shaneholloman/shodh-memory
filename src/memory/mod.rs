@@ -7230,6 +7230,19 @@ impl MemorySystem {
         self.long_term_memory.db()
     }
 
+    /// Access the typed storage layer (oplog, advanced search, etc.).
+    ///
+    /// `long_term_memory` has no accessor otherwise (audit
+    /// `2026-07-30-traceability-slice1-audit.md` Finding G) — callers that
+    /// need `MemoryStorage::oplog_*` (e.g. the trace-capture middleware)
+    /// must go through here, NOT through [`Self::get_db`]: raw-CF writes via
+    /// the bare `Arc<DB>` bypass the oplog's append-only contract (session
+    /// head cache, hash chaining, session_id validation), which is exactly
+    /// what this feature exists to prevent.
+    pub fn storage(&self) -> &Arc<MemoryStorage> {
+        &self.long_term_memory
+    }
+
     /// Advanced search using storage criteria
     pub fn advanced_search(&self, criteria: storage::SearchCriteria) -> Result<Vec<Memory>> {
         self.long_term_memory.search(criteria)
