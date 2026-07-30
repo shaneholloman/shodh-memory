@@ -23,7 +23,7 @@
   CDN d3 for convenience; vendor locally for an air-gapped build.
 -->
 <script src="/assets/d3.v7.min.js"></script>
-<script>window.__SHODH_API_BASE__="http://127.0.0.1:3031";window.__SHODH_API_KEY__="sk-shodh-demo-key";</script>
+<script>window.__SHODH_API_BASE__="";window.__SHODH_API_KEY__="sk-shodh-demo-key";</script>
 <style>
 :root{
   /* SIGINT console tokens: void/slate surfaces, phosphor primary, signal orange */
@@ -457,6 +457,14 @@ const API_KEY  = window.__SHODH_API_KEY__  || "";
 const H = API_KEY ? {"X-API-Key":API_KEY} : {};
 const POST_H = Object.assign({"Content-Type":"application/json"}, H);
 
+// ── graph hygiene: GDELT extraction leaves machine junk (theme codes, article
+//    ids, numbers, hash/timestamp fragments) as entity nodes. CLEAN_GRAPH drops
+//    them client-side before rendering so the constellation reads as real
+//    entities. Default ON (honest); window.setCleanGraph(false) shows the raw
+//    extraction for comparison.
+let CLEAN_GRAPH = true;
+let RAW_DROPPED = 0;   // count of junk nodes filtered on the last load
+
 // Node-type palette: desaturated, dark-tuned, and deliberately COOL —
 // the warm/orange band is reserved for ACTIVITY (recalls, anomalies,
 // active paths). A node may only turn warm by DOING something.
@@ -529,6 +537,38 @@ const CLUSTER_HUES = ["#7f9cc4","#6fae8f","#a08cc8","#c9b280","#6f93b8","#8fb3ae
 // entity becomes a single bridge linking the users' subgraphs).
 function nameKey(s){ return (s||"").trim().toLowerCase().replace(/\s+/g," "); }
 
+// ── junk-entity predicate: TRUE for extraction debris that should never render
+//    as a graph node. Targets GDELT/CrisisLex/World-Bank theme codes, article
+//    ids, timestamp/hash fragments, and bare numbers — WITHOUT touching real
+//    proper nouns, typed entities, or meaningful phrases. Validated against the
+//    live gdelt-bridge corpus (2,449 entities → 1,918 real / 531 junk).
+function isJunkEntity(name, entity_type, salience, mention_count){
+  const n=(name||"").trim();
+  if(n.length<3) return true;                                // too short to be an entity
+  const low=n.toLowerCase();
+  if(/^[-+]?[\d.,%\s]+$/.test(n)) return true;               // pure (signed) number / decimal
+  if(/^[\s]*[-+]?\d*\.\d+/.test(n)) return true;             // leading decimal e.g. 0.4207…MSM
+  if(/\d{6,}/.test(n)) return true;                          // 6+ digit run: timestamps / article ids / gdelt ids
+  // GDELT GKG / CrisisLex / World-Bank theme taxonomy codes (title-cased or raw)
+  if(/^wb[\s_]*\d/i.test(n)) return true;                    // "Wb 135 Transport", "WB_1803"
+  if(/^crisislex\b/i.test(low)) return true;                 // "Crisislex T03 Dead"
+  if(/^(tax[\s_]?fncact|epu[\s_]|uspec[\s_]|wordcount\b|soc[\s_]us|econ[\s_](worldcur|stockm|bagging)|env[\s_](coal|water|forest)|ungp[\s_]|leader[\s_]?taxid)/i.test(low)) return true;
+  if(/^(tax_|epu_|wb_|crisislex_|uspec_|soc_|econ_|env_|ge_|med_|world_|ungp_)/i.test(n)) return true;   // raw ALLCAPS_UNDERSCORE theme
+  if(/^[A-Z0-9_]{6,}$/.test(n) && /[0-9_]/.test(n)) return true;                                          // ALLCAPS code token TAX_FNCACT / B2518882 / 5D2JZ...
+  const toks=n.split(/\s+/);
+  if(toks.filter(t=>/^[0-9a-f]{4,}$/i.test(t) && /\d/.test(t)).length>=2) return true;                    // 2+ hex/uuid fragment tokens
+  if(toks.length===1 && /^[0-9a-f]{4,}$/i.test(n) && /\d/.test(n) && /[a-f]/i.test(n)) return true;       // single hex uuid fragment 24bb / A22d
+  const lastT=toks[toks.length-1];
+  if(toks.length>=2 && /^(rcna|cp|cj|nzn|rc|b|n|p|x|gr)?\d*[a-z]*\d[a-z0-9]*$/i.test(lastT) && /\d/.test(lastT) && /[a-z]/i.test(lastT) && lastT.length>=5) return true;  // trailing article/ship id (…Ship B2519909)
+  if(toks.length>=2 && /^[a-z]?\d+[a-z0-9]*$/i.test(lastT) && lastT.length>=5) return true;               // trailing numeric-id token
+  if(toks.length===1 && n.length>=6 && /([a-z]\d|\d[a-z])/i.test(n) && !/-/.test(n)) return true;         // single gibberish code (Nzn6wtdmb, P5ffw9)
+  if(/^article\b/i.test(low) && (/\d/.test(n) || toks.length>=3)) return true;                            // "Article <id/hash…>"
+  if(/^[a-z0-9.-]+\.(com|org|net|gov|edu|io|co|news|tv)\b/i.test(n) && toks.length===1) return true;      // bare domain (abc11.com)
+  return false;
+}
+window.setCleanGraph = v => { CLEAN_GRAPH=!!v; if(typeof loadGraph==="function") loadGraph(); };
+window.isJunkEntity = isJunkEntity;
+
 // ── UNION-MERGE several users' universes into one star/connection set ─────────
 //    Nodes are merged by normalized name; each merged node records the set of
 //    contributing users (.users). Edges are remapped to the canonical (by-name)
@@ -593,6 +633,24 @@ async function loadGraph(){
       stars=merged.stars; conns=merged.connections;
       sharedNote = " · "+merged.shared+" shared entities bridge the group";
     }
+    // ── CLEAN_GRAPH: drop extraction junk (GDELT theme codes, article/ship ids,
+    //    numbers, hash/timestamp fragments) and every now-dangling edge, BEFORE
+    //    the edge budget + clustering, so real entities own the layout budget.
+    let junkNote="";
+    RAW_DROPPED=0;
+    if(CLEAN_GRAPH){
+      const rawN=stars.length;
+      const kept=stars.filter(s=>!isJunkEntity(s.name,s.entity_type,s.salience,s.mention_count));
+      if(kept.length && kept.length<rawN){
+        const keepIds=new Set(kept.map(s=>s.id));
+        const rawE=conns.length;
+        stars=kept;
+        conns=conns.filter(c=>keepIds.has(c.from_id)&&keepIds.has(c.to_id));
+        RAW_DROPPED=rawN-kept.length;
+        junkNote=" · "+RAW_DROPPED+" junk filtered";
+        console.info("[CLEAN_GRAPH] entities "+rawN+" → "+kept.length+" ("+RAW_DROPPED+" junk dropped) · edges "+rawE+" → "+conns.length);
+      }
+    }
     // EDGE BUDGET (information density at scale): a real ingest produces
     // hundreds of edges per memory; a 100GB corpus produces millions. The
     // browser must never attempt to cluster them all — keep the STRONGEST
@@ -619,7 +677,7 @@ async function loadGraph(){
     RAW.group = sel.length>1; RAW.selUsers = sel;
     if(!RAW.N){ $("gloading").textContent="no graph yet for "+(sel.length>1?"this group":"this user"); clearCanvas(); $("g-meta").textContent="0 entities"; $("gnav").style.display="none"; return; }
     clusterRaw(RAW);
-    $("g-meta").textContent = RAW.N+" entities · "+fmt(RAW.E)+" edges · "+RAW.clusters.length+" clusters"+edgeNote+sharedNote;
+    $("g-meta").textContent = RAW.N+" entities · "+fmt(RAW.E)+" edges · "+RAW.clusters.length+" clusters"+edgeNote+sharedNote+junkNote;
     showClusters();
   }catch(e){
     $("gloading").style.display="grid"; $("gloading").textContent = "graph load failed: "+e.message;
@@ -1794,12 +1852,25 @@ $("idadd").addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault
 async function loadUserList(){
   try{
     const arr = await api("/api/users",{headers:H});
-    if(Array.isArray(arr) && arr.length){
-      // keep current selection + any seed names, then merge in the live list
-      const merged = Array.from(new Set([...SELECTED, ...arr])).sort();
-      ALL_USERS = merged;
-      renderIdMenu();
+    if(!Array.isArray(arr) || !arr.length) return;
+    ALL_USERS = arr.slice().sort();
+    // Adopt the user with the MOST memories so the app opens on real data.
+    // (First-alphabetical is wrong: the seed 'defence-live' exists but is empty,
+    // so the prior "not among live users" test never switched off it.) Query each
+    // user's stats and pick the largest corpus; only switch if it differs.
+    let best=null, bestN=-1;
+    await Promise.all(arr.map(async u=>{
+      try{
+        const st = await api("/api/users/"+encodeURIComponent(u)+"/stats",{headers:H});
+        const n = (st && (st.total_memories || st.long_term_memory_count || st.graph_nodes)) || 0;
+        if(n>bestN){ bestN=n; best=u; }
+      }catch(_){ /* a user with no stats scores 0 */ }
+    }));
+    if(best && (SELECTED.length!==1 || SELECTED[0]!==best)){
+      SELECTED = [best];
+      onIdentityChange();
     }
+    renderIdMenu();
   }catch(_){ /* keep seed KNOWN_USERS */ }
 }
 
