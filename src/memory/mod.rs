@@ -19,6 +19,7 @@ pub mod injection;
 pub mod introspection;
 pub mod learning_history;
 pub mod lineage;
+pub mod oplog;
 pub mod pattern_detection;
 pub mod prospective;
 pub mod query_parser;
