@@ -12,7 +12,7 @@
 //! `MemoryStorage` itself, so testing at that layer avoids pulling in the
 //! full memory system (embedder, retriever, etc.) for a storage-only test.
 
-use chrono::{TimeZone, Utc};
+use chrono::{TimeZone, Timelike, Utc};
 use shodh_memory::memory::oplog::{
     self, OpRecordDraft, ATTESTATION_REPORTED, ATTESTATION_WITNESSED,
 };
@@ -187,6 +187,76 @@ fn invalid_session_id_is_rejected() {
     assert!(storage.oplog_read("has:colon", 0, 10).is_err());
     assert!(storage.oplog_mark_incomplete("has:colon").is_err());
     assert!(storage.oplog_is_incomplete("has:colon").is_err());
+}
+
+#[test]
+fn invalid_user_id_is_rejected() {
+    let (storage, _temp) = setup_storage();
+
+    // A NUL byte would land verbatim in the permanent tamper-evident record
+    // and break oplog.rs's DOMAIN_SEP invariant ("0x00 cannot occur in a
+    // validated session_id/user_id") if it weren't rejected here.
+    let null_user = draft("s1", "bad\0user", "recall", 0);
+    assert!(storage.oplog_append(null_user).is_err());
+
+    // Over validation::MAX_USER_ID_LENGTH (128 chars).
+    let long_user_id = "a".repeat(300);
+    let long_user = draft("s1", &long_user_id, "recall", 1);
+    assert!(storage.oplog_append(long_user).is_err());
+
+    // Nothing written by either rejected append: no records, and the
+    // session has no head (absent from the session listing).
+    assert!(storage.oplog_read("s1", 0, 10).expect("read").is_empty());
+    assert!(!storage
+        .oplog_sessions(10, 0)
+        .expect("oplog_sessions")
+        .contains(&"s1".to_string()));
+}
+
+#[test]
+fn nanosecond_precision_round_trips_bit_exact() {
+    let (storage, _temp) = setup_storage();
+
+    let ts_with_nanos = Utc
+        .timestamp_opt(1_700_000_000, 123_456_789)
+        .single()
+        .expect("valid timestamp with nanoseconds");
+    let reported_ts_with_nanos = Utc
+        .timestamp_opt(1_700_000_100, 987_654_321)
+        .single()
+        .expect("valid reported timestamp with nanoseconds");
+
+    let mut d = draft("s1", "alice", "report:file_edit", 0);
+    d.ts = ts_with_nanos;
+    d.attestation = ATTESTATION_REPORTED.to_string();
+    d.reported_ts = Some(reported_ts_with_nanos);
+    d.source = Some("claude-code-hook".to_string());
+
+    let sealed = storage
+        .oplog_append(d)
+        .expect("append with nanosecond timestamps");
+    let read_back = storage
+        .oplog_read("s1", 0, 10)
+        .expect("read back")
+        .into_iter()
+        .next()
+        .expect("exactly one record");
+
+    // Bit-exact: any lossy persistence format for ts/reported_ts would make
+    // verify_chain report FALSE TAMPERING on untouched data — this is the
+    // "Persistence round-trip invariant" from oplog.rs's module docs.
+    assert_eq!(read_back.ts, ts_with_nanos);
+    assert_eq!(read_back.ts.timestamp_subsec_nanos(), 123_456_789);
+    assert_eq!(read_back.reported_ts, Some(reported_ts_with_nanos));
+    assert_eq!(
+        read_back
+            .reported_ts
+            .expect("reported_ts must round-trip")
+            .timestamp_subsec_nanos(),
+        987_654_321
+    );
+    assert_eq!(read_back, sealed);
+    assert!(oplog::verify_chain(&[read_back], "s1", "alice").is_ok());
 }
 
 #[test]

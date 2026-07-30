@@ -7226,6 +7226,13 @@ impl MemorySystem {
     /// # Warning
     /// This provides direct access to the database. Use with caution.
     /// Primarily intended for backup/restore operations.
+    ///
+    /// NEVER write `CF_OPLOG` through this handle. Raw-CF writes bypass the
+    /// oplog's entire append-only contract — session_id/user_id validation,
+    /// the per-session head cache, and hash chaining — which is exactly what
+    /// that feature exists to guarantee. Use [`Self::storage`]'s
+    /// `oplog_append`/`oplog_read`/`oplog_mark_incomplete`/`oplog_is_incomplete`
+    /// instead for anything oplog-related.
     pub fn get_db(&self) -> std::sync::Arc<rocksdb::DB> {
         self.long_term_memory.db()
     }

@@ -1089,8 +1089,11 @@ const CF_INDEX: &str = "memory_index";
 /// `2026-07-30-traceability-slice1-audit.md` Finding A / amendment 3).
 ///
 /// Keyspace within this CF:
-/// - `op:{session_id}:{seq:016}` — one entry per [`super::oplog::OpRecord`],
-///   `seq` zero-padded to 16 digits (`u64`) for lexicographic = numeric order.
+/// - `op:{session_id}:{seq:016x}` — one entry per [`super::oplog::OpRecord`],
+///   `seq` zero-padded to 16 **hex** digits (`u64`) so lexicographic order
+///   equals numeric order across the *entire* `u64` range. Decimal padding
+///   would break above 10^16 (`u64::MAX` is 20 decimal digits but only 16
+///   hex digits), so hex is exact at identical cost.
 /// - `head:{session_id}` — cached `(last_seq, last_hash, last_ts)` for O(1)
 ///   append without scanning the session's full history.
 /// - `incomplete:{session_id}` — integrity flag set by
@@ -1101,7 +1104,8 @@ const CF_INDEX: &str = "memory_index";
 /// collide with each other or with a foreign session's `op:` keys.
 pub const CF_OPLOG: &str = "oplog";
 
-/// Key prefix for oplog records: full key is `op:{session_id}:{seq:016}`.
+/// Key prefix for oplog records: full key is `op:{session_id}:{seq:016x}`
+/// (hex, not decimal — see [`CF_OPLOG`]'s doc comment for why).
 const OPLOG_RECORD_PREFIX: &str = "op:";
 
 /// Key prefix for the cached per-session head pointer: `head:{session_id}`.
@@ -3273,6 +3277,14 @@ impl MemoryStorage {
     pub fn oplog_append(&self, draft: OpRecordDraft) -> Result<OpRecord> {
         crate::validation::validate_session_id(&draft.session_id)
             .context("oplog_append: invalid session_id")?;
+        // oplog.rs's DOMAIN_SEP invariant ("0x00 cannot occur in a validated
+        // session_id/user_id") covers user_id too, and user_id is
+        // self-asserted (see OpRecord::user_id's doc comment) — an
+        // unvalidated value with an embedded NUL/control char or unbounded
+        // length would land verbatim in the permanent tamper-evident record
+        // and break that guarantee.
+        crate::validation::validate_user_id(&draft.user_id)
+            .context("oplog_append: invalid user_id")?;
 
         let OpRecordDraft {
             ts,
@@ -3322,7 +3334,7 @@ impl MemoryStorage {
         };
         record.hash = oplog::chain_hash(&prev_hash, &oplog::canonical_bytes(&record));
 
-        let record_key = format!("{OPLOG_RECORD_PREFIX}{session_id}:{seq:016}");
+        let record_key = format!("{OPLOG_RECORD_PREFIX}{session_id}:{seq:016x}");
         // serde_json, matching oplog.rs's canonical-bytes format: the
         // persistence round-trip invariant (oplog.rs module docs) requires
         // any storage format to restore every field bit-exactly, and
@@ -3368,7 +3380,7 @@ impl MemoryStorage {
 
         let cf = self.oplog_cf();
         let prefix = format!("{OPLOG_RECORD_PREFIX}{session_id}:");
-        let start_key = format!("{OPLOG_RECORD_PREFIX}{session_id}:{from_seq:016}");
+        let start_key = format!("{OPLOG_RECORD_PREFIX}{session_id}:{from_seq:016x}");
 
         let iter = self.db.iterator_cf(
             cf,
