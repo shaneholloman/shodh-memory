@@ -804,7 +804,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             mode: {
               type: "string",
               enum: ["semantic", "associative", "temporal", "hybrid", "spatial", "mission", "action_outcome"],
-              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default), 'spatial' for geo-location based (REQUIRES geo_lat, geo_lon, geo_radius_meters), 'mission' for mission context (REQUIRES mission_id), 'action_outcome' for reward-based learning (uses reward_min/reward_max, defaults to positive rewards)",
+              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default), 'spatial' for geo-location based (REQUIRES geo_lat, geo_lon, geo_radius_meters; an index-only path that queries the geo index directly and skips semantic ranking), 'mission' for mission context (REQUIRES mission_id), 'action_outcome' for reward-based learning (uses reward_min/reward_max, defaults to positive rewards). NOTE: geo_lat/geo_lon/geo_radius_meters are NOT limited to 'spatial' mode — they compose with any mode here (hard radius filter over that mode's results, plus candidate injection so geo-relevant memories that are semantically silent for the query still surface); 'spatial' is only the dedicated index-only path.",
               default: "hybrid",
             },
             session_id: {
@@ -821,15 +821,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             geo_lat: {
               type: "number",
-              description: "Spatial filter: center latitude (-90 to 90). Requires geo_lon and geo_radius_meters.",
+              description: "Geo filter: center latitude (-90 to 90). Requires geo_lon and geo_radius_meters (all three or none). Composes with ANY mode — applied as a hard radius filter over that mode's results, plus candidate injection so geo-relevant memories that never surface semantically still get considered. Only 'spatial' mode itself requires this triple; that mode is a separate index-only lookup that bypasses semantic ranking entirely.",
             },
             geo_lon: {
               type: "number",
-              description: "Spatial filter: center longitude (-180 to 180). Requires geo_lat and geo_radius_meters.",
+              description: "Geo filter: center longitude (-180 to 180). Requires geo_lat and geo_radius_meters. Composes with any mode — see geo_lat.",
             },
             geo_radius_meters: {
               type: "number",
-              description: "Spatial filter: search radius in meters. Requires geo_lat and geo_lon.",
+              description: "Geo filter: search radius in meters. Requires geo_lat and geo_lon. Composes with any mode — see geo_lat.",
             },
             action_type: {
               type: "string",

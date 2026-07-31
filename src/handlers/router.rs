@@ -73,7 +73,13 @@ pub fn build_public_routes(state: AppState) -> Router {
         .route("/webhook/linear", post(integrations::linear_webhook))
         .route("/webhook/github", post(integrations::github_webhook))
         // =================================================================
-        // GRAPH VISUALIZATION (PUBLIC - HTML VIEWER ONLY)
+        // RETIRED HTML VIEWERS (PUBLIC - STATIC TOMBSTONE)
+        //
+        // Both pages were hand-maintained forks of the single-page dashboard
+        // the `shodh-front` crate (`front/`) now owns. They are kept mounted so
+        // existing bookmarks get an explanation and the canonical URL instead
+        // of a bare 404; both serve the same static page and read nothing from
+        // the request.
         // =================================================================
         .route("/graph/view", get(visualization::graph_view))
         .route("/dashboard", get(visualization::dashboard));
