@@ -589,6 +589,15 @@ fn migrate_graph_db(graph_dir: &Path, dry_run: bool) -> Result<(usize, usize)> {
                     )?;
                 }
                 "relationships" | "entity_edges" => {
+                    // This offline format-migration is a byte-level postcard
+                    // rewrite (trailing-field defaults only) — it does not
+                    // decode through `graph_memory::decode_relationship_edge`,
+                    // so it copies `Custom("Precedes")` edges verbatim rather
+                    // than normalizing them. No functional gap: the runtime
+                    // choke point normalizes on every read regardless of when
+                    // an edge was minted or migrated, so any such edge
+                    // self-heals to `RelationType::Precedes` the next time it
+                    // is read.
                     migrate_generic_record::<RelationshipEdge>(
                         &db,
                         Some(cf),

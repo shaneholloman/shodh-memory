@@ -924,11 +924,18 @@ const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 ///
 /// Returns `(edge, needs_migration)` where `needs_migration = true` means the
 /// record was in an older format and would benefit from being rewritten.
+///
+/// This is the single choke point every runtime read of a `RelationshipEdge`
+/// funnels through, so it is also where legacy string-typed relations get
+/// normalized to their first-class variant (`RelationType::normalize`) —
+/// e.g. a pre-promotion `Custom("Precedes")` edge reads back as `Precedes`.
 fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
-    crate::serialization::try_decode_compat::<RelationshipEdge>(
+    let (mut edge, needs_migration) = crate::serialization::try_decode_compat::<RelationshipEdge>(
         data,
         EDGE_PROVENANCE_DEFAULT_SUFFIX,
-    )
+    )?;
+    edge.relation_type = edge.relation_type.clone().normalize();
+    Ok((edge, needs_migration))
 }
 
 /// Postcard defaults for trailing `EntityNode` fields added after the postcard
@@ -1648,8 +1655,12 @@ impl RelationshipEdge {
 /// Extends Graphiti's semantic model with management, operational, and
 /// evolution relationships for DevOps, software engineering, and robotics.
 ///
-/// New variants are additive only — never remove existing variants to
-/// maintain backward compatibility with MessagePack-serialized data.
+/// New variants are additive only, and MUST be appended at the end (never
+/// inserted between existing variants): this type derives plain
+/// `Serialize`/`Deserialize`, so `RelationshipEdge` — persisted via postcard
+/// (see `crate::serialization`), not MessagePack — encodes each variant as
+/// the varint of its DECLARATION INDEX. Reordering shifts every subsequent
+/// variant's on-disk discriminant and mis-decodes existing stored edges.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RelationType {
     /// Work relationships
@@ -1738,6 +1749,15 @@ pub enum RelationType {
 
     /// Custom relationship
     Custom(String),
+
+    /// Temporal order (CATENA): head event occurs before tail event. NOT
+    /// causation. Declared LAST, after `Custom`, deliberately: postcard (and
+    /// serde's default enum tagging in general) encodes a variant as the
+    /// varint of its DECLARATION INDEX, not its name — inserting a variant
+    /// anywhere but the end would shift every subsequent variant's on-disk
+    /// discriminant and mis-decode every existing stored edge (see the
+    /// "additive only" contract in this enum's doc comment above).
+    Precedes,
 }
 
 impl RelationType {
@@ -1781,6 +1801,36 @@ impl RelationType {
             Self::AssignedTo => "AssignedTo",
             Self::Approves => "Approves",
             Self::Custom(s) => s.as_str(),
+            Self::Precedes => "Precedes",
+        }
+    }
+
+    /// Normalize legacy string-typed relations to first-class variants. The
+    /// CATENA mint site (`mint_causal_spine_edges`) shipped straight to `main`
+    /// in 622eb10d (2026-07-10) minting `Custom("Precedes")` — the temporal-
+    /// order arm predates this promotion. The demo-server deploy gap that kept
+    /// the dependency-parser stack from actually firing in production closed
+    /// the next day (2026-07-11); since then, live stores accumulate real
+    /// `Custom("Precedes")` edges from CATENA temporal signals. Those legacy
+    /// edges are EXPECTED to exist and this normalization makes every runtime
+    /// read robust to them regardless of when they were minted.
+    ///
+    /// Exact case match only (`"Precedes"`, not `eq_ignore_ascii_case`): the
+    /// only known minter (the CATENA mint site) always wrote exact title
+    /// case, and the lowercase round trip this could otherwise plausibly
+    /// guard against (`mif/export.rs` lowercases `Custom(_)` on MIF export) is
+    /// closed by this same commit's `mif/import.rs` `"precedes"` arm, which
+    /// maps the lowercase string straight to `Self::Precedes` on import —
+    /// never back to `Custom("precedes")`. Matching case-insensitively here
+    /// would instead silently retype any unrelated user-authored
+    /// `Custom("precedes")` (a relation some caller happened to spell that
+    /// way), changing its `spreading_weight` from `Custom`'s 1.0 down to
+    /// 0.6 — a semantic mutation with no evidence backing it, so it isn't
+    /// made on speculation.
+    pub fn normalize(self) -> Self {
+        match self {
+            Self::Custom(ref s) if s == "Precedes" => Self::Precedes,
+            other => other,
         }
     }
 
@@ -1810,7 +1860,10 @@ impl RelationType {
             AlternativeTo => 0.9,
             // Generic associations — progressively weaker evidence of meaning.
             AssociatedWith | CoRetrieved => 0.7,
-            RelatedTo => 0.6,
+            // Temporal order (CATENA `Precedes`) is weaker evidence than causation
+            // but stronger than bare co-occurrence — same weight as `RelatedTo`
+            // (spec decision, not measured).
+            RelatedTo | Precedes => 0.6,
             CoOccurs => 0.5,
             Custom(_) => 1.0,
         }
@@ -2699,6 +2752,17 @@ impl GraphMemory {
         }
     }
 
+    /// Map a CATENA `LinkRelation` to its graph `RelationType` — factored out
+    /// of the mint-site match (`mint_causal_spine_edges`) so it is unit-
+    /// testable without a live dependency parser, mirroring
+    /// `relation_type_from_label` above.
+    fn relation_type_from_link(rel: crate::causal_vocab::LinkRelation) -> RelationType {
+        match rel {
+            crate::causal_vocab::LinkRelation::Causes => RelationType::Causes,
+            crate::causal_vocab::LinkRelation::Precedes => RelationType::Precedes,
+        }
+    }
+
     /// Find or create an EVENT node for a CATENA event lemma. Exact-match reuse so
     /// repeated events (collapse, blackout) are one node; new events are added
     /// with `EntityLabel::Event`.
@@ -2859,12 +2923,7 @@ impl GraphMemory {
                 if from == to {
                     continue;
                 }
-                let rt = match link.relation {
-                    crate::causal_vocab::LinkRelation::Causes => RelationType::Causes,
-                    crate::causal_vocab::LinkRelation::Precedes => {
-                        RelationType::Custom("Precedes".to_string())
-                    }
-                };
+                let rt = Self::relation_type_from_link(link.relation);
                 let edge = self.build_spine_edge(
                     from,
                     to,
@@ -9019,6 +9078,260 @@ mod tests {
         assert_eq!(origins[0].0, a);
     }
 
+    // ------------------------------------------------------------------
+    // record_memory_coactivation_impl: strengthen-only contract (2026-07-10,
+    // f6b730ee). The both-modes contract (mint on strengthen_only=false;
+    // strengthen-not-mint on strengthen_only=true given a prior edge; mint
+    // nothing on strengthen_only=true given no prior edge) is already
+    // pinned by the pre-existing `coactivation_strengthen_only_creates_no_new_edges`
+    // and `coactivation_strengthen_only_still_strengthens_existing` tests
+    // above/below in this module. Neither of those, however, verifies that
+    // "strengthen" actually mutates the edge — only that the impl's return
+    // count matches. That gap is what the test below fills. Together, these
+    // three are the mode-contract holder that
+    // tests/brutal_stress_tests.rs::test_brutal_dense_graph now points back
+    // to instead of asserting a specific pair count itself.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn coactivation_strengthen_only_actually_increments_activation_and_strength() {
+        // Complements `coactivation_strengthen_only_still_strengthens_existing`,
+        // which only checks the impl's returned count (3). This test checks
+        // the actual edge mutation: activation_count increments and strength
+        // increases (Hebbian `RelationshipEdge::strengthen()`), and that
+        // relationship_count does NOT grow across the strengthen-only pass
+        // (no edge minted on top of the seeded ones).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect(); // 3 pairs
+
+        // Seed pre-existing edges via strengthen_only=false (the only way to
+        // populate the `mem_edge:` index `find_edge_between_entities` reads —
+        // see the diagnosis's "Flagged finding": nothing else writes it).
+        let minted = graph.record_memory_coactivation_impl(&ids, false).unwrap();
+        assert_eq!(minted, 3, "seed step should mint all 3 pairs");
+        let seeded_count = graph.get_stats().unwrap().relationship_count;
+        assert_eq!(seeded_count, 3);
+
+        let (a, b) = (ids[0], ids[1]);
+        let before = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must exist after seeding");
+        assert_eq!(before.activation_count, 1);
+
+        // Re-run co-activation for the same pairs under the DEFAULT gate.
+        let strengthened = graph.record_memory_coactivation_impl(&ids, true).unwrap();
+
+        assert_eq!(
+            strengthened, 3,
+            "all 3 pre-existing edges should be strengthened, none skipped"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            seeded_count,
+            "strengthen_only=true must NOT mint any new edge on top of the seeded ones"
+        );
+
+        let after = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must still exist");
+        assert_eq!(
+            after.activation_count, 2,
+            "the pre-existing edge must be strengthened (activation_count incremented)"
+        );
+        assert!(
+            after.strength > before.strength,
+            "Hebbian strengthening must increase edge strength: before={}, after={}",
+            before.strength,
+            after.strength
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Memory-to-memory coactivation DURABILITY contract.
+    //
+    // These three tests hold the intent that
+    // tests/hebbian_learning_tests.rs::test_hebbian_graph_persists_across_restart,
+    // ::test_hebbian_edge_strength_persists and ::test_ltp_persists_across_restart
+    // used to hold. Those integration tests reached the durability question
+    // only THROUGH minting: they called `reinforce_recall` to create
+    // CoRetrieved edges, then restarted the `MemorySystem` and asserted the
+    // edges were still there. Since `f6b730ee` (2026-07-10) flipped
+    // `SHODH_COACT_STRENGTHEN_ONLY` to default-ON, `record_memory_coactivation`
+    // no longer mints memory-to-memory edges, so those tests' setup produces
+    // an empty graph and the restart assertions became unreachable — pinning
+    // them at zero on both sides would have silently deleted three
+    // persistence tests. The durability question is real and independent of
+    // the gate, so it is tested here instead, where
+    // `record_memory_coactivation_impl(&ids, false)` is reachable by
+    // parameter (no env var, no process-global state, hermetic under
+    // parallel test execution — nothing outside the mint branch writes the
+    // `mem_edge:` pair index these edges are found through, so `tests/` has
+    // no public seeding API).
+    //
+    // A remove-vs-revive decision on the memory-to-memory coactivation layer
+    // is PENDING. These tests deliberately pin durability only; they say
+    // nothing about whether the layer should mint by default. If the layer is
+    // revived, the integration tests can point back at minting; if it is
+    // removed, these go with it.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn coactivation_edges_survive_graph_reopen() {
+        // Durability half of `test_hebbian_graph_persists_across_restart`:
+        // memory-to-memory CoRetrieved edges written by coactivation are
+        // durable across a close/reopen of the same RocksDB path, and remain
+        // reachable through the `mem_edge:` pair index (not merely present in
+        // the relationships CF).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        let (a, b) = (ids[0], ids[1]);
+
+        let edge_uuid;
+        let relationship_count_before;
+        {
+            let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+            let minted = graph.record_memory_coactivation_impl(&ids, false).unwrap();
+            assert_eq!(minted, 3, "C(3,2) = 3 pairs should be minted");
+            relationship_count_before = graph.get_stats().unwrap().relationship_count;
+            assert_eq!(relationship_count_before, 3);
+            edge_uuid = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must exist after minting")
+                .uuid;
+        }
+        // Graph dropped — simulates a process restart on the same store.
+
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            relationship_count_before,
+            "coactivation edges must survive a reopen of the same store"
+        );
+        let reopened = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("the mem_edge: pair index must survive the reopen too");
+        assert_eq!(
+            reopened.uuid, edge_uuid,
+            "the reopened edge must be the same edge, not a re-mint"
+        );
+        assert_eq!(reopened.relation_type, RelationType::CoRetrieved);
+    }
+
+    #[test]
+    fn coactivation_edge_strength_survives_graph_reopen() {
+        // Durability half of `test_hebbian_edge_strength_persists`: repeated
+        // co-activation raises Hebbian edge strength, and the RAISED value —
+        // not the initial tier weight — is what comes back after a reopen.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        let (a, b) = (ids[0], ids[1]);
+
+        let strength_before;
+        let activation_count_before;
+        {
+            let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+            // Mint once, then strengthen 9 more times through the shipped
+            // default path (strengthen_only=true) — the edge now exists, so
+            // the default gate reinforces it rather than skipping it.
+            graph.record_memory_coactivation_impl(&ids, false).unwrap();
+            let initial = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must exist after minting")
+                .strength;
+            for _ in 0..9 {
+                graph.record_memory_coactivation_impl(&ids, true).unwrap();
+            }
+            let edge = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must still exist");
+            strength_before = edge.strength;
+            activation_count_before = edge.activation_count;
+            assert!(
+                strength_before > initial,
+                "10 co-activations must raise strength above the initial tier weight: \
+                 initial={initial}, after={strength_before}"
+            );
+            assert_eq!(activation_count_before, 10);
+        }
+
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let edge = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must exist after reopen");
+        assert!(
+            (edge.strength - strength_before).abs() < 1e-6,
+            "edge strength must persist exactly across reopen: before={}, after={}",
+            strength_before,
+            edge.strength
+        );
+        assert_eq!(
+            edge.activation_count, activation_count_before,
+            "activation_count must persist across reopen"
+        );
+    }
+
+    #[test]
+    fn coactivation_ltp_status_survives_graph_reopen() {
+        // Durability half of `test_ltp_persists_across_restart`: whatever LTP
+        // state many co-activations produced is the state that comes back.
+        // Asserted as an equality against the pre-restart value rather than
+        // against a hard-coded LtpStatus, because promotion depends on
+        // `detect_ltp_status` thresholds (activation timestamps are only
+        // recorded for L2+ edges; a freshly minted CoRetrieved edge is
+        // L1Working) — this test pins DURABILITY, not the promotion rule.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        let (a, b) = (ids[0], ids[1]);
+
+        let ltp_before;
+        let strength_before;
+        {
+            let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+            graph.record_memory_coactivation_impl(&ids, false).unwrap();
+            for _ in 0..14 {
+                graph.record_memory_coactivation_impl(&ids, true).unwrap();
+            }
+            let edge = graph
+                .find_edge_between_entities(&a, &b)
+                .unwrap()
+                .expect("edge must exist");
+            ltp_before = edge.ltp_status;
+            strength_before = edge.strength;
+            assert_eq!(edge.activation_count, 15);
+            assert!(
+                strength_before > 0.8,
+                "15 co-activations must drive strength high: {strength_before}"
+            );
+        }
+
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let edge = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must exist after reopen");
+        assert_eq!(
+            edge.ltp_status.priority(),
+            ltp_before.priority(),
+            "LTP status must persist across reopen: before={:?}, after={:?}",
+            ltp_before,
+            edge.ltp_status
+        );
+        assert!(
+            (edge.strength - strength_before).abs() < 1e-6,
+            "potentiated strength must persist across reopen: before={}, after={}",
+            strength_before,
+            edge.strength
+        );
+    }
+
     #[test]
     fn typed_neighbors_respects_relation_and_direction() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -10877,6 +11190,137 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(minted, 0, "no parser → no causal-spine edges");
+    }
+
+    #[test]
+    fn precedes_is_first_class() {
+        assert_eq!(RelationType::Precedes.as_str(), "Precedes");
+        assert!(
+            !RelationType::Precedes.is_causal(),
+            "temporal order is not causation"
+        );
+
+        // Legacy edges (pre-promotion CATENA builds, or any store that predates
+        // this change) normalize on read; anything else passes through untouched.
+        // Exact case only — see `normalize()`'s doc comment for why.
+        assert_eq!(
+            RelationType::Custom("Precedes".into()).normalize(),
+            RelationType::Precedes
+        );
+        assert_eq!(
+            RelationType::Custom("precedes".into()).normalize(),
+            RelationType::Custom("precedes".into()),
+            "normalize is exact-case only; lowercase is a distinct Custom value"
+        );
+        assert_eq!(
+            RelationType::Custom("Other".into()).normalize(),
+            RelationType::Custom("Other".into())
+        );
+
+        // A legacy Custom("Precedes") and the first-class variant must key
+        // identically in `typed_pair_key` (:3783, keyed on `as_str()`), or
+        // add_relationship's type-dedup silently doubles the edge instead of
+        // collapsing it.
+        assert_eq!(
+            RelationType::Custom("Precedes".into()).as_str(),
+            RelationType::Precedes.as_str()
+        );
+
+        // Serde/postcard round trip: Precedes is a plain unit variant.
+        let bytes = crate::serialization::encode(&RelationType::Precedes).unwrap();
+        let decoded: RelationType = crate::serialization::decode(&bytes).unwrap();
+        assert_eq!(decoded, RelationType::Precedes);
+
+        // A legacy store wrote Custom("Precedes") on disk; decode it back as-is
+        // (no normalize applied by serde itself), then normalize explicitly, the
+        // way `decode_relationship_edge` does for every runtime read.
+        let legacy = RelationType::Custom("Precedes".to_string());
+        let legacy_bytes = crate::serialization::encode(&legacy).unwrap();
+        let legacy_decoded: RelationType = crate::serialization::decode(&legacy_bytes).unwrap();
+        assert_eq!(
+            legacy_decoded, legacy,
+            "raw decode must not silently mutate"
+        );
+        assert_eq!(legacy_decoded.normalize(), RelationType::Precedes);
+
+        // Pin backward compatibility with bytes actually written by a
+        // PRE-CHANGE build (base commit f113ad58), not merely round-tripped
+        // through today's encoder — `legacy_bytes` above would pass even if a
+        // future reorder shifted both the encoder and decoder together, since
+        // it encodes and decodes with the same (new) code. These bytes were
+        // derived independently (a standalone scratch binary against postcard
+        // 1.1.3, cross-checked against an in-tree scratch test using the exact
+        // pre-change enum shape) and are NOT regenerated by this test. They are
+        // RAW postcard (no `crate::serialization` 2-byte format tag), matching
+        // how `relation_type` is actually stored — embedded inside a larger
+        // `RelationshipEdge` postcard payload via `try_decode_compat`, not
+        // tagged on its own — so decode with `decode_raw`, not `decode`:
+        //   - byte 0 = 0x23 (35 decimal): postcard's single-byte varint tag for
+        //     `Custom`'s DECLARATION INDEX in the pre-change enum. Counting the
+        //     pre-change variants in order (WorksWith=0, WorksAt=1, ...,
+        //     Approves=34) puts `Custom(String)` at index 35 — recount this if
+        //     the pre-change variant list above is ever edited.
+        //   - byte 1 = 0x08: postcard's varint length prefix for the following
+        //     UTF-8 string (8 bytes).
+        //   - bytes 2..=9 = the UTF-8 bytes of "Precedes".
+        let pre_change_custom_precedes_bytes: [u8; 10] =
+            [0x23, 0x08, 0x50, 0x72, 0x65, 0x63, 0x65, 0x64, 0x65, 0x73];
+        let from_pre_change: RelationType =
+            crate::serialization::decode_raw(&pre_change_custom_precedes_bytes).unwrap();
+        assert_eq!(
+            from_pre_change,
+            RelationType::Custom("Precedes".to_string()),
+            "Custom's own discriminant must never move — a pre-change edge must \
+             still decode as Custom(\"Precedes\") before normalization"
+        );
+        assert_eq!(
+            from_pre_change.normalize(),
+            RelationType::Precedes,
+            "a byte-for-byte pre-change edge must normalize to the first-class variant"
+        );
+    }
+
+    #[test]
+    fn catena_temporal_signal_mints_first_class_precedes() {
+        use crate::causal_vocab::LinkRelation;
+
+        // The CATENA mint-site mapping (factored into `relation_type_from_link`
+        // so it's testable without a live dependency parser) must produce the
+        // first-class variant for a temporal signal, not Custom("Precedes").
+        assert_eq!(
+            GraphMemory::relation_type_from_link(LinkRelation::Precedes),
+            RelationType::Precedes
+        );
+        assert_eq!(
+            GraphMemory::relation_type_from_link(LinkRelation::Causes),
+            RelationType::Causes
+        );
+
+        // End-to-end: build + persist + read back an edge exactly as
+        // `mint_causal_spine_edges` would for a CATENA temporal link, and
+        // confirm it survives the storage round trip (through
+        // `decode_relationship_edge`) as `Precedes`.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let collapse = make_entity(&graph, "collapse");
+        let closure = make_entity(&graph, "closure");
+        let rt = GraphMemory::relation_type_from_link(LinkRelation::Precedes);
+        let edge = graph.build_spine_edge(
+            collapse,
+            closure,
+            rt,
+            Uuid::new_v4(),
+            "the collapse happened, then the closure followed",
+            Utc::now(),
+            TypingMethod::Catena,
+        );
+        let edge_id = graph.add_relationship(edge).unwrap();
+        let stored = graph.get_relationship(&edge_id).unwrap().unwrap();
+        assert_eq!(
+            stored.relation_type,
+            RelationType::Precedes,
+            "CATENA temporal edges must persist as first-class Precedes, not Custom"
+        );
     }
 
     /// Helper: create a directed edge from → to

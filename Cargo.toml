@@ -23,8 +23,9 @@ exclude = [
     "*.whl",
     "*.pdf",
     "*.odt",
+    # No packaging exception is needed for HTML any more: the two bundled
+    # viewers were retired and the crate no longer `include_str!`s any .html.
     "*.html",
-    "!src/handlers/graph_view.html",
     "*.py",
     "*.log",
     "*.json",

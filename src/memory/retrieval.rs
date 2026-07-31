@@ -1280,6 +1280,11 @@ impl RetrievalEngine {
             lat: geo_filter.lat,
             lon: geo_filter.lon,
             radius_meters: geo_filter.radius_meters,
+            // Uncapped: this function already fetches every in-radius memory,
+            // then does its own filter/sort/truncate below (API-compat
+            // requirement — RetrievalMode::Spatial's existing behavior must
+            // not change). Only Layer 0.45's prefetch (mod.rs) passes a limit.
+            limit: None,
         };
 
         let mut memories: Vec<SharedMemory> = self
