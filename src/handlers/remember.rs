@@ -896,6 +896,13 @@ pub async fn batch_remember(
 
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
+    // Trace identity set at the TOP so every success path — including the
+    // empty-batch early return below — is enriched (review I3: a 200 with
+    // zero records was being counted as a capture failure).
+    if let Some(axum::Extension(trace)) = &trace {
+        trace.set_identity(&req.user_id, None);
+    }
+
     if req.memories.is_empty() {
         return Ok(Json(BatchRememberResponse {
             created: 0,

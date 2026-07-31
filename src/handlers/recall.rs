@@ -3481,6 +3481,12 @@ pub async fn paginated_recall(
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_max_results(req.limit).map_validation_err("limit")?;
     validation::validate_query_text(&req.query).map_validation_err("query")?;
+    // Review C2: an unvalidated session_id would pass through to the oplog
+    // append, be rejected there, and silently suppress the witnessed record
+    // while the caller sees 200 — a caller-controlled audit-trail bypass.
+    if let Some(sid) = &req.session_id {
+        validation::validate_session_id(sid).map_validation_err("session_id")?;
+    }
 
     let retrieval_mode = parse_retrieval_mode(&req.mode);
 

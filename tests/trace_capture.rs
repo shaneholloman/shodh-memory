@@ -372,7 +372,7 @@ mod capture_e2e {
             "exactly one op in the recall session"
         );
         let r = &recall_records[0];
-        assert_eq!(r.op, "recall");
+        assert_eq!(r.op, "post:recall");
         assert_eq!(r.attestation, ATTESTATION_WITNESSED);
         assert_eq!(r.user_id, user);
         assert_eq!(r.outcome, "ok");
@@ -400,7 +400,7 @@ mod capture_e2e {
             .expect("read fallback");
         assert_eq!(remember_records.len(), 1);
         let m = &remember_records[0];
-        assert_eq!(m.op, "remember");
+        assert_eq!(m.op, "post:remember");
         assert_eq!(m.attestation, ATTESTATION_WITNESSED);
         assert_eq!(m.evidence_refs, vec![stored_id.clone()]);
         assert!(oplog::verify_chain(&remember_records, fallback[0], user).is_ok());
