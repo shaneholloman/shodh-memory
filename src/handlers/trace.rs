@@ -149,16 +149,21 @@ pub async fn capture_middleware(
     let response = next.run(req).await;
     let status = response.status();
 
-    // Unmatched requests (404/405, or no route template) are NOT agent ops —
-    // an authenticated scanner or a misconfigured client must not mint
-    // permanent records or pollute the failure counter (review I1; the dead
-    // /api/record hook endpoint was doing exactly this on every fire).
+    // Routing misses are NOT agent ops — an authenticated scanner or a
+    // misconfigured client must not mint permanent records or pollute the
+    // failure counter (review I1; the dead /api/record hook endpoint was
+    // doing exactly this on every fire). A routing miss never carries a
+    // route template (it goes through axum's fallback), so the template's
+    // absence is the entire detector. A MATCHED route that returns 404
+    // (missing memory id, …) stays captured: a failed access attempt is
+    // exactly what an audit log must witness (re-review round 1 — a status
+    // check here would let callers vanish ops by referencing absent ids).
     let Some(route_template) = route_template else {
         return response;
     };
-    if status == axum::http::StatusCode::NOT_FOUND
-        || status == axum::http::StatusCode::METHOD_NOT_ALLOWED
-    {
+    // 405: the path matched (template present) but no handler ran, so
+    // identity can never be set — skip before it counts as unenriched.
+    if status == axum::http::StatusCode::METHOD_NOT_ALLOWED {
         return response;
     }
 
