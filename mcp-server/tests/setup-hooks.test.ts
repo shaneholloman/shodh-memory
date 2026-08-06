@@ -7,11 +7,23 @@ const setupHooks = require("../scripts/setup-hooks.cjs") as {
   makeCommand: (event: string) => string;
   buildHookConfig: () => Record<string, Array<{ matcher?: unknown; hooks: Array<{ type: string; command: string }> }>>;
   mergeHooks: (settings: Record<string, unknown>, hooks: Record<string, unknown>) => { hooks: Record<string, unknown> };
-  removeHooks: (settings: Record<string, unknown>) => { hooks?: Record<string, unknown> };
+  removeHooks: (
+    settings: Record<string, unknown>,
+    opts?: { managedOnly?: boolean },
+  ) => { hooks?: Record<string, unknown> };
   HOOK_SCRIPT: string;
 };
 
 const { makeCommand, buildHookConfig, mergeHooks, removeHooks, HOOK_SCRIPT } = setupHooks;
+
+// A command as older installs wrote it: same managed script, unquoted path.
+const MANAGED_SCRIPT = HOOK_SCRIPT.replace(/\\/g, "/");
+const legacyManagedCommand = (event: string) => `bun run ${MANAGED_SCRIPT} ${event}`;
+// A hook a developer wrote by hand, pointing at a checkout rather than the
+// managed install directory. Contains "shodh-memory" because the clone is
+// named that — install must not treat it as ours to delete.
+const REPO_HOOK_COMMAND =
+  'bun run "C:/src/shodh-memory/hooks/memory-hook.ts" SessionStart';
 
 describe("makeCommand — T17 path quoting", () => {
   it("quotes the script path so paths containing spaces survive shell parsing", () => {
@@ -81,7 +93,7 @@ describe("mergeHooks / removeHooks", () => {
         PostToolUse: [
           {
             matcher: { tool_name: ["Edit", "Write"] },
-            hooks: [{ type: "command", command: "bun run C:/Users/John Smith/.claude/hooks/shodh-memory/memory-hook.ts PostToolUse" }],
+            hooks: [{ type: "command", command: legacyManagedCommand("PostToolUse") }],
           },
           { matcher: "Edit", hooks: [{ type: "command", command: "echo keep-me" }] },
         ],
@@ -99,15 +111,49 @@ describe("mergeHooks / removeHooks", () => {
         PreToolUse: [
           {
             matcher: { tool_name: ["Edit", "Write", "Bash"] },
-            hooks: [{ type: "command", command: "bun run C:/Users/John Smith/.claude/hooks/shodh-memory/memory-hook.ts PreToolUse" }],
+            hooks: [{ type: "command", command: legacyManagedCommand("PreToolUse") }],
           },
         ],
       },
     };
-    const repaired = mergeHooks(removeHooks(legacy), buildHookConfig());
+    const repaired = mergeHooks(
+      removeHooks(legacy, { managedOnly: true }),
+      buildHookConfig(),
+    );
     const entries = repaired.hooks.PreToolUse as Array<{ matcher?: unknown; hooks: Array<{ command: string }> }>;
     expect(entries).toHaveLength(1);
     expect(entries[0].matcher).toBe("Edit|Write|Bash");
     expect(entries[0].hooks[0].command).toMatch(/^bun run "/);
+  });
+
+  it("install-time removal keeps a developer's hand-written repo-path hook", () => {
+    const settings = {
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: legacyManagedCommand("SessionStart") }] },
+          { hooks: [{ type: "command", command: REPO_HOOK_COMMAND }] },
+        ],
+      },
+    };
+    const cleaned = removeHooks(settings, { managedOnly: true });
+    const entries = cleaned.hooks!.SessionStart as Array<{ hooks: Array<{ command: string }> }>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0].hooks[0].command).toBe(REPO_HOOK_COMMAND);
+  });
+
+  it("uninstall removes every shodh hook, including repo-path ones", () => {
+    const settings = {
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: legacyManagedCommand("SessionStart") }] },
+          { hooks: [{ type: "command", command: REPO_HOOK_COMMAND }] },
+          { hooks: [{ type: "command", command: "echo unrelated" }] },
+        ],
+      },
+    };
+    const cleaned = removeHooks(settings);
+    const entries = cleaned.hooks!.SessionStart as Array<{ hooks: Array<{ command: string }> }>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0].hooks[0].command).toBe("echo unrelated");
   });
 });

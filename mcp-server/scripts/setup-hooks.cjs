@@ -171,10 +171,29 @@ function mergeHooks(existingSettings, newHooks) {
   return settings;
 }
 
+// Hooks we installed live under HOOKS_DEST (~/.claude/hooks/shodh-memory).
+// A developer running from a checkout may instead point hooks at the repo's
+// own hooks/memory-hook.ts — those commands also contain "shodh-memory" when
+// the clone directory is named that, but they are the user's, not ours.
+const MANAGED_HOOK_MARKER = HOOKS_DEST.replace(/\\/g, '/');
+
+function isShodhHookCommand(command, managedOnly) {
+  if (!command) return false;
+  const normalized = command.replace(/\\/g, '/');
+  return managedOnly
+    ? normalized.includes(MANAGED_HOOK_MARKER)
+    : normalized.includes('shodh-memory');
+}
+
 /**
- * Removes all shodh-memory hooks from settings.json.
+ * Removes shodh-memory hooks from settings.json.
+ *
+ * `managedOnly` restricts removal to hooks pointing at HOOKS_DEST. Install uses
+ * it so re-running setup-hooks repairs entries we wrote without deleting a
+ * developer's hand-written hooks that point at a checkout. Uninstall leaves it
+ * off, so "remove shodh hooks" removes all of them.
  */
-function removeHooks(existingSettings) {
+function removeHooks(existingSettings, { managedOnly = false } = {}) {
   const settings = JSON.parse(JSON.stringify(existingSettings));
   if (!settings.hooks) return settings;
 
@@ -182,7 +201,7 @@ function removeHooks(existingSettings) {
     if (!Array.isArray(entries)) continue;
     settings.hooks[event] = entries.filter((entry) => {
       if (!entry.hooks || !Array.isArray(entry.hooks)) return true;
-      return !entry.hooks.some((h) => h.command && h.command.includes('shodh-memory'));
+      return !entry.hooks.some((h) => isShodhHookCommand(h.command, managedOnly));
     });
     // Remove empty arrays
     if (settings.hooks[event].length === 0) {
@@ -304,11 +323,12 @@ async function main() {
     fs.copyFileSync(SETTINGS_PATH, backupPath);
   }
 
-  // Remove any stale shodh entries first (older installs wrote unquoted paths
-  // and object-shaped matchers), then merge the current config. This makes
-  // re-running setup-hooks an idempotent repair, not an accumulation.
+  // Remove stale entries we previously installed (older installs wrote unquoted
+  // paths and object-shaped matchers), then merge the current config. This makes
+  // re-running setup-hooks an idempotent repair, not an accumulation. Scoped to
+  // managed hooks so a developer's own repo-path hooks are left untouched.
   const hookConfig = buildHookConfig();
-  const merged = mergeHooks(removeHooks(settings), hookConfig);
+  const merged = mergeHooks(removeHooks(settings, { managedOnly: true }), hookConfig);
 
   if (!dryRun) {
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(merged, null, 2) + '\n');
