@@ -33,6 +33,50 @@
   --deepblue:#82a0dc; --live:#96e6aa; --strong:#5f9678; --medium:#8f8a62; --weak:#4a5260;
   --act:#ff9a5c; --act-dim:#b96f42;
   --create:#b4e6b4; --retrieve:#ffc896; --proactive:#b4dcff; --update:#ffe082; --del:#ff8c8c;
+
+  /* ── Type scale ────────────────────────────────────────
+     Minor third (1.2) off a 13px body. Instrument-panel typography wants
+     tight, closely-spaced steps — a bigger ratio makes a console look like a
+     marketing page. Every font-size below should reference one of these. */
+  --t-micro:9px;    /* axis ticks, unit suffixes           */
+  --t-label:10px;   /* eyebrows, section headers, keys     */
+  --t-meta:11px;    /* captions, hints, secondary metadata */
+  --t-body:13px;    /* body copy, inputs                   */
+  --t-lead:15px;    /* emphasised readouts                 */
+  --t-fig:19px;     /* headline figures                    */
+  --t-hero:26px;    /* the single largest number on screen */
+
+  /* ── Spacing rhythm ────────────────────────────────────
+     4px base. Panels align to --s4/--s5; controls to --s2/--s3. Replaces
+     ad-hoc 7/9/11/14px paddings so gutters line up across panels. */
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
+
+  /* ── Motion ────────────────────────────────────────────
+     Two curves, deliberately. `--ease-out` for anything entering or
+     responding to a pointer; `--ease-io` for state that settles (camera
+     moves, panel transitions). Durations are short — a console should feel
+     instrument-fast, not animated. */
+  --ease-out:cubic-bezier(.16,1,.3,1);
+  --ease-io:cubic-bezier(.65,0,.35,1);
+  --d-fast:120ms; --d-base:220ms; --d-slow:420ms;
+
+  /* ── Elevation ─────────────────────────────────────────
+     Depth on a near-black ground reads through shadow spread, not lightness.
+     Each level pairs a diffuse shadow with a hairline to keep edges crisp. */
+  --e1:0 1px 2px rgba(0,0,0,.45);
+  --e2:0 6px 18px rgba(0,0,0,.5);
+  --e3:0 14px 40px rgba(0,0,0,.55);
+  --glow-accent:0 0 0 3px rgba(53,224,208,.14);
+  --glow-act:0 0 18px rgba(255,154,92,.28);
+}
+
+/* Respect the OS setting. A console that ignores this is a console someone
+   with vestibular sensitivity cannot use during a long analysis session. */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{
+    animation-duration:.01ms !important; animation-iteration-count:1 !important;
+    transition-duration:.01ms !important; scroll-behavior:auto !important;
+  }
 }
 *{box-sizing:border-box;}
 html,body{margin:0;height:100%;}
@@ -84,7 +128,8 @@ header{
   font-family:"JetBrains Mono","SF Mono",ui-monospace,Consolas,monospace;color:#dfe7f0;}
 .stat .k{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.7px;}
 .spark{margin-left:auto;display:flex;align-items:flex-end;gap:2px;height:26px;}
-.spark .bar{width:3px;background:linear-gradient(180deg,#58a6ff,#2f6fbf);border-radius:1px;min-height:2px;transition:height .25s;}
+.spark .bar{width:3px;background:linear-gradient(180deg,var(--accent),#1d7f76);border-radius:1px;min-height:2px;
+  transition:height var(--d-base) var(--ease-out);}
 .usel{margin-left:14px;display:flex;align-items:center;gap:8px;position:relative;}
 .usel label{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;}
 select,input,button{font-family:inherit;}
@@ -136,7 +181,11 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .cuebar .row{display:flex;gap:8px;}
 #cue{flex:1;background:var(--bg2);color:var(--txt);border:1px solid var(--line2);border-radius:8px;
   padding:10px 12px;font-size:13px;}
-#cue:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,.12);}
+#cue:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow-accent);}
+/* Keyboard focus must be visible on every control, not just the cue field. */
+:where(button,select,input,[tabindex]):focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px; border-radius:6px;
+}
 #cue::placeholder{color:var(--mut);}
 .cuebar button{background:linear-gradient(180deg,#1d2738,#141b27);color:var(--gold);border:1px solid var(--line2);
   border-radius:8px;padding:0 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
