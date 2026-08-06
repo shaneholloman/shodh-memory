@@ -38,46 +38,49 @@ const HOOK_COMMAND_PREFIX = 'bun run';
 const HOOK_SCRIPT = path.join(HOOKS_DEST, 'memory-hook.ts');
 
 function makeCommand(event) {
-  // Use forward slashes for cross-platform compat in the command string
+  // Use forward slashes for cross-platform compat in the command string, and
+  // QUOTE the script path — hook commands run through a shell, so an unquoted
+  // path breaks for any user whose home directory contains a space
+  // (e.g. C:/Users/John Smith/...).
   const scriptPath = HOOK_SCRIPT.replace(/\\/g, '/');
-  return `${HOOK_COMMAND_PREFIX} ${scriptPath} ${event}`;
+  return `${HOOK_COMMAND_PREFIX} "${scriptPath}" ${event}`;
 }
 
+// Claude Code's hook schema: `matcher` is a STRING (a regex over tool names,
+// e.g. "Edit|Write|Bash") and only applies to PreToolUse/PostToolUse. Events
+// without a tool filter omit the field entirely. An object matcher like
+// { tool_name: [...] } does not match the schema and breaks hook dispatch.
 function buildHookConfig() {
   return {
     SessionStart: [
       {
-        matcher: {},
         hooks: [{ type: 'command', command: makeCommand('SessionStart') }],
       },
     ],
     UserPromptSubmit: [
       {
-        matcher: {},
         hooks: [{ type: 'command', command: makeCommand('UserPromptSubmit') }],
       },
     ],
     Stop: [
       {
-        matcher: {},
         hooks: [{ type: 'command', command: makeCommand('Stop') }],
       },
     ],
     PreToolUse: [
       {
-        matcher: { tool_name: ['Edit', 'Write', 'Bash'] },
+        matcher: 'Edit|Write|Bash',
         hooks: [{ type: 'command', command: makeCommand('PreToolUse') }],
       },
     ],
     PostToolUse: [
       {
-        matcher: { tool_name: ['Edit', 'Write', 'Bash', 'TodoWrite', 'Read', 'Task'] },
+        matcher: 'Edit|Write|Bash|TodoWrite|Read|Task',
         hooks: [{ type: 'command', command: makeCommand('PostToolUse') }],
       },
     ],
     SubagentStop: [
       {
-        matcher: {},
         hooks: [{ type: 'command', command: makeCommand('SubagentStop') }],
       },
     ],
@@ -301,8 +304,11 @@ async function main() {
     fs.copyFileSync(SETTINGS_PATH, backupPath);
   }
 
+  // Remove any stale shodh entries first (older installs wrote unquoted paths
+  // and object-shaped matchers), then merge the current config. This makes
+  // re-running setup-hooks an idempotent repair, not an accumulation.
   const hookConfig = buildHookConfig();
-  const merged = mergeHooks(settings, hookConfig);
+  const merged = mergeHooks(removeHooks(settings), hookConfig);
 
   if (!dryRun) {
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(merged, null, 2) + '\n');
@@ -328,7 +334,12 @@ async function main() {
   process.stderr.write('\n');
 }
 
-main().catch((err) => {
-  process.stderr.write(`\n  \u2717 Setup failed: ${err.message}\n\n`);
-  process.exit(1);
-});
+// Exported for tests; the CLI entrypoint only runs when executed directly.
+module.exports = { makeCommand, buildHookConfig, mergeHooks, removeHooks, HOOK_SCRIPT };
+
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`\n  \u2717 Setup failed: ${err.message}\n\n`);
+    process.exit(1);
+  });
+}
