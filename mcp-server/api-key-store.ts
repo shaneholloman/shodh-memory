@@ -28,12 +28,21 @@ import * as path from "path";
 export const API_KEY_FILENAME = ".api-key";
 
 /**
- * Resolve the shodh-memory data root, mirroring the Rust server's
- * `default_storage_path()` (src/config.rs):
+ * Resolve the directory that holds the shared key and pidfiles:
  *   - SHODH_MEMORY_PATH when set
  *   - Windows: %APPDATA%\shodh-memory
  *   - macOS:   ~/Library/Application Support/shodh-memory
  *   - Linux:   $XDG_DATA_HOME/shodh-memory or ~/.local/share/shodh-memory
+ *
+ * This is NOT a faithful mirror of the Rust server's `default_storage_path()`
+ * (src/config.rs): that function first returns `./shodh_memory_data` when such
+ * a directory exists in the server's working directory, and this one has no
+ * equivalent branch. Harmless today — the server receives its key through the
+ * environment and never reads this file, and every reader (shim and hooks)
+ * resolves the root the same way, so they always agree with each other. It
+ * matters only if something later assumes the key file sits next to the
+ * database. Do not "fix" this by claiming parity in a comment; if real parity
+ * is ever needed, port the legacy branch and say so here.
  */
 export function shodhDataRoot(
   env: NodeJS.ProcessEnv = process.env,
@@ -116,6 +125,33 @@ function replaceAtomic(file: string, content: string): void {
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, content, { mode: 0o600 });
   fs.renameSync(tmp, file);
+}
+
+/**
+ * Publish an already-resolved key (one that came from the environment) to the
+ * shared file so hooks can find it.
+ *
+ * Why this exists: an MCP client's `env` block — the normal way to configure
+ * SHODH_API_KEY — is visible only to the shim process. Claude Code hooks are
+ * spawned by Claude Code itself and never see it, so without this they fall
+ * back to the legacy dev key and get 401s. Auto-generated keys were already
+ * shared via loadOrCreatePersistedApiKey; this closes the same gap for the
+ * more common configured-key case.
+ *
+ * Callers MUST gate this on the backend being local — a remote/production key
+ * does not belong on disk just because a hook might want it.
+ *
+ * Returns true when the file was created or updated, false when it already
+ * held this key (the steady state, so the common path does no writes).
+ */
+export function publishSharedApiKey(rootDir: string, key: string): boolean {
+  const file = apiKeyFilePath(rootDir);
+  if (readPersistedApiKey(file) === key) return false;
+  fs.mkdirSync(rootDir, { recursive: true });
+  // Replace rather than create-exclusive: the configured key is authoritative,
+  // and rewriting it is how a stale key from an earlier config self-heals.
+  replaceAtomic(file, key + "\n");
+  return true;
 }
 
 export interface PersistedApiKey {

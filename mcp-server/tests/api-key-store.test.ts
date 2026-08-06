@@ -6,6 +6,7 @@ import {
   API_KEY_FILENAME,
   apiKeyFilePath,
   loadOrCreatePersistedApiKey,
+  publishSharedApiKey,
   readPersistedApiKey,
   shodhDataRoot,
 } from "../api-key-store";
@@ -114,5 +115,42 @@ describe("readPersistedApiKey", () => {
     expect(readPersistedApiKey(file)).toBeNull();
     fs.writeFileSync(file, "  the-key \n");
     expect(readPersistedApiKey(file)).toBe("the-key");
+  });
+});
+
+describe("publishSharedApiKey — sharing an environment-supplied key with hooks", () => {
+  it("writes the key so a hook reading the same root finds it", () => {
+    // The gap this closes: an MCP client's `env` block reaches the shim but not
+    // Claude Code's hooks, which then fall back to the dev key and get 401s.
+    expect(publishSharedApiKey(tmpRoot, "sk-from-mcp-json")).toBe(true);
+    expect(readPersistedApiKey(apiKeyFilePath(tmpRoot))).toBe("sk-from-mcp-json");
+  });
+
+  it("creates the root directory when it does not exist yet", () => {
+    const nested = path.join(tmpRoot, "does", "not", "exist");
+    expect(publishSharedApiKey(nested, "sk-nested")).toBe(true);
+    expect(readPersistedApiKey(apiKeyFilePath(nested))).toBe("sk-nested");
+  });
+
+  it("reports no write when the file already holds this key", () => {
+    publishSharedApiKey(tmpRoot, "sk-same");
+    expect(publishSharedApiKey(tmpRoot, "sk-same")).toBe(false);
+  });
+
+  it("overwrites a stale key so a changed config self-heals", () => {
+    // Unlike first-time generation, a configured key is authoritative: if the
+    // user edits SHODH_API_KEY, the file must follow or hooks keep 401ing.
+    publishSharedApiKey(tmpRoot, "sk-old");
+    expect(publishSharedApiKey(tmpRoot, "sk-new")).toBe(true);
+    expect(readPersistedApiKey(apiKeyFilePath(tmpRoot))).toBe("sk-new");
+  });
+
+  it("leaves a published key readable by loadOrCreatePersistedApiKey", () => {
+    // A sibling shim with no key configured must adopt the published key
+    // rather than generating a second one.
+    publishSharedApiKey(tmpRoot, "sk-published");
+    const loaded = loadOrCreatePersistedApiKey(tmpRoot, () => "sk-should-not-be-used");
+    expect(loaded.key).toBe("sk-published");
+    expect(loaded.created).toBe(false);
   });
 });

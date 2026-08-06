@@ -36,7 +36,12 @@ import { resolvePackageVersion } from "./version";
 import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 import { DrainController } from "./drain";
-import { shodhDataRoot, loadOrCreatePersistedApiKey } from "./api-key-store";
+import {
+  shodhDataRoot,
+  loadOrCreatePersistedApiKey,
+  publishSharedApiKey,
+  apiKeyFilePath,
+} from "./api-key-store";
 import {
   registerShim,
   unregisterShim,
@@ -155,6 +160,30 @@ if (!API_KEY) {
     process.exit(1);
   }
 }
+// Share an environment-supplied key with the hooks, for local backends only.
+// An MCP `env` block reaches this shim but NOT Claude Code's hooks, so without
+// this a user who configures SHODH_API_KEY in mcp.json gets a working shim and
+// hooks that 401 on every capture. Never done for remote backends: a
+// production key must not be written to disk to satisfy a local convenience.
+if (
+  API_KEY &&
+  apiKeyFile === null &&
+  apiKeySource !== "sandbox" &&
+  isLocalServer()
+) {
+  try {
+    const published = publishSharedApiKey(shodhDataRoot(), API_KEY);
+    apiKeyFile = apiKeyFilePath(shodhDataRoot());
+    if (published) {
+      console.error(`[shodh-memory] Shared this key with Claude Code hooks via ${apiKeyFile}.`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[shodh-memory] WARNING: could not share the API key with hooks (${msg}).`);
+    console.error("[shodh-memory] Hook-based memory capture will fail unless SHODH_API_KEY is also set in your shell.");
+  }
+}
+
 // Log which source was used (without revealing the key itself).
 // Persisted/auto-generated/sandbox sources already logged their own message above.
 if (apiKeySource === "SHODH_DEV_API_KEY") {
@@ -4938,12 +4967,38 @@ async function waitForServer(maxAttempts: number = 30): Promise<boolean> {
   return false;
 }
 
-async function validateApiKey(): Promise<boolean> {
+// Outcome of an authenticated probe. "rejected" means the server answered and
+// refused the key; "inconclusive" means we never got an authoritative answer
+// (timeout, connection reset, 5xx). Collapsing the two would let a slow-starting
+// backend be reported as a bad key, sending users to delete a key file that was
+// never the problem.
+type KeyProbe = "accepted" | "rejected" | "inconclusive";
+
+/** Probe an authenticated endpoint — /health is public, so it proves nothing about auth. */
+async function probeApiKey(): Promise<KeyProbe> {
   try {
     await backendRequest("/api/users", "GET", undefined, 3000);
-    return true;
-  } catch {
-    return false;
+    return "accepted";
+  } catch (err) {
+    const status = /API error (\d+)/.exec(err instanceof Error ? err.message : String(err));
+    if (status) {
+      const code = parseInt(status[1], 10);
+      // Any answered status other than 401/403 means the key got past auth.
+      return code === 401 || code === 403 ? "rejected" : "accepted";
+    }
+    return "inconclusive";
+  }
+}
+
+/** Report a rejected key with the fix that matches how this shim got its key. */
+function reportKeyRejected(): void {
+  console.error("[shodh-memory] ERROR: the server rejected our API key (401/403).");
+  console.error("[shodh-memory] All memory operations will fail until this is fixed.");
+  if (apiKeyFile) {
+    console.error(`[shodh-memory] Fix: stop the server, delete ${apiKeyFile}, and reconnect,`);
+    console.error("[shodh-memory] or set SHODH_API_KEY to the key the server was started with.");
+  } else {
+    console.error("[shodh-memory] Fix: set SHODH_API_KEY to the key the server was started with.");
   }
 }
 
@@ -4955,16 +5010,9 @@ async function ensureServerRunning(): Promise<void> {
     // running server — /health is unauthenticated, so reachability alone
     // proves nothing about auth.
     if (!process.env.SHODH_API_KEY && isLocalServer()) {
-      const keyWorks = await validateApiKey();
-      if (!keyWorks) {
-        console.error("[shodh-memory] ERROR: API key rejected by the running server (401).");
+      if (await probeApiKey() === "rejected") {
         console.error("[shodh-memory] The server was started with a different API key.");
-        console.error("[shodh-memory] Fix: set SHODH_API_KEY to match the server's key, or stop the");
-        if (apiKeyFile) {
-          console.error(`[shodh-memory] server, delete ${apiKeyFile}, and reconnect to re-pair.`);
-        } else {
-          console.error("[shodh-memory] server and reconnect so a fresh shared key is negotiated.");
-        }
+        reportKeyRejected();
       }
     }
     return;
@@ -5064,16 +5112,8 @@ async function ensureServerRunning(): Promise<void> {
     // Validate auth against the freshly spawned server. /health is public, so
     // a healthy server can still reject our key (e.g. a concurrent shim's
     // spawn won the port with a different key, or a stale persisted key).
-    const keyWorks = await validateApiKey();
-    if (!keyWorks) {
-      console.error("[shodh-memory] ERROR: the running server rejected our API key (401).");
-      console.error("[shodh-memory] All memory operations will fail until this is fixed.");
-      if (apiKeyFile) {
-        console.error(`[shodh-memory] Fix: stop the server, delete ${apiKeyFile}, and reconnect,`);
-        console.error("[shodh-memory] or set SHODH_API_KEY to the key the server was started with.");
-      } else {
-        console.error("[shodh-memory] Fix: set SHODH_API_KEY to the key the server was started with.");
-      }
+    if (await probeApiKey() === "rejected") {
+      reportKeyRejected();
     }
   } else {
     console.error("[shodh-memory] Warning: Server may not have started properly");
