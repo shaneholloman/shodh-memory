@@ -37,6 +37,13 @@ import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 import { DrainController } from "./drain";
 import { shodhDataRoot, loadOrCreatePersistedApiKey } from "./api-key-store";
+import {
+  registerShim,
+  unregisterShim,
+  recordSpawnedServer,
+  clearSpawnedServer,
+  backendPidToReap,
+} from "./backend-lifecycle";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -1735,14 +1742,20 @@ const handleCallTool = async (request: CallToolRequest) => {
   // Auto-capture context from tool arguments (non-blocking)
   autoStreamContext(name, args as Record<string, unknown>);
 
-  // Check server availability first
-  const serverUp = await isServerAvailable();
+  // Check server availability first. If the health check fails, try to bring
+  // the backend back (it may have crashed or been killed since we started)
+  // instead of failing every subsequent tool call for the rest of the session.
+  let serverUp = await isServerAvailable();
+  if (!serverUp) {
+    console.error("[shodh-memory] Backend health check failed — attempting to restart it...");
+    serverUp = await recoverBackend();
+  }
   if (!serverUp) {
     return {
       content: [
         {
           type: "text",
-          text: `Memory server unavailable at ${BACKEND_LOCATION}. Please ensure shodh-memory-server is running.\n\nTo start: shodh-memory-server`,
+          text: `Memory server unavailable at ${BACKEND_LOCATION}, and automatic restart did not bring it back. Please ensure shodh-memory-server is running.\n\nTo start: shodh-memory-server`,
         },
       ],
       isError: true,
@@ -5031,6 +5044,17 @@ async function ensureServerRunning(): Promise<void> {
 
   serverProcess.unref();
 
+  // Record the spawned backend's pid so whichever shim exits LAST can reap it.
+  // Recorded before the health wait: even a slow-starting backend must be
+  // reapable, and recordSpawnedServer never clobbers a live sibling's record.
+  if (serverProcess.pid) {
+    try {
+      recordSpawnedServer(shodhDataRoot(), serverProcess.pid);
+    } catch (err) {
+      console.error("[shodh-memory] Warning: could not record backend pidfile:", err instanceof Error ? err.message : err);
+    }
+  }
+
   // Wait for server to become available
   console.error("[shodh-memory] Waiting for server to start...");
   const started = await waitForServer();
@@ -5056,6 +5080,85 @@ async function ensureServerRunning(): Promise<void> {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Backend recovery — re-run ensureServerRunning when a health check fails
+// -----------------------------------------------------------------------------
+// Concurrent tool calls share one in-flight recovery attempt, and a failed
+// attempt is not retried for a cooldown window so a dead backend doesn't cost
+// every tool call a full spawn-and-wait cycle.
+let recoveryInFlight: Promise<void> | null = null;
+let lastFailedRecoveryAt = 0;
+const RECOVERY_COOLDOWN_MS = 30_000;
+
+async function recoverBackend(): Promise<boolean> {
+  if (Date.now() - lastFailedRecoveryAt < RECOVERY_COOLDOWN_MS) return false;
+  if (!recoveryInFlight) {
+    recoveryInFlight = ensureServerRunning()
+      .catch((err) => {
+        console.error("[shodh-memory] Backend restart attempt failed:", err instanceof Error ? err.message : err);
+      })
+      .finally(() => {
+        recoveryInFlight = null;
+      });
+  }
+  await recoveryInFlight;
+  const up = await isServerAvailable();
+  if (!up) {
+    lastFailedRecoveryAt = Date.now();
+  }
+  return up;
+}
+
+// True once this shim registered itself in the shared shim pidfile directory.
+let shimRegistered = false;
+// Guard so the exit path releases the shared backend exactly once
+// (process.on("exit") and signal handlers can both invoke cleanup).
+let backendReleased = false;
+
+// Kill an auto-spawned backend by pid. On POSIX the backend was spawned
+// detached (its own process group, pgid == pid), so kill the group first.
+function killBackendPid(pid: number): void {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, "SIGTERM");
+      return;
+    } catch (e) {
+      console.error("[Cleanup] Process group kill failed, falling back to direct kill:", e);
+    }
+  }
+  try { process.kill(pid, "SIGTERM"); } catch (_) { /* already gone */ }
+}
+
+// Release this shim's reference to the shared backend. The backend is only
+// killed when (a) it was auto-spawned by a shim (pidfile exists) and (b) no
+// other live shim remains — a shim exiting mid-session must never take the
+// backend away from siblings that are still using it.
+function releaseSharedBackend(): void {
+  if (backendReleased) return;
+  backendReleased = true;
+
+  try {
+    if (shimRegistered) {
+      unregisterShim(shodhDataRoot());
+      shimRegistered = false;
+    }
+    const pidToReap = backendPidToReap(shodhDataRoot());
+    if (pidToReap !== null) {
+      console.error(`[shodh-memory] Last shim exiting — stopping auto-spawned backend (pid ${pidToReap})`);
+      killBackendPid(pidToReap);
+      clearSpawnedServer(shodhDataRoot());
+    }
+  } catch (err) {
+    // Pidfile bookkeeping failed (e.g. data dir vanished). Fall back to the
+    // legacy behaviour for our own child only, so we never leak a process we
+    // spawned ourselves.
+    console.error("[Cleanup] Backend refcount failed, falling back to own-child kill:", err instanceof Error ? err.message : err);
+    if (serverProcess && !serverProcess.killed && serverProcess.pid) {
+      killBackendPid(serverProcess.pid);
+    }
+  }
+}
+
 // Graceful shutdown helper — tears down ALL event loop references
 function cleanupServer() {
   // 1. Stop WebSocket reconnect loop (prevents event loop from staying alive)
@@ -5071,21 +5174,8 @@ function cleanupServer() {
     streamSocket = null;
   }
 
-  // 3. Kill child process
-  if (serverProcess && !serverProcess.killed) {
-    // For detached processes, we need to kill the process group on Unix
-    if (process.platform !== "win32" && serverProcess.pid) {
-      try {
-        // Kill the process group (negative PID)
-        process.kill(-serverProcess.pid, "SIGTERM");
-      } catch (e) {
-        console.error("[Cleanup] Process group kill failed, falling back to direct kill:", e);
-        try { serverProcess.kill("SIGTERM"); } catch (_) { /* ignore */ }
-      }
-    } else {
-      try { serverProcess.kill(); } catch (_) { /* ignore */ }
-    }
-  }
+  // 3. Release the shared backend (kills it only if we are the last live shim)
+  releaseSharedBackend();
 }
 
 // Cleanup on exit
@@ -5160,6 +5250,15 @@ export function createSandboxServer() {
 // Start server
 async function main() {
   if (SANDBOX_MODE) return;
+
+  // Register this shim as a live user of the shared backend BEFORE any spawn,
+  // so a sibling shim exiting right now sees us and leaves the backend alive.
+  try {
+    registerShim(shodhDataRoot());
+    shimRegistered = true;
+  } catch (err) {
+    console.error("[shodh-memory] Warning: could not register shim pidfile:", err instanceof Error ? err.message : err);
+  }
 
   // Ensure backend is running
   await ensureServerRunning();
