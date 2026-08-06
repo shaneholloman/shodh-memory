@@ -160,17 +160,20 @@ if (!API_KEY) {
     process.exit(1);
   }
 }
-// Share an environment-supplied key with the hooks, for local backends only.
-// An MCP `env` block reaches this shim but NOT Claude Code's hooks, so without
-// this a user who configures SHODH_API_KEY in mcp.json gets a working shim and
-// hooks that 401 on every capture. Never done for remote backends: a
-// production key must not be written to disk to satisfy a local convenience.
-if (
-  API_KEY &&
-  apiKeyFile === null &&
-  apiKeySource !== "sandbox" &&
-  isLocalServer()
-) {
+// Share an environment-supplied key with the hooks. An MCP `env` block reaches
+// this shim but NOT Claude Code's hooks, so without this a user who configures
+// SHODH_API_KEY in mcp.json gets a working shim and hooks that 401 on every
+// capture.
+//
+// Two conditions, both needed. isLocalServer() checks the backend URL, which
+// alone is not enough: a loopback tunnel or local proxy in front of a remote
+// backend still looks local. So the key's own provenance is checked too, and
+// SHODH_API_KEYS is excluded — it is the production-shaped variable (the server
+// reads it as its full key list), and a production key must not be written to
+// disk to satisfy a local convenience.
+const KEY_SOURCE_IS_LOCAL_SHAPED =
+  apiKeySource === "SHODH_API_KEY" || apiKeySource === "SHODH_DEV_API_KEY";
+if (API_KEY && apiKeyFile === null && KEY_SOURCE_IS_LOCAL_SHAPED && isLocalServer()) {
   try {
     const published = publishSharedApiKey(shodhDataRoot(), API_KEY);
     apiKeyFile = apiKeyFilePath(shodhDataRoot());
