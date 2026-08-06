@@ -36,6 +36,7 @@ import { resolvePackageVersion } from "./version";
 import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 import { DrainController } from "./drain";
+import { shodhDataRoot, loadOrCreatePersistedApiKey } from "./api-key-store";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -87,10 +88,16 @@ const SANDBOX_MODE = process.env.SMITHERY_SANDBOX === "true";
 //   1. SHODH_API_KEY (explicit, preferred)
 //   2. SHODH_DEV_API_KEY (matches what the server accepts in dev mode)
 //   3. First key from SHODH_API_KEYS (matches server production config)
-//   4. Auto-generate for local servers (passed to server as SHODH_DEV_API_KEY)
+//   4. Shared persisted key at <data-root>/.api-key, auto-generated on first
+//      use for local servers (passed to the server as SHODH_DEV_API_KEY).
+//      Persisting it means concurrent shims and Claude Code hooks all use the
+//      SAME key — previously each shim generated its own in-memory key and
+//      whichever shim lost the spawn race got 401s for the whole session.
 //   5. Error for remote servers
 let API_KEY = "";
 let apiKeySource = "";
+// Path of the persisted shared key file, when one is in use (for diagnostics).
+let apiKeyFile: string | null = null;
 if (process.env.SHODH_API_KEY) {
   API_KEY = process.env.SHODH_API_KEY;
   apiKeySource = "SHODH_API_KEY";
@@ -106,10 +113,30 @@ if (process.env.SHODH_API_KEY) {
 }
 if (!API_KEY) {
   if (isLocalServer()) {
-    // Auto-generate a random key for local development — zero config
-    API_KEY = crypto.randomBytes(32).toString("hex");
-    apiKeySource = "auto-generated";
-    console.error("[shodh-memory] No API key set — auto-generated for local server.");
+    // Load (or generate once and persist) the shared local key — zero config.
+    try {
+      const persisted = loadOrCreatePersistedApiKey(shodhDataRoot(), () =>
+        crypto.randomBytes(32).toString("hex")
+      );
+      API_KEY = persisted.key;
+      apiKeyFile = persisted.file;
+      apiKeySource = persisted.created ? "auto-generated (persisted)" : "persisted key file";
+      if (persisted.created) {
+        console.error(`[shodh-memory] No API key set — generated one and saved it to ${persisted.file}`);
+        console.error("[shodh-memory] Hooks and other local MCP clients will share this key automatically.");
+      } else {
+        console.error(`[shodh-memory] API key loaded from ${persisted.file}.`);
+      }
+    } catch (err) {
+      // Persistence failed (e.g. read-only data dir) — fall back to an
+      // in-memory key so this shim still works, but say so loudly because
+      // hooks and sibling shims will NOT share it.
+      API_KEY = crypto.randomBytes(32).toString("hex");
+      apiKeySource = "auto-generated";
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[shodh-memory] WARNING: could not persist auto-generated API key (${msg}).`);
+      console.error("[shodh-memory] Hooks and other MCP clients will not share this key; set SHODH_API_KEY to fix.");
+    }
   } else {
     console.error("ERROR: SHODH_API_KEY is required for remote servers.");
     console.error("");
@@ -121,10 +148,11 @@ if (!API_KEY) {
     process.exit(1);
   }
 }
-// Log which source was used (without revealing the key itself)
+// Log which source was used (without revealing the key itself).
+// Persisted/auto-generated/sandbox sources already logged their own message above.
 if (apiKeySource === "SHODH_DEV_API_KEY") {
   console.error("[shodh-memory] WARNING: API key loaded from SHODH_DEV_API_KEY — this is a development key. Use SHODH_API_KEY for production.");
-} else if (apiKeySource && apiKeySource !== "auto-generated" && apiKeySource !== "sandbox") {
+} else if (apiKeySource === "SHODH_API_KEY" || apiKeySource === "SHODH_API_KEYS") {
   console.error(`[shodh-memory] API key loaded from ${apiKeySource}.`);
 }
 const IPC_CLIENT = IPC_ENDPOINT
@@ -4910,14 +4938,20 @@ async function ensureServerRunning(): Promise<void> {
   // Check if already running
   if (await isServerRunning()) {
     console.error("[shodh-memory] Backend server already running at", BACKEND_LOCATION);
-    // If we auto-generated a key, verify it works against the running server
+    // If our key wasn't explicitly configured, verify it works against the
+    // running server — /health is unauthenticated, so reachability alone
+    // proves nothing about auth.
     if (!process.env.SHODH_API_KEY && isLocalServer()) {
       const keyWorks = await validateApiKey();
       if (!keyWorks) {
-        console.error("[shodh-memory] WARNING: Auto-generated key rejected by running server.");
+        console.error("[shodh-memory] ERROR: API key rejected by the running server (401).");
         console.error("[shodh-memory] The server was started with a different API key.");
-        console.error("[shodh-memory] Set SHODH_API_KEY to match the server's key, or restart");
-        console.error("[shodh-memory] the server without SHODH_DEV_API_KEY to use auto-generated keys.");
+        console.error("[shodh-memory] Fix: set SHODH_API_KEY to match the server's key, or stop the");
+        if (apiKeyFile) {
+          console.error(`[shodh-memory] server, delete ${apiKeyFile}, and reconnect to re-pair.`);
+        } else {
+          console.error("[shodh-memory] server and reconnect so a fresh shared key is negotiated.");
+        }
       }
     }
     return;
@@ -5003,6 +5037,20 @@ async function ensureServerRunning(): Promise<void> {
 
   if (started) {
     console.error("[shodh-memory] Backend server started successfully");
+    // Validate auth against the freshly spawned server. /health is public, so
+    // a healthy server can still reject our key (e.g. a concurrent shim's
+    // spawn won the port with a different key, or a stale persisted key).
+    const keyWorks = await validateApiKey();
+    if (!keyWorks) {
+      console.error("[shodh-memory] ERROR: the running server rejected our API key (401).");
+      console.error("[shodh-memory] All memory operations will fail until this is fixed.");
+      if (apiKeyFile) {
+        console.error(`[shodh-memory] Fix: stop the server, delete ${apiKeyFile}, and reconnect,`);
+        console.error("[shodh-memory] or set SHODH_API_KEY to the key the server was started with.");
+      } else {
+        console.error("[shodh-memory] Fix: set SHODH_API_KEY to the key the server was started with.");
+      }
+    }
   } else {
     console.error("[shodh-memory] Warning: Server may not have started properly");
   }
