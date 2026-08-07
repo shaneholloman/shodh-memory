@@ -977,6 +977,10 @@ pub struct EntityRef {
 }
 
 /// Memory tier in the cognitive hierarchy
+///
+/// The live ladder is **Working → Session → LongTerm**, and `LongTerm` is
+/// terminal. See [`Archive`](MemoryTier::Archive) for why the fourth tier is
+/// retired rather than implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MemoryTier {
     /// Active, immediate context (Cowan's focus of attention)
@@ -984,9 +988,27 @@ pub enum MemoryTier {
     Working,
     /// Current task/session context
     Session,
-    /// Consolidated durable memories
+    /// Consolidated durable memories — the terminal tier.
     LongTerm,
-    /// Compressed archival storage
+    /// RETIRED — nothing assigns this tier, and nothing should.
+    ///
+    /// Its documented job was "compressed archival storage", but that job is
+    /// **already done one tier earlier**: `promote_session_to_longterm` runs
+    /// `should_compress` → `MemoryCompressor::compress` on entry to `LongTerm`,
+    /// so LongTerm records are already the compressed archival form. An
+    /// `Archive` tier would therefore be a tier with no distinct behaviour —
+    /// completing it would mean *inventing* a new tier (a new age/importance
+    /// threshold that does not exist as a constant), not finishing a documented
+    /// one. It would also activate `MEMORY_TIER_GRAPH_MULT_ARCHIVE` (1.2),
+    /// ranking archived memories ABOVE LongTerm on the graph leg — an
+    /// unmeasured ranking claim, and a strange one.
+    ///
+    /// `Memory::promote` no longer produces it, so the ladder stops claiming an
+    /// arrow that never fired. The **variant itself is deliberately kept**:
+    /// `MemoryTier` is a positionally-encoded postcard enum inside `MemoryFlat`,
+    /// so deleting discriminant 3 would bet live user data on a proof that no
+    /// record anywhere ever carried it. Keeping an inert variant costs nothing;
+    /// a wrong negative-existence proof costs every recall on that store.
     Archive,
 }
 
@@ -1338,13 +1360,20 @@ impl Memory {
         self.record_access();
     }
 
-    /// Promote to next tier
+    /// Promote to next tier.
+    ///
+    /// `LongTerm` is terminal. The `LongTerm → Archive` arrow was removed: no
+    /// production path ever drove it (both call sites hold Working and Session
+    /// memories respectively), and `Archive` is a retired tier whose documented
+    /// behaviour is already performed on entry to `LongTerm` — see
+    /// [`MemoryTier::Archive`]. An `Archive` value arriving from an older or
+    /// external record is left alone rather than silently rewritten.
     pub fn promote(&mut self) {
         self.tier = match self.tier {
             MemoryTier::Working => MemoryTier::Session,
             MemoryTier::Session => MemoryTier::LongTerm,
-            MemoryTier::LongTerm => MemoryTier::Archive,
-            MemoryTier::Archive => MemoryTier::Archive, // Already at max
+            MemoryTier::LongTerm => MemoryTier::LongTerm, // terminal
+            MemoryTier::Archive => MemoryTier::Archive,   // retired, inert
         };
     }
 
@@ -1358,15 +1387,22 @@ impl Memory {
         self.score
     }
 
-    /// Demote to previous tier (for decay)
-    pub fn demote(&mut self) {
-        self.tier = match self.tier {
-            MemoryTier::Working => MemoryTier::Working, // Can't go lower
-            MemoryTier::Session => MemoryTier::Working,
-            MemoryTier::LongTerm => MemoryTier::Session,
-            MemoryTier::Archive => MemoryTier::LongTerm,
-        };
-    }
+    // `demote()` was removed. It had zero production callers — only tests and
+    // benches — and nothing in the system produces the signal it would need.
+    //
+    // The only downward pressure on a memory is importance decay, and promotion
+    // already re-evaluates importance against the tier threshold every cycle, so
+    // a memory whose importance falls simply stops advancing. Adding demotion on
+    // top of that would make tier oscillate for any memory sitting near a
+    // threshold — and tier is a retrieval input (the graph-leg multiplier,
+    // 0.3 / 0.6 / 1.0), so oscillation means a memory's rank flapping between
+    // recalls for no reason the user did. Consolidation in the literature this
+    // design cites is not symmetric either: systems consolidation moves memories
+    // toward the cortex, it does not move them back.
+    //
+    // Dead code that describes a mechanism nobody drives is worse than no code,
+    // because it reads as designed behaviour. If demotion is ever wanted it
+    // needs a driver and a measurement, not a resurrected method.
 
     /// Get current importance (thread-safe)
     pub fn importance(&self) -> f32 {

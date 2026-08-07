@@ -152,7 +152,7 @@ pub use crate::memory::replay::{
 use crate::memory::retrieval::RetrievalEngine;
 pub use crate::memory::retrieval::{
     AnticipatoryPrefetch, IndexHealth, MemoryGraphStats, PrefetchContext, PrefetchReason,
-    PrefetchResult, ReinforcementStats, RetrievalFeedback, RetrievalOutcome, TrackedRetrieval,
+    PrefetchResult, ReinforcementStats, RetrievalOutcome, TrackedRetrieval,
 };
 pub use crate::memory::segmentation::{
     AtomicMemory, DeduplicationEngine, DeduplicationResult, InputSource, SegmentationEngine,
@@ -6212,9 +6212,17 @@ impl MemorySystem {
 
     /// Consolidate memories based on Cowan's model (importance + time, not size)
     ///
-    /// Tier promotion criteria:
-    /// - Working → Session: importance >= 0.4 AND age >= 5 minutes
-    /// - Session → LongTerm: importance >= 0.6 AND age >= 1 hour
+    /// Tier promotion criteria, resolved to the values the code actually uses
+    /// (the previous version of this comment stated 0.4/5 min and 0.6/1 hour —
+    /// all four numbers were wrong):
+    /// - Working → Session: importance >= `TIER_PROMOTION_WORKING_IMPORTANCE`
+    ///   (0.35, graph-adjusted) AND age >= `TIER_PROMOTION_WORKING_AGE_SECS`
+    ///   (1800 s = 30 min)
+    /// - Session → LongTerm: importance >= `TIER_PROMOTION_SESSION_IMPORTANCE`
+    ///   (0.5, graph-adjusted) AND age >= `TIER_PROMOTION_SESSION_AGE_SECS`
+    ///   (86400 s = 24 h)
+    ///
+    /// `LongTerm` is terminal — see [`Memory::promote`].
     fn consolidate_if_needed(&self) -> Result<()> {
         // Promote eligible memories from working to session (importance + time based)
         self.promote_working_to_session()?;
@@ -6259,18 +6267,54 @@ impl MemorySystem {
         }
 
         let count = to_promote.len();
+
+        // Build the promoted copies and PERSIST them BEFORE taking the tier
+        // locks.
+        //
+        // This write is the fix for a silent correctness hole. Every memory is
+        // written to `long_term_memory` at insert (see `store`/`upsert`), so the
+        // persisted record starts life with `tier: Working`. Working→Session used
+        // to be a pure in-memory map move with NO storage write, while the one
+        // place recall reads tier — `graph_retrieval`'s memory-tier multiplier —
+        // materializes memories from STORAGE, not from these maps. The persisted
+        // tier was therefore almost always `Working`, so nearly everything scored
+        // at the 0.3 multiplier and the 0.6 `Session` branch was effectively
+        // unreachable. Session→LongTerm already rewrote the record; this makes
+        // the first transition durable too.
+        //
+        // `tier` is already a field of `MemoryFlat`, so this is a write-on-
+        // transition fix, not a schema change — no postcard migration needed.
+        //
+        // Persisting outside the locks keeps a RocksDB write off the critical
+        // section that holds BOTH tier maps. The failure mode is benign and
+        // deliberately chosen: if the store succeeds and the map move then fails,
+        // storage says `Session` (what recall reads — the correct answer) while
+        // the in-memory map still says `Working`, and the next cycle simply
+        // re-promotes idempotently. The reverse order would leave the persisted
+        // record stale, which is the bug being fixed.
+        //
+        // Cost: this runs on the per-request path as well as background
+        // maintenance, but only for memories that actually cross the threshold
+        // (importance + 30 min age), and the function early-returns when nothing
+        // is eligible — so it is one write per memory per lifetime, not per
+        // request.
+        let mut promoted: Vec<Memory> = Vec::with_capacity(count);
+        for memory in &to_promote {
+            let mut promoted_memory = (**memory).clone();
+            promoted_memory.promote(); // Working -> Session
+            self.long_term_memory.store(&promoted_memory)?;
+            promoted.push(promoted_memory);
+        }
+
         let mut working = self.working_memory.write();
         let mut session = self.session_memory.write();
 
-        for memory in &to_promote {
+        for (memory, promoted_memory) in to_promote.iter().zip(promoted) {
             // Log promotion
             self.logger
                 .write()
                 .log_promoted(&memory.id, "working", "session", count);
 
-            // Clone out of Arc and update tier before session storage
-            let mut promoted_memory = (**memory).clone();
-            promoted_memory.promote(); // Working -> Session
             session.add(promoted_memory)?;
             working.remove(&memory.id)?;
         }
