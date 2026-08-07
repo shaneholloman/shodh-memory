@@ -437,3 +437,42 @@ fn current_records_round_trip_with_toponyms_intact() {
     assert_eq!(decoded.experience.toponyms, toponyms);
     assert_eq!(decoded.id, id);
 }
+
+#[test]
+fn get_memory_json_exposes_toponyms() {
+    // `GET /api/memory/{id}` returns the whole `Memory`, serialized through
+    // `MemoryFlat`. Because `toponyms` is carried at the flat struct's tail
+    // (see the storage note above), it surfaces as a TOP-LEVEL key rather than
+    // nested under `experience` alongside `geo_location`. The data is there;
+    // this pins where, so anyone moving it does so deliberately.
+    let memory = shodh_memory::memory::Memory::new(
+        MemoryId(Uuid::new_v4()),
+        Experience {
+            content: "Baltimore harbor survey".to_string(),
+            experience_type: ExperienceType::Observation,
+            toponyms: gazetteer::resolve_ner_locations(&[loc("Baltimore")]),
+            ..Default::default()
+        },
+        0.5,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    let json: serde_json::Value =
+        serde_json::to_value(&memory).expect("Memory must serialize to JSON");
+
+    let toponyms = json
+        .get("toponyms")
+        .and_then(|t| t.as_array())
+        .expect("toponyms present at the top level of the memory object");
+    assert_eq!(toponyms.len(), 1);
+    assert_eq!(toponyms[0]["name"], "Baltimore");
+    assert_eq!(toponyms[0]["country"], "US");
+
+    assert!(
+        json["experience"].get("toponyms").is_none(),
+        "toponyms is carried on the flat struct, not inside `experience`"
+    );
+}
