@@ -430,8 +430,15 @@ pub async fn remember(
                         fine_label: e.fine_label,
                     })
                     .collect::<Vec<NerEntityRecord>>(),
+                // Reaching here means BOTH the neural typer and the rule-based
+                // fallback failed — the memory is about to be stored with no
+                // typed entities at all, which starves graph labelling and the
+                // toponym gazetteer. That is not a debug-level event.
                 Err(e) => {
-                    tracing::debug!("NER extraction failed: {}", e);
+                    tracing::warn!(
+                        "NER extraction failed on remember — storing memory with NO typed \
+                         entities: {e}"
+                    );
                     Vec::new()
                 }
             }
@@ -975,7 +982,10 @@ pub async fn batch_remember(
                     })
                     .collect(),
                 Err(e) => {
-                    tracing::debug!("NER extraction failed for batch item {}: {}", index, e);
+                    tracing::warn!(
+                        "NER extraction failed for batch item {index} — storing memory with NO \
+                         typed entities: {e}"
+                    );
                     Vec::new()
                 }
             };
@@ -1154,7 +1164,9 @@ pub async fn upsert_memory(
             })
             .collect(),
         Err(e) => {
-            tracing::debug!("NER extraction failed in upsert: {}", e);
+            tracing::warn!(
+                "NER extraction failed in upsert — storing memory with NO typed entities: {e}"
+            );
             Vec::new()
         }
     };
