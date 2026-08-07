@@ -49,11 +49,21 @@ const PARTS: {
   },
 ];
 
-/** One focusable region of the illustration. */
+/**
+ * One focusable region of the illustration.
+ *
+ * `hit` is not optional and not cosmetic. An SVG `<g>` has no area of its own —
+ * pointer events land only on the strokes and fills inside it, and most of what
+ * is drawn here is 1px lines and 4px circles. Without a transparent hit
+ * rectangle the caption invites you to "point at any part" and then asks you to
+ * hit a hairline. `fill="transparent"` is required rather than `fill="none"`,
+ * which is not a paint and therefore takes no pointer events at all.
+ */
 function Hotspot({
   active,
   dimmed,
   label,
+  hit,
   onEnter,
   onLeave,
   children,
@@ -61,6 +71,7 @@ function Hotspot({
   active: boolean;
   dimmed: boolean;
   label: string;
+  hit: { x: number; y: number; w: number; h: number };
   onEnter: () => void;
   onLeave: () => void;
   children: React.ReactNode;
@@ -84,10 +95,19 @@ function Hotspot({
       }}
       className={cn(
         "cursor-pointer outline-none transition-opacity duration-200",
-        "focus-visible:[&>*]:stroke-ring",
         dimmed ? "opacity-30" : "opacity-100",
       )}
     >
+      {/* Never drawn. Outlining it boxes the illustration into four rectangles
+          and reads louder than the thing it is meant to reveal; the accent and
+          the dimming of everything else already say which part is selected. */}
+      <rect
+        x={hit.x}
+        y={hit.y}
+        width={hit.w}
+        height={hit.h}
+        fill="transparent"
+      />
       {children}
     </g>
   );
@@ -115,6 +135,7 @@ export function RecallDiagram() {
           active={active === "cue"}
           dimmed={dim("cue")}
           label={PARTS[0].label}
+          hit={{ x: 2, y: 48, w: 118, h: 46 }}
           onEnter={() => setActive("cue")}
           onLeave={() => setActive(null)}
         >
@@ -137,6 +158,7 @@ export function RecallDiagram() {
           active={active === "spread"}
           dimmed={dim("spread")}
           label={PARTS[1].label}
+          hit={{ x: 116, y: 26, w: 104, h: 92 }}
           onEnter={() => setActive("spread")}
           onLeave={() => setActive(null)}
         >
@@ -186,6 +208,7 @@ export function RecallDiagram() {
           active={active === "surfaced"}
           dimmed={dim("surfaced")}
           label={PARTS[2].label}
+          hit={{ x: 222, y: 36, w: 152, h: 76 }}
           onEnter={() => setActive("surfaced")}
           onLeave={() => setActive(null)}
         >
@@ -211,6 +234,7 @@ export function RecallDiagram() {
           active={active === "provenance"}
           dimmed={dim("provenance")}
           label={PARTS[3].label}
+          hit={{ x: 92, y: 118, w: 240, h: 28 }}
           onEnter={() => setActive("provenance")}
           onLeave={() => setActive(null)}
         >
