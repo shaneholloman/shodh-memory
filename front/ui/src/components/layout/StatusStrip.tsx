@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import type { Reachability } from "@/lib/api";
+import { isHumanProfile, type Reachability } from "@/lib/api";
 
 /**
  * Connection state, said once for the whole product.
@@ -21,7 +21,7 @@ import type { Reachability } from "@/lib/api";
 export function StatusStrip({ reach }: { reach: Reachability }) {
   const { tone, state, remedy } =
     reach.state === "online"
-      ? reach.profiles.length === 0
+      ? reach.profiles.filter(isHumanProfile).length === 0
         ? {
             tone: "text-warn",
             state: "No profiles",
@@ -30,7 +30,10 @@ export function StatusStrip({ reach }: { reach: Reachability }) {
         : {
             tone: "text-[var(--live)]",
             state: "Connected",
-            remedy: `${reach.profiles.length} profile${reach.profiles.length === 1 ? "" : "s"}`,
+            remedy: (() => {
+              const count = reach.profiles.filter(isHumanProfile).length;
+              return `${count} profile${count === 1 ? "" : "s"}`;
+            })(),
           }
       : reach.state === "unauthorized"
         ? {

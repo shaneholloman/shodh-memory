@@ -113,6 +113,15 @@ export interface ConversationOptions {
 	model: Model<Api>;
 	systemPrompt?: string;
 	/**
+	 * Harness-level continuous learning (loop 2): lesson retrieval/injection
+	 * before each turn and automatic lesson capture after it. Defaults ON —
+	 * disabling exists for exactly one reason: an A/B evaluation needs a
+	 * control arm that differs in nothing else. Loop 1 (user-memory
+	 * reinforcement) is NOT affected by this switch; it is the product's
+	 * substrate, not a treatment under test.
+	 */
+	harnessLearning?: boolean;
+	/**
 	 * Rehydration state for a conversation reopened from the store: identity,
 	 * transcript, and the turn counter continue exactly where they stopped.
 	 * `lastAssistantText` re-arms the momentum leg so the first message after a
@@ -175,6 +184,7 @@ export class Conversation {
 	readonly id: string;
 	readonly userId: string;
 	readonly harnessUserId: string;
+	readonly harnessLearning: boolean;
 	readonly createdAt: Date;
 
 	private readonly deps: ConversationDeps;
@@ -202,7 +212,7 @@ export class Conversation {
 	private pendingToolActions: ToolAction[] = [];
 	/** Args captured at tool_execution_start (the end event does not carry them). */
 	private toolArgsByCallId = new Map<string, unknown>();
-	private emptyRecallQueries: string[] = [];
+	private weakRecalls: { query: string; resultCount: number; bestFinalScore: number }[] = [];
 	private toolErrors: { toolName: string; message: string }[] = [];
 	private assistantTexts: string[] = [];
 	private lastStopReason = "stop";
@@ -215,6 +225,7 @@ export class Conversation {
 	constructor(deps: ConversationDeps, options: ConversationOptions) {
 		this.id = options.restore?.id ?? crypto.randomUUID();
 		this.userId = options.userId;
+		this.harnessLearning = options.harnessLearning ?? true;
 		this.harnessUserId = deriveHarnessUserId(options.userId);
 		this.createdAt = options.restore?.createdAt ?? new Date();
 		this.deps = deps;
@@ -238,8 +249,8 @@ export class Conversation {
 					this.surfaced.set(memory.id, { scope, content: memory.content });
 				}
 			},
-			onEmptyRecall: (query) => {
-				this.emptyRecallQueries.push(query);
+			onWeakRecall: (query, resultCount, bestFinalScore) => {
+				this.weakRecalls.push({ query, resultCount, bestFinalScore });
 			},
 			ledger: deps.ledger,
 		});
@@ -351,7 +362,7 @@ export class Conversation {
 		this.surfaced = new Map();
 		this.prevProactiveIds = this.proactiveIds;
 		this.proactiveIds = new Set();
-		this.emptyRecallQueries = [];
+		this.weakRecalls = [];
 		this.toolErrors = [];
 		this.assistantTexts = [];
 		this.lastStopReason = "stop";
@@ -365,7 +376,9 @@ export class Conversation {
 
 			await this.applyNegativeFollowupPenalty(text);
 			const proactiveBlock = await this.runProactivePass(text);
-			const harnessBlock = await this.buildHarnessLearningsBlock(text);
+			const harnessBlock = this.harnessLearning
+				? await this.buildHarnessLearningsBlock(text)
+				: undefined;
 			this.agent.state.systemPrompt = [this.baseSystemPrompt, proactiveBlock, harnessBlock]
 				.filter((block): block is string => Boolean(block))
 				.join("\n\n");
@@ -469,6 +482,23 @@ export class Conversation {
 			for (const memory of response.memories) {
 				this.proactiveIds.add(memory.id);
 			}
+
+			// The implicit leg just applied real learning updates server-side
+			// (reinforce_recall + Hebbian strengthening, recall.rs:1670-1720) and
+			// reported exactly what moved. Record it, or the ledger's claim that
+			// every learning update is reviewable is false for precisely the
+			// conversations where the proactive channel owns all surfaced
+			// memories — in which case ALL loop-1 learning is implicit and the
+			// ledger would stay empty. Found by the lessons A/B eval.
+			const fb = response.feedback_processed;
+			if (fb && (fb.reinforced.length > 0 || fb.weakened.length > 0)) {
+				await this.deps.ledger.append("implicit_feedback", "user", this.userId, this.id, this.turn, {
+					memories_evaluated: fb.memories_evaluated,
+					reinforced: fb.reinforced,
+					weakened: fb.weakened,
+				});
+			}
+
 			this.emit({
 				type: "proactive_context",
 				scope: "user",
@@ -670,18 +700,18 @@ export class Conversation {
 			}
 		}
 
-		await this.captureHarnessLearnings();
+		if (this.harnessLearning) await this.captureHarnessLearnings();
 	}
 
 	/** Deterministic write side of the harness loop, with per-conversation dedupe and caps. */
 	private async captureHarnessLearnings(): Promise<void> {
-		for (const query of this.emptyRecallQueries) {
+		for (const { query, resultCount, bestFinalScore } of this.weakRecalls) {
 			if (this.capturedEmptyRecalls.size >= MAX_EMPTY_RECALL_CAPTURES) break;
 			const normalized = query.trim().toLowerCase();
 			if (this.capturedEmptyRecalls.has(normalized)) continue;
 			this.capturedEmptyRecalls.add(normalized);
 			await this.writeHarnessCapture(
-				`Recall returned no results for cue "${query.slice(0, 200)}". Rephrase with concrete entity names or broaden the cue before answering without memory.`,
+				`Recall found nothing useful for cue "${query.slice(0, 200)}" (${resultCount} results, best fusion score ${bestFinalScore.toFixed(3)}). Rephrase with concrete entity names or broaden the cue before answering without memory.`,
 				"learning",
 				["seat-harness", "retrieval", "empty-recall"],
 				"empty_recall_capture",

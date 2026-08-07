@@ -58,6 +58,7 @@ interface CreateConversationBody {
 	provider?: string;
 	model?: string;
 	system_prompt?: string;
+	harness_learning?: boolean;
 }
 
 class HttpError extends Error {
@@ -408,6 +409,9 @@ export class SeatServer {
 				userId: body.user_id,
 				model,
 				systemPrompt: typeof body.system_prompt === "string" ? body.system_prompt : undefined,
+				// Default true; `harness_learning: false` exists for A/B evaluation
+				// control arms only (see ConversationOptions.harnessLearning).
+				harnessLearning: body.harness_learning !== false,
 			});
 		} catch (error) {
 			throw new HttpError(400, error instanceof Error ? error.message : String(error));
@@ -515,6 +519,13 @@ export class SeatServer {
 		this.oauthSessions.set(providerId, session);
 		request.on("close", () => {
 			if (!response.writableEnded) controller.abort();
+			// Evict eagerly. pi's login can take time to settle after an abort
+			// (it may be blocking on the localhost callback), and a session whose
+			// client is gone must not 409-block the user's next attempt while it
+			// winds down.
+			if (this.oauthSessions.get(providerId) === session) {
+				this.oauthSessions.delete(providerId);
+			}
 		});
 		const heartbeat = setInterval(() => {
 			if (!response.writableEnded) response.write(": ping\n\n");
@@ -563,7 +574,12 @@ export class SeatServer {
 			clearInterval(heartbeat);
 			for (const [, pending] of session.prompts) pending.reject(new Error("Login finished"));
 			session.prompts.clear();
-			this.oauthSessions.delete(providerId);
+			// Only remove the registry entry if it is still OURS. A stale flow
+			// settling late must never delete the fresh session that replaced it
+			// after eager eviction — that would silently orphan a live login.
+			if (this.oauthSessions.get(providerId) === session) {
+				this.oauthSessions.delete(providerId);
+			}
 			if (!response.writableEnded) response.end();
 		}
 	}

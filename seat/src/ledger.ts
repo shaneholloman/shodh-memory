@@ -47,9 +47,31 @@ export interface RevertData {
 	note: string;
 }
 
+/**
+ * The backend's implicit-feedback pass, as reported by proactive_context.
+ *
+ * The implicit leg applies reinforce_recall and Hebbian strengthening
+ * server-side (src/handlers/recall.rs:1670-1720) — the seat does not perform
+ * these updates, it learns of them from `feedback_processed` on the response.
+ * Before this entry existed they were invisible to the ledger, which broke
+ * its core claim: with a corpus where every surfaced memory is proactive-owned
+ * (found by the lessons A/B eval with a one-memory corpus), ALL loop-1
+ * learning flowed through the implicit leg and the ledger recorded nothing.
+ *
+ * Revert compensates with an opposite explicit reinforce per id, same
+ * honesty rule as `reinforce`: EMA momentum is not invertible, the revert
+ * event says compensating, not undone.
+ */
+export interface ImplicitFeedbackData {
+	memories_evaluated: number;
+	reinforced: string[];
+	weakened: string[];
+}
+
 export type LedgerEntry =
 	| LedgerEntryBase<"memory_write", MemoryWriteData>
 	| LedgerEntryBase<"reinforce", ReinforceData>
+	| LedgerEntryBase<"implicit_feedback", ImplicitFeedbackData>
 	| LedgerEntryBase<"revert", RevertData>;
 
 interface LedgerEntryBase<K extends string, D> {
@@ -185,6 +207,40 @@ export class LearningLedger {
 			await backend.deleteMemory(original.user_id, original.data.memory_id);
 			compensation = { kind: "memory_delete", memory_id: original.data.memory_id };
 			note = "Exact revert: the written memory was deleted.";
+		} else if (original.kind === "implicit_feedback") {
+			// Compensate each direction with its opposite explicit reinforce.
+			// Same honesty rule as explicit reinforce: EMA momentum has inertia,
+			// so this counters rather than undoes — and the backend's own
+			// Hebbian strengthening from the implicit pass is countered only to
+			// the extent /api/reinforce reaches the same weights.
+			const ids = [...original.data.reinforced, ...original.data.weakened];
+			if (ids.length === 0) {
+				compensation = { kind: "none" };
+				note = "The implicit pass evaluated memories but moved none; nothing to compensate.";
+			} else {
+				let stats = {
+					memories_processed: 0,
+					associations_strengthened: 0,
+					importance_boosts: 0,
+					importance_decays: 0,
+				};
+				if (original.data.reinforced.length > 0) {
+					stats = await backend.reinforce(original.user_id, original.data.reinforced, "misleading");
+				}
+				if (original.data.weakened.length > 0) {
+					const s2 = await backend.reinforce(original.user_id, original.data.weakened, "helpful");
+					stats = {
+						memories_processed: stats.memories_processed + s2.memories_processed,
+						associations_strengthened: stats.associations_strengthened + s2.associations_strengthened,
+						importance_boosts: stats.importance_boosts + s2.importance_boosts,
+						importance_decays: stats.importance_decays + s2.importance_decays,
+					};
+				}
+				compensation = { kind: "counter_reinforce", outcome: "misleading", memory_ids: ids, stats };
+				note =
+					"Compensating action: opposite explicit reinforce per direction. The backend's " +
+					"implicit momentum and Hebbian updates are countered, not exactly undone.";
+			}
 		} else {
 			const outcome = original.data.outcome;
 			if (outcome === "neutral") {

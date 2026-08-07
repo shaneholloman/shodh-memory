@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { probeBackend, type Reachability } from "@/lib/api";
+import { isHumanProfile, probeBackend, type Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
 
 /**
@@ -28,7 +28,9 @@ export function useReachability(): Reachability {
   // The array's identity changes on every poll even when its contents do not,
   // so the effect depends on a serialisation of the contents rather than on the
   // array itself. Without this it re-runs ten times a minute forever.
-  const profileKey = JSON.stringify(reach.state === "online" ? reach.profiles : []);
+  const profileKey = JSON.stringify(
+    reach.state === "online" ? reach.profiles.filter(isHumanProfile) : [],
+  );
 
   useEffect(() => {
     reconcileProfiles(JSON.parse(profileKey) as string[]);

@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { deleteConversation, renameConversation } from "@/lib/seat/client";
 import type { ConversationSummary } from "@/lib/seat/types";
 import { formatCost, formatTokens, relativeDay } from "@/lib/format";
+import { costIsReal, useBillingLookup } from "./useBilling";
 import { useChat } from "@/stores/chat";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,7 +54,14 @@ function SessionRow({
   });
 
   const title = session.title ?? `Untitled · ${relativeDay(session.created_at)}`;
-  const cost = formatCost(session.usage.cost_total);
+  // Same rule as the conversation header: under a subscription, pi's cost
+  // number is a list-price estimate of flat-rate usage, not a bill. This row
+  // was the one surface the billing-aware pass missed — caught the first time
+  // a real Max-plan conversation appeared in the list showing "$0.011".
+  const lookupModel = useBillingLookup(true);
+  const cost = costIsReal(lookupModel(session.model))
+    ? formatCost(session.usage.cost_total)
+    : null;
 
   if (mode === "rename") {
     return (
