@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import type { RecallResponse } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import { ScoreBreakdown } from "./ScoreBreakdown";
@@ -46,12 +46,14 @@ export function Inspector() {
   const selectedId = useSession((s) => s.selectedMemoryId);
   const select = useSession((s) => s.select);
 
-  // Same key as ResultPane — this reads the cache and never issues a request of
-  // its own. `enabled: false` guarantees that even on a cache miss.
-  const { data } = useQuery<RecallResponse>({
-    queryKey: ["recall", profile, query],
-    enabled: false,
-  });
+  // Same key as ResultPane, read straight out of the cache.
+  //
+  // Deliberately `getQueryData` and not `useQuery({ enabled: false })`. That
+  // form still *registers* a query for the key, and a registration carrying no
+  // queryFn throws when nothing else has populated it — which is exactly the
+  // first-paint case here, before any search has run. A cache read has no such
+  // failure mode and cannot issue a request by accident.
+  const data = useQueryClient().getQueryData<RecallResponse>(["recall", profile, query]);
 
   const memory = data?.memories.find((m) => m.id === selectedId);
 
