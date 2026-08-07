@@ -1,9 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
-import { recall, ApiError, NetworkError, type Reachability } from "@/lib/api";
-import { useSession } from "@/stores/session";
+import { ApiError, NetworkError, type Reachability } from "@/lib/api";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ResultList, ResultListSkeleton } from "./ResultList";
 import { GraphStage } from "./GraphStage";
+import { useRecall } from "./useRecall";
 
 /**
  * Recall — the search surface, and the entry point to both chains.
@@ -16,19 +15,9 @@ import { GraphStage } from "./GraphStage";
  */
 
 function ResultPane({ reach }: { reach: Reachability }) {
-  const profile = useSession((s) => s.profile);
-  const query = useSession((s) => s.activeQuery);
-
-  const enabled = reach.state === "online" && profile !== null && query.trim().length > 0;
-
-  const { data, error, isFetching } = useQuery({
-    // The profile is part of the key, not just the payload: switching profile
-    // is switching corpus, and showing the previous one's hits under a new
-    // profile would be a correctness bug, not a stale-cache annoyance.
-    queryKey: ["recall", profile, query],
-    queryFn: ({ signal }) => recall({ user_id: profile!, query }, signal),
-    enabled,
-  });
+  // The query itself lives in `useRecall` — the graph stage renders the same
+  // result set and must not issue a second retrieval to get it.
+  const { data, error, isFetching, profile, query } = useRecall(reach);
 
   if (reach.state !== "online") {
     return (
@@ -101,7 +90,7 @@ export function RecallView({ reach }: { reach: Reachability }) {
       <div className="border-border flex w-[min(340px,42vw)] shrink-0 flex-col border-r">
         <ResultPane reach={reach} />
       </div>
-      <GraphStage />
+      <GraphStage reach={reach} />
     </div>
   );
 }
