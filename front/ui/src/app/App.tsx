@@ -7,6 +7,7 @@ import { TopBar, RAIL_OFFSET } from "@/components/layout/TopBar";
 import { SearchField } from "@/components/layout/SearchField";
 import { RecallView } from "@/features/recall/RecallView";
 import { Inspector } from "@/features/inspector/Inspector";
+import { TasksView } from "@/features/tasks/TasksView";
 import { Placeholder } from "@/components/layout/Placeholder";
 import type { Reachability } from "@/lib/api";
 
@@ -32,7 +33,10 @@ import type { Reachability } from "@/lib/api";
  * chrome that displays invented data is worse than chrome that is absent.
  */
 
-const INSPECTOR_OFFSET = "pr-[280px]";
+// Kept in lockstep with the Inspector's own width (Inspector.tsx) — must
+// match exactly, or `main`'s reserved space either exposes the Inspector's
+// backing surface or clips the content underneath it.
+const INSPECTOR_OFFSET = "pr-[min(280px,36vw)]";
 
 /** The Inspector is the detail surface for recall results, so it accompanies
  *  that route only. On a destination with no selectable objects it could show
@@ -57,7 +61,7 @@ function Shell({ reach }: { reach: Reachability }) {
           <Route path="/" element={<Navigate to="/recall" replace />} />
           <Route path="/recall" element={<RecallView reach={reach} />} />
           <Route path="/anomalies" element={<Placeholder id="anomalies" reach={reach} />} />
-          <Route path="/tasks" element={<Placeholder id="tasks" reach={reach} />} />
+          <Route path="/tasks" element={<TasksView reach={reach} />} />
           {/* A hash the app does not know is a typo or a stale link, not an
               error worth a page — send it home rather than showing a dead end. */}
           <Route path="*" element={<Navigate to="/recall" replace />} />
