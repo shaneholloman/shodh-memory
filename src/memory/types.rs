@@ -889,6 +889,68 @@ pub struct Experience {
     /// Used by hooks and auto-ingest where importance is known from caller context.
     #[serde(default)]
     pub importance_override: Option<f32>,
+
+    // =========================================================================
+    // TOPONYMS (places the content MENTIONS — not where it was recorded)
+    // =========================================================================
+    /// Places named in the content, resolved to coordinates by the offline
+    /// gazetteer at remember time. See [`Toponym`] for why these are kept
+    /// strictly apart from [`geo_location`](Self::geo_location).
+    ///
+    /// `#[serde(skip)]` is load-bearing and NOT an omission from the API.
+    /// `Experience` is only ever serialized as a field of `MemoryFlat`, and the
+    /// storage format is postcard — positional, not self-describing, with no
+    /// per-field presence marker. A new trailing field on `Experience` would sit
+    /// in the MIDDLE of a `Memory` payload (`experience` is field 2 of 21), so
+    /// an old record would read this field's Vec-length varint out of the first
+    /// byte of `importance: f32` and shift every field after it. That decode
+    /// does not fail — for a typical importance it reads `0x00`, yields an empty
+    /// Vec, and returns a `Memory` full of silently wrong values. So the field
+    /// is skipped here and carried explicitly as the LAST field of `MemoryFlat`,
+    /// where appending is safe and `decode_raw_compat` can default it for
+    /// records written before it existed.
+    #[serde(skip)]
+    pub toponyms: Vec<Toponym>,
+}
+
+/// A place mentioned in a memory's content, resolved to coordinates.
+///
+/// # Why this is not `geo_location`
+///
+/// `geo_location` means "this memory was RECORDED at these coordinates" and is
+/// what the geohash radius index is built from. A toponym means "this memory
+/// MENTIONS this place". Conflating them breaks recall in a way that is very
+/// hard to notice and impossible to undo per-result: a note reading "the
+/// Baltimore team shipped the new gripper" would start matching "what did the
+/// robot observe within 5km of Baltimore", and a spatial query would return
+/// memories that were never anywhere near the place.
+///
+/// So toponyms live in their own field, are never written to `geo_location`,
+/// and are deliberately not indexed in the `geo:` keyspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Toponym {
+    /// The place name exactly as it appeared in the content, so a reader can
+    /// see what was matched ("NYC" resolving to "New York City" is a different
+    /// claim than "New York City" matching itself).
+    pub mention: String,
+
+    /// Canonical GeoNames name of the resolved place.
+    pub name: String,
+
+    /// Latitude in WGS84 degrees.
+    pub lat: f64,
+
+    /// Longitude in WGS84 degrees.
+    pub lon: f64,
+
+    /// ISO 3166-1 alpha-2 country code.
+    pub country: String,
+
+    /// Population of the resolved place. This is the value that decided the
+    /// match when several places share the name, so it doubles as the
+    /// confidence proxy: a mention resolving to an 8M-person city is far more
+    /// likely to mean that place than one resolving to a 15k-person town.
+    pub population: u32,
 }
 
 impl Default for Experience {
@@ -938,6 +1000,7 @@ impl Default for Experience {
             ner_entities: Vec::new(),
             cooccurrence_pairs: Vec::new(),
             importance_override: None,
+            toponyms: Vec::new(),
         }
     }
 }
@@ -1686,6 +1749,18 @@ struct MemoryFlat {
     // Hierarchy
     #[serde(default)]
     parent_id: Option<MemoryId>,
+    /// Places the content mentions, resolved to coordinates.
+    ///
+    /// Logically part of `Experience` (and exposed there), but carried here
+    /// because postcard is positional: only a TRAILING field can be appended
+    /// to a wire format without shifting every field written after it. See
+    /// [`Experience::toponyms`] for the full reasoning, and
+    /// `MEMORY_DEFAULT_SUFFIX` in `storage.rs` for the decoder side.
+    ///
+    /// MUST remain the last field. Anything appended after it has to extend the
+    /// default suffix too.
+    #[serde(default)]
+    toponyms: Vec<Toponym>,
 }
 
 impl Serialize for Memory {
@@ -1722,6 +1797,10 @@ impl Serialize for Memory {
             related_todo_ids: self.related_todo_ids.clone(),
             // Hierarchy
             parent_id: self.parent_id.clone(),
+            // Lifted out of `experience` so it lands at the tail of the wire
+            // format; `Experience::toponyms` is `#[serde(skip)]` precisely so it
+            // is carried here exactly once.
+            toponyms: self.experience.toponyms.clone(),
         };
         flat.serialize(serializer)
     }
@@ -1733,7 +1812,10 @@ impl<'de> Deserialize<'de> for Memory {
     where
         D: serde::Deserializer<'de>,
     {
-        let flat = MemoryFlat::deserialize(deserializer)?;
+        let mut flat = MemoryFlat::deserialize(deserializer)?;
+        // Put the tail-carried toponyms back where they belong on the domain
+        // type. Records written before the field existed decode as empty.
+        flat.experience.toponyms = flat.toponyms;
         Ok(Memory {
             id: flat.id,
             experience: flat.experience,
