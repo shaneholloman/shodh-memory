@@ -79,6 +79,53 @@ jobs:
           echo "| Warnings | $WARNINGS |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $WARNINGS warning(s) — non-blocking (-W mode) |" >> $GITHUB_STEP_SUMMARY
 
+  feature-gates:
+    name: Optional Features Compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      # Optional features are compiled by nothing else in this workflow, so code
+      # behind a #[cfg(feature = ...)] gate can stop compiling and no PR will
+      # ever show it. Not hypothetical: the zenoh transport accrued four compile
+      # errors that way (repaired in #417), and llm-parser two (repaired here).
+      # 'python' is excluded deliberately: it needs a maturin/PyO3 toolchain and
+      # is already built on every release by pypi.yml.
+      - name: cargo check each optional feature
+        run: |
+          set -o pipefail
+          FAILED=""
+          for feature in zenoh llm-parser telemetry; do
+            echo "::group::cargo check --features $feature"
+            if cargo check --features "$feature" --all-targets; then
+              echo "OK: $feature"
+            else
+              echo "FAILED: $feature"
+              FAILED="$FAILED $feature"
+            fi
+            echo "::endgroup::"
+          done
+          {
+            echo "### Optional Feature Compilation"
+            echo ""
+            if [ -n "$FAILED" ]; then
+              echo "Broken:$FAILED"
+            else
+              echo "All optional features compile."
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+          if [ -n "$FAILED" ]; then
+            echo "Optional features failed to compile:$FAILED" >&2
+            exit 1
+          fi
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
