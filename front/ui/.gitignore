@@ -5,3 +5,6 @@ node_modules/
 # (front/build.rs says so if you forget).
 dist/
 *.tsbuildinfo
+
+# Captured third-party source, kept for reference during the port, not built.
+.reference/
