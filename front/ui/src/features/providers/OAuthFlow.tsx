@@ -32,7 +32,13 @@ export function OAuthFlow({
 
   useEffect(() => {
     const controller = new AbortController();
-    startOAuthLogin(
+    // Deferred one tick: React StrictMode mounts, unmounts and remounts every
+    // effect in development. Starting the flow synchronously fired TWO logins
+    // back to back — the second 409'd against the first, and the first's
+    // just-opened callback listener made the retry EADDRINUSE. The fake mount's
+    // cleanup runs before the timer fires, so only the real mount ever starts.
+    const timer = window.setTimeout(() => {
+      void startOAuthLogin(
       provider.id,
       (event) => {
         switch (event.kind) {
@@ -58,12 +64,16 @@ export function OAuthFlow({
         }
       },
       controller.signal,
-    ).catch((cause) => {
-      if (!(cause instanceof DOMException && cause.name === "AbortError")) {
-        setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    });
-    return () => controller.abort();
+      ).catch((cause) => {
+        if (!(cause instanceof DOMException && cause.name === "AbortError")) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      });
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
     // One flow per mount; provider identity is fixed for the mount's lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider.id]);
