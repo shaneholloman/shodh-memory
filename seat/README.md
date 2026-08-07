@@ -136,8 +136,14 @@ Revert semantics are honest about what the backend supports:
 |---|---|---|
 | GET | `/healthz` | seat + backend health (unauthenticated) |
 | GET | `/v1/models?refresh=1` | available models; `refresh` re-probes local endpoints |
+| GET | `/v1/providers` | provider auth status — configured/source/stored, never key material |
+| PUT | `/v1/providers/{id}/key` | `{api_key}` — stored server-side (`provider-credentials.json`, 0600); a stored key beats env in pi's resolution order |
+| DELETE | `/v1/providers/{id}/key` | remove the stored key; env-var auth, if present, remains |
+| GET | `/v1/conversations?user_id` | persisted session list with turn counts and accumulated token/cost totals |
 | POST | `/v1/conversations` | `{user_id, provider, model, system_prompt?}` |
-| GET | `/v1/conversations/{id}` | state + transcript |
+| GET | `/v1/conversations/{id}` | metadata + transcript + durable events (evidence replay) |
+| PATCH | `/v1/conversations/{id}` | `{title}` — rename |
+| DELETE | `/v1/conversations/{id}` | delete conversation, transcript and events |
 | POST | `/v1/conversations/{id}/messages` | `{text}` → SSE stream of events |
 | PATCH | `/v1/conversations/{id}/model` | `{provider, model}` — swap model mid-conversation; transcript and retrieved evidence unchanged |
 | GET | `/v1/learning/events?limit&conversation_id` | ledger review |
@@ -199,11 +205,54 @@ SHODH_API_KEY=... node dist/index.js
 
 Requires Node ≥ 22.19 (pi's floor).
 
+## Persistence
+
+Conversations are durable across restarts. One SQLite database
+(`<data-dir>/seat.db`, `node:sqlite`, WAL) holds three tables:
+
+- `conversations` — metadata plus accumulated token/cost totals per
+  conversation, so the session list shows real numbers without replaying
+  transcripts;
+- `transcripts` — the pi `AgentMessage[]` snapshot after each turn, which
+  re-seeds `Agent.state.messages` when a conversation is reopened;
+- `events` — every SeatEvent except the delta streams (whose final form lives
+  in the transcript), so the UI can rebuild the full evidence surface —
+  recalls with attribution, proactive context, reinforcements, ledger ids —
+  for any reopened conversation.
+
+Each turn persists atomically (transcript + events + totals in one
+transaction), including aborted turns. Live `Conversation` objects are a cache
+over the store; a conversation not live in this process is rehydrated on its
+next message. If its stored model no longer resolves (key removed, local
+endpoint gone), reads still work and message attempts get a 409 naming the
+remedy: switch the model.
+
+pi's `@earendil-works/pi-session-backend-sqlite-node` was evaluated and not
+used: it implements pi-agent-core's `SessionRepository` — cwd-keyed session
+trees with entry lanes, branch caches and leases — for pi's own session layer,
+which the seat does not use, and it has no representation for seat events, so
+adopting it would still have required a second store for the evidence stream.
+
+## Provider credentials
+
+`FileCredentialStore` (`src/credentials.ts`) implements pi's `CredentialStore`
+over `<data-dir>/provider-credentials.json` (0600, temp-file + rename writes)
+and is injected into `builtinModels({credentials})`. pi resolves a stored
+credential before ambient env vars, so a key submitted through
+`PUT /v1/providers/{id}/key` becomes the working credential immediately, and
+`DELETE` falls back to env. `GET /v1/providers` reports, per provider: whether
+auth is configured, pi's own source label (`ANTHROPIC_API_KEY`, `OAuth`,
+`local endpoint (keyless)`, …), whether a seat-stored key exists, and whether
+the provider meaningfully accepts an API key at all (ambient-only providers
+like Bedrock/Vertex do not). Key material never appears in any response.
+
 ## Deliberately not built
 
-- **Conversation persistence** — transcripts are in-memory per process. pi's
-  harness layer ships a session store (JSONL trees, branching, compaction);
-  adopting it is a product decision for the seat UI, not harness plumbing.
+- **OAuth login flows** — pi ships them (`ai/src/auth/oauth/*`), but they are
+  interactive multi-step prompt/callback flows; bridging that interaction over
+  the seat's HTTP surface is real design work, and env/API-key auth covers
+  every provider the seat targets today. `GET /v1/providers` already reports
+  OAuth-sourced auth when pi resolves it from the environment.
 - **Python/IPython kernel, installable skill packages, recursive sub-agents** —
   external design choices that do not fit this product.
 - **A second store for harness behaviors** — harness learnings are memories in

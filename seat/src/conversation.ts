@@ -30,7 +30,7 @@
  */
 
 import * as crypto from "node:crypto";
-import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { RecallMemory, ReinforceOutcome, ShodhBackend, ToolAction } from "./backend.js";
 import type { MemoryScope, ModelRef, ReinforceTrigger, SeatEvent, SeatEventSink, UsagePayload } from "./events.js";
@@ -112,6 +112,19 @@ export interface ConversationOptions {
 	userId: string;
 	model: Model<Api>;
 	systemPrompt?: string;
+	/**
+	 * Rehydration state for a conversation reopened from the store: identity,
+	 * transcript, and the turn counter continue exactly where they stopped.
+	 * `lastAssistantText` re-arms the momentum leg so the first message after a
+	 * restart still delivers previous-response feedback to proactive_context.
+	 */
+	restore?: {
+		id: string;
+		createdAt: Date;
+		turn: number;
+		messages: unknown[];
+		lastAssistantText?: string;
+	};
 }
 
 interface SurfacedMemory {
@@ -200,11 +213,15 @@ export class Conversation {
 	private capturedToolErrors = new Set<string>();
 
 	constructor(deps: ConversationDeps, options: ConversationOptions) {
-		this.id = crypto.randomUUID();
+		this.id = options.restore?.id ?? crypto.randomUUID();
 		this.userId = options.userId;
 		this.harnessUserId = deriveHarnessUserId(options.userId);
-		this.createdAt = new Date();
+		this.createdAt = options.restore?.createdAt ?? new Date();
 		this.deps = deps;
+		if (options.restore) {
+			this.turn = options.restore.turn;
+			this.lastAssistantText = options.restore.lastAssistantText;
+		}
 		this.baseSystemPrompt = options.systemPrompt?.trim()
 			? `${BASE_SYSTEM_PROMPT}\n\n${options.systemPrompt.trim()}`
 			: BASE_SYSTEM_PROMPT;
@@ -233,6 +250,10 @@ export class Conversation {
 				model: options.model,
 				thinkingLevel: "off",
 				tools: [...memoryTools, ...deps.mcpTools],
+				// Restored transcripts were produced by this same agent and
+				// persisted verbatim (store.ts) — the cast re-labels what the
+				// agent itself serialized.
+				messages: (options.restore?.messages as AgentMessage[] | undefined) ?? [],
 			},
 			streamFn: (model, context, streamOptions) => deps.registry.models.streamSimple(model, context, streamOptions),
 		});
@@ -245,6 +266,11 @@ export class Conversation {
 
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming;
+	}
+
+	/** Completed turn count — the turn number the NEXT message will get is this + 1. */
+	get turnCount(): number {
+		return this.turn;
 	}
 
 	private emit(event: SeatEvent): void {

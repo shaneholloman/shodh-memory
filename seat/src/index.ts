@@ -5,10 +5,12 @@
 import * as fsp from "node:fs/promises";
 import { ShodhBackend } from "./backend.js";
 import { loadConfig, type McpServerConfig } from "./config.js";
+import { FileCredentialStore } from "./credentials.js";
 import { LearningLedger } from "./ledger.js";
 import { McpHost } from "./mcp.js";
 import { ModelRegistry } from "./models-registry.js";
 import { SeatServer } from "./server.js";
+import { SeatStore } from "./store.js";
 
 async function loadMcpServers(configPath: string | undefined): Promise<McpServerConfig[]> {
 	if (!configPath) return [];
@@ -28,8 +30,10 @@ async function loadMcpServers(configPath: string | undefined): Promise<McpServer
 async function main(): Promise<void> {
 	const config = loadConfig();
 	const backend = new ShodhBackend(config.apiUrl, config.apiKey, config.backendTimeoutMs);
-	const registry = new ModelRegistry(config);
+	const credentials = new FileCredentialStore(config.dataDir);
+	const registry = new ModelRegistry(config, credentials);
 	const ledger = new LearningLedger(config.dataDir);
+	const store = new SeatStore(config.dataDir);
 	const mcpHost = new McpHost();
 
 	try {
@@ -58,10 +62,11 @@ async function main(): Promise<void> {
 		}
 	}
 
-	const server = new SeatServer({ config, backend, registry, ledger, mcpHost });
+	const server = new SeatServer({ config, backend, registry, ledger, mcpHost, store });
 	await server.listen();
 	console.log(`[seat] listening on http://${config.host}:${config.port}`);
 	console.log(`[seat] learning ledger: ${ledger.file}`);
+	console.log(`[seat] conversation store + provider credentials: ${config.dataDir}`);
 
 	const shutdown = async (signal: string): Promise<void> => {
 		console.log(`[seat] ${signal} received, shutting down`);

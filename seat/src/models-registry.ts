@@ -15,7 +15,9 @@
 
 import {
 	type Api,
+	type AuthCheck,
 	createProvider,
+	type CredentialStore,
 	type Model,
 	type MutableModels,
 	type Provider,
@@ -32,6 +34,29 @@ export interface ModelInfo {
 	context_window: number;
 	max_tokens: number;
 	reasoning: boolean;
+	local: boolean;
+}
+
+/**
+ * Non-secret provider status for the sign-in surface. `source` is pi's own
+ * label for where working auth came from ("ANTHROPIC_API_KEY", "OAuth",
+ * "stored key", "local endpoint (keyless)", …); no key material ever leaves
+ * this process.
+ */
+export interface ProviderInfo {
+	id: string;
+	name: string;
+	/** Whether this provider currently has complete, usable auth. */
+	configured: boolean;
+	source: string | null;
+	auth_type: "api_key" | "oauth" | null;
+	/** A credential is stored in the seat's own credential file. */
+	stored: boolean;
+	/** Whether submitting an API key through the seat is meaningful for this
+	 *  provider (pi models it as `auth.apiKey.login` being present; ambient-only
+	 *  providers such as Bedrock/Vertex resolve from AWS/ADC files instead). */
+	accepts_api_key: boolean;
+	model_count: number;
 	local: boolean;
 }
 
@@ -104,9 +129,14 @@ function localProvider(options: LocalProviderOptions): Provider<"openai-completi
 
 export class ModelRegistry {
 	readonly models: MutableModels;
+	private readonly credentials: CredentialStore;
 
-	constructor(config: SeatConfig) {
-		this.models = builtinModels();
+	constructor(config: SeatConfig, credentials: CredentialStore) {
+		this.credentials = credentials;
+		// A stored credential owns the provider; env vars are the fallback
+		// (packages/ai/src/auth/resolve.ts). Keys submitted through the seat's
+		// sign-in surface therefore take effect without a restart.
+		this.models = builtinModels({ credentials });
 		this.models.setProvider(
 			localProvider({
 				id: "ollama",
@@ -156,5 +186,82 @@ export class ModelRegistry {
 
 	resolve(provider: string, id: string): Model<Api> | undefined {
 		return this.models.getModel(provider, id);
+	}
+
+	/** Provider status for the sign-in surface. Never exposes key material. */
+	async listProviders(): Promise<ProviderInfo[]> {
+		const stored = new Set((await this.credentials.list()).map((info) => info.providerId));
+		const providers: ProviderInfo[] = [];
+		for (const provider of this.models.getProviders()) {
+			// checkAuth is a presence check (env/stored/ambient), not a network
+			// round-trip. A provider whose check throws (malformed ambient
+			// config) reads as unconfigured rather than taking the listing down.
+			let check: AuthCheck | undefined;
+			try {
+				check = await this.models.checkAuth(provider.id);
+			} catch {
+				check = undefined;
+			}
+			const local = (LOCAL_PROVIDER_IDS as readonly string[]).includes(provider.id);
+			providers.push({
+				id: provider.id,
+				name: provider.name,
+				configured: check !== undefined,
+				source: check?.source ?? null,
+				auth_type: check?.type ?? null,
+				stored: stored.has(provider.id),
+				accepts_api_key: !local && Boolean(provider.auth.apiKey?.login),
+				model_count: this.models.getModels(provider.id).length,
+				local,
+			});
+		}
+		providers.sort((a, b) => a.name.localeCompare(b.name));
+		return providers;
+	}
+
+	/**
+	 * Store an API key for a provider, server-side. The key becomes the working
+	 * credential immediately (stored beats env in pi's resolution order).
+	 * Returns the provider's post-write status.
+	 */
+	async setApiKey(providerId: string, apiKey: string): Promise<ProviderInfo> {
+		const provider = this.models.getProvider(providerId);
+		if (!provider) throw new UnknownProviderError(providerId);
+		if ((LOCAL_PROVIDER_IDS as readonly string[]).includes(providerId) || !provider.auth.apiKey?.login) {
+			throw new ProviderKeyUnsupportedError(providerId);
+		}
+		await this.credentials.modify(providerId, async () => ({ type: "api_key", key: apiKey }));
+		return this.providerInfo(providerId);
+	}
+
+	/** Remove the stored credential (env-var auth, if any, remains). */
+	async clearCredential(providerId: string): Promise<ProviderInfo> {
+		const provider = this.models.getProvider(providerId);
+		if (!provider) throw new UnknownProviderError(providerId);
+		await this.models.logout(providerId);
+		return this.providerInfo(providerId);
+	}
+
+	private async providerInfo(providerId: string): Promise<ProviderInfo> {
+		const info = (await this.listProviders()).find((provider) => provider.id === providerId);
+		if (!info) throw new UnknownProviderError(providerId);
+		return info;
+	}
+}
+
+export class UnknownProviderError extends Error {
+	constructor(providerId: string) {
+		super(`Unknown provider: ${providerId}`);
+		this.name = "UnknownProviderError";
+	}
+}
+
+export class ProviderKeyUnsupportedError extends Error {
+	constructor(providerId: string) {
+		super(
+			`Provider ${providerId} does not take an API key here — it authenticates ambiently ` +
+				`(local endpoint, AWS profile, or application-default credentials)`,
+		);
+		this.name = "ProviderKeyUnsupportedError";
 	}
 }
