@@ -17,6 +17,7 @@ import {
 } from "d3";
 import { useSession } from "@/stores/session";
 import {
+  cooccurFloor,
   entityTypeToken,
   isEdgeRendered,
   SMALL_GRAPH_MAX,
@@ -131,7 +132,7 @@ export function EntityCanvas({
   onDrillIn: (clusterId: number) => void;
   /** Reports what this level actually drew, so the footer states the same
    *  numbers the canvas used rather than recomputing them and drifting. */
-  onStats?: (stats: { hiddenEdges: number }) => void;
+  onStats?: (stats: { hiddenEdges: number; floor: number }) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -144,6 +145,9 @@ export function EntityCanvas({
   const selectedRef = useRef<string | null>(selectedEntityId);
   const drawRef = useRef<() => void>(() => {});
   const simRef = useRef<Simulation<CanvasNode, CanvasLink> | null>(null);
+
+  /** Corpus-derived threshold below which generic co-occurrence is not drawn. */
+  const floor = useMemo(() => cooccurFloor(model), [model]);
 
   /** The node/link set for the current level. */
   const { nodes, links } = useMemo(() => {
@@ -209,7 +213,7 @@ export function EntityCanvas({
       };
     });
     const links: CanvasLink[] = model.edges
-      .filter((e) => keep.has(e.source) && keep.has(e.target) && isEdgeRendered(e))
+      .filter((e) => keep.has(e.source) && keep.has(e.target) && isEdgeRendered(e, floor))
       .map((e) => ({
         source: e.source,
         target: e.target,
@@ -220,7 +224,7 @@ export function EntityCanvas({
         width: 0,
       }));
     return { nodes, links };
-  }, [model, level, clusterId]);
+  }, [model, level, clusterId, floor]);
 
   /** What the floor hid at this level, reported upward so the footer can say
    *  so. Counted here because this is where the scope (whole graph vs one
@@ -231,13 +235,13 @@ export function EntityCanvas({
       clusterId !== null ? (model.clusters[clusterId]?.members ?? []) : model.nodes.map((_, i) => i);
     const keep = new Set(memberIdx.map((i) => model.nodes[i].id));
     return model.edges.filter(
-      (e) => keep.has(e.source) && keep.has(e.target) && !isEdgeRendered(e),
+      (e) => keep.has(e.source) && keep.has(e.target) && !isEdgeRendered(e, floor),
     ).length;
-  }, [model, level, clusterId]);
+  }, [model, level, clusterId, floor]);
 
   useEffect(() => {
-    onStats?.({ hiddenEdges });
-  }, [hiddenEdges, onStats]);
+    onStats?.({ hiddenEdges, floor });
+  }, [hiddenEdges, floor, onStats]);
 
   useEffect(() => {
     selectedRef.current = selectedEntityId;

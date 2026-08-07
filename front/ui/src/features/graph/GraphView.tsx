@@ -6,7 +6,7 @@ import { useSession } from "@/stores/session";
 import { useUniverse } from "./useUniverse";
 import { EntityCanvas, levelFor, type Level } from "./EntityCanvas";
 import {
-  COOCCUR_RENDER_FLOOR,
+  cooccurFloor,
   entityTypeToken,
   isEdgeRendered,
   NAMED_ENTITY_TYPES,
@@ -70,7 +70,10 @@ export function GraphView({ reach }: { reach: Reachability }) {
   // canvas are two views of it, and the canvas is remounted per level.
   const [clusterId, setClusterId] = useState<number | null>(null);
   /** Reported by the canvas so the footer states what was actually drawn. */
-  const [stats, setStats] = useState<{ hiddenEdges: number }>({ hiddenEdges: 0 });
+  const [stats, setStats] = useState<{ hiddenEdges: number; floor: number }>({
+    hiddenEdges: 0,
+    floor: 0,
+  });
 
   // A new corpus invalidates a drill path taken through the old one.
   useEffect(() => {
@@ -112,7 +115,9 @@ export function GraphView({ reach }: { reach: Reachability }) {
   const tierCounts = useMemo(() => {
     const counts = { L1Working: 0, L2Episodic: 0, L3Semantic: 0 } as Record<string, number>;
     if (!model) return counts;
-    for (const e of model.edges) if (isEdgeRendered(e)) counts[e.tier] = (counts[e.tier] ?? 0) + 1;
+    const floor = cooccurFloor(model);
+    for (const e of model.edges)
+      if (isEdgeRendered(e, floor)) counts[e.tier] = (counts[e.tier] ?? 0) + 1;
     return counts;
   }, [model]);
 
@@ -254,7 +259,7 @@ export function GraphView({ reach }: { reach: Reachability }) {
           {shown} of {model.totalEntities} · {model.totalConnections} relations
           {model.edgesDropped > 0 ? ` · budget dropped ${model.edgesDropped}` : ""}
           {stats.hiddenEdges > 0
-            ? ` · ${stats.hiddenEdges} co-occurrence edges below ${COOCCUR_RENDER_FLOOR} hidden`
+            ? ` · ${stats.hiddenEdges} weakest co-occurrence edges hidden (below ${stats.floor.toFixed(2)})`
             : ""}{" "}
           · size = mentions ·{" "}
           {level === "clusters" ? "click a cluster to drill in" : "click an entity to inspect"} ·

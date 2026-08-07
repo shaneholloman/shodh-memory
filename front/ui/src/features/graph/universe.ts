@@ -66,11 +66,38 @@ const MAX_OVERVIEW = 60;
  * those claims are the signal. The floor applies to bulk only, and the number
  * hidden is stated on screen — a silent cut would misreport the corpus.
  */
-export const COOCCUR_RENDER_FLOOR = 0.5;
+/**
+ * How many generic edges to draw, as a multiple of the node count.
+ *
+ * Deliberately a BUDGET, not a fixed weight threshold. A constant floor cannot
+ * work across corpora: on the verification corpus a 0.5 cut hid 407 of 416
+ * pairs and rendered a dense graph as nine lines, which misreports the data as
+ * badly as drawing the hairball does. Edge weights are not calibrated to any
+ * absolute scale — they depend on extraction density and decay — so the only
+ * stable question is "how much tissue can this many nodes carry before it stops
+ * being readable", and that scales with N.
+ *
+ * ~2 generic edges per node keeps the graph connected enough to show structure
+ * while leaving the typed relations visible on top of it.
+ */
+const GENERIC_PER_NODE = 2;
 
-/** Whether an edge is drawn at all. Shared by the canvas and the count in the
- *  footer so the two cannot disagree about what was hidden. */
-export function isEdgeRendered(edge: EntityEdge, floor = COOCCUR_RENDER_FLOOR): boolean {
+/** Strength at or above which a generic edge is drawn, derived from the corpus
+ *  rather than assumed. Returns 0 when everything fits, so nothing is hidden
+ *  on a small graph. */
+export function cooccurFloor(model: UniverseModel): number {
+  const budget = Math.max(20, Math.round(model.nodes.length * GENERIC_PER_NODE));
+  const generic = model.edges.filter((e) => e.generic);
+  if (generic.length <= budget) return 0;
+  const sorted = generic.map((e) => e.strength).sort((a, b) => b - a);
+  return sorted[budget - 1];
+}
+
+/** Whether an edge is drawn at all. Shared by the canvas and the footer count
+ *  so the two cannot disagree about what was hidden. Typed relations are never
+ *  floored, however weak — a LocatedIn at 0.1 is still a claim about the world,
+ *  and those claims are the entire argument for this product. */
+export function isEdgeRendered(edge: EntityEdge, floor: number): boolean {
   return !edge.generic || edge.strength >= floor;
 }
 
