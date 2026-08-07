@@ -7196,6 +7196,7 @@ impl GraphMemory {
                     to_id: rel.to_entity.to_string(),
                     relation_type: rel.relation_type.as_str().to_string(),
                     strength: rel.effective_strength(),
+                    tier: rel.tier,
                     from_position: stars[*from_idx].position.clone(),
                     to_position: stars[*to_idx].position.clone(),
                 })
@@ -7311,6 +7312,19 @@ pub struct GravitationalConnection {
     pub to_id: String,
     pub relation_type: String,
     pub strength: f32,
+    /// Consolidation tier of the underlying edge: L1 working (new, dense,
+    /// aggressive decay) → L2 episodic (proven) → L3 semantic (consolidated,
+    /// near-permanent).
+    ///
+    /// `RelationshipEdge` has carried this since the tier system landed, but
+    /// the universe payload dropped it, so the only consumer that could see
+    /// tiers was `/api/graph/data/{user_id}` — which hard-truncates at 200
+    /// relationships PER TIER and reports the truncated counts as totals
+    /// (src/handlers/visualization.rs:378-392, :458-459). A client wanting both
+    /// the whole graph and its tier structure could not have both. It is a
+    /// `Copy` enum, so echoing it costs one byte-range on the wire and no
+    /// allocation.
+    pub tier: EdgeTier,
     pub from_position: Position3D,
     pub to_position: Position3D,
 }

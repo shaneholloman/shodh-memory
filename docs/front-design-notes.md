@@ -1,7 +1,15 @@
 # Front-end design notes — 2026-08-06
 
-Working notes for `front/index.html`. Tokens landed in `b4e45270`; this records what
-they were derived from and what the next pass should do, so it isn't re-derived.
+> **Retired 2026-08-07.** `front/index.html` — the single-file vanilla dashboard
+> these notes describe — has been deleted, along with `front/assets/d3.v7.min.js`.
+> The shipped UI is the React app under `front/ui`, which the `shodh-front`
+> binary embeds as one self-contained build artefact; its tokens live in
+> `front/ui/src/index.css` and its direction in `front/ui/DIRECTION.md`, which
+> supersedes the "next pass" section below.
+>
+> Kept because the derivations are still the reasoning behind the current
+> tokens, not because the surface it describes still exists. The old dashboard
+> is recoverable from git history.
 
 ## The existing identity (keep it)
 

@@ -79,6 +79,64 @@ jobs:
           echo "| Warnings | $WARNINGS |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $WARNINGS warning(s) — non-blocking (-W mode) |" >> $GITHUB_STEP_SUMMARY
 
+  frontend:
+    name: Dashboard Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: front/ui/package-lock.json
+
+      # Nothing in this workflow compiled front/ui before, so the dashboard
+      # could stop building and every PR would still be green. That is not
+      # hypothetical: a blanket `lib/` rule in .gitignore (Python venv
+      # boilerplate) silently swallowed front/ui/src/lib/ — the entire API
+      # client, the wire types and cn() — and the branch did not type-check
+      # from a clean clone while CI reported success on eleven other checks.
+      #
+      # `npm ci` rather than `npm install`, so this fails loudly if the
+      # lockfile and package.json disagree instead of quietly resolving
+      # something new.
+      - name: Install
+        working-directory: front/ui
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: front/ui
+        run: npx tsc -b --noEmit
+
+      - name: Build
+        working-directory: front/ui
+        run: npx vite build
+
+      # The dashboard is embedded into the shodh-front binary as ONE file and
+      # must run with no network — that is what the on-device claim rests on.
+      # A stray CDN link or un-inlined asset breaks it silently in the browser,
+      # so assert it here instead of hoping.
+      - name: Assert single self-contained artifact
+        working-directory: front/ui
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          EXTRA=$(find dist -type f ! -name index.html | wc -l)
+          if [ "$EXTRA" -ne 0 ]; then
+            echo "dist/ must contain only index.html; found $EXTRA other file(s):" >&2
+            find dist -type f ! -name index.html >&2
+            exit 1
+          fi
+          if grep -Eq '(src|href)="https?://' dist/index.html; then
+            echo "dist/index.html references an external URL:" >&2
+            grep -Eo '(src|href)="https?://[^"]*"' dist/index.html | sort -u >&2
+            exit 1
+          fi
+          SIZE=$(wc -c < dist/index.html)
+          echo "### Dashboard Build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Single self-contained artifact: $SIZE bytes" >> $GITHUB_STEP_SUMMARY
+
   feature-gates:
     name: Optional Features Compile
     runs-on: ubuntu-latest
