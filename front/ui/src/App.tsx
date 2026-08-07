@@ -10,9 +10,22 @@ import { GraphStage } from "@/components/GraphStage";
 import { Inspector } from "@/components/Inspector";
 
 /**
- * Every control rendered here is wired to something. Three that were not have
- * been removed rather than left inert:
+ * The shell.
  *
+ * Nothing here is in normal flow except the content itself: the rail, the
+ * header and the Inspector are all absolutely positioned, and `main` is offset
+ * by their widths. That is Gridline's structure and it is not decoration —
+ * it is what lets the rail expand over the stage instead of shoving it, and
+ * what will let the graph canvas take the full width with panels floated on
+ * top once it is ported. A flex row cannot do either.
+ *
+ * Two things from Gridline are deliberately not here. Its theme switch and the
+ * MutationObserver behind it are gone: this product is dark-only (index.css
+ * defines one set of values), so the control would toggle nothing. Its version
+ * strip is gone for the same reason — there is no version feed behind it, and
+ * chrome that displays invented data is worse than chrome that is absent.
+ *
+ * Also removed earlier, and staying removed:
  *  - "LLM-free / Deterministic / On-device" pills. Positioning copy in product
  *    chrome, doing nothing. Those claims belong where someone is deciding
  *    whether to adopt this, not where they are using it.
@@ -22,16 +35,13 @@ import { Inspector } from "@/components/Inspector";
  *    not exist until the canvas is ported. They render with the canvas.
  */
 
-/**
- * Page header.
- *
- * Removing the old tab strip left the three columns with no shared top edge —
- * the search field floated at y=0 against a sidebar whose first item sat 60px
- * lower, and nothing lined up. One header row spanning the content area gives
- * every view the same anchor and is where a view-scoped control (here, search)
- * belongs.
- */
-function ViewHeader({
+/** Collapsed rail width and Inspector width, as the offsets `main` reserves.
+ *  The rail's *expanded* width is deliberately absent: reserving it would make
+ *  the expansion push content, which is the thing it must not do. */
+const RAIL_OFFSET = "pl-14";
+const INSPECTOR_OFFSET = "pr-[280px]";
+
+function TopBar({
   title,
   children,
 }: {
@@ -39,9 +49,17 @@ function ViewHeader({
   children?: React.ReactNode;
 }) {
   return (
-    <header className="border-border flex h-12 shrink-0 items-center gap-3 border-b px-4">
-      <h1 className="text-[13px] font-medium tracking-tight">{title}</h1>
-      {children ? <div className="ml-auto flex items-center">{children}</div> : null}
+    <header
+      className={cn(
+        "border-sidebar-border bg-sidebar text-sidebar-foreground",
+        "absolute inset-x-0 top-0 z-20 flex h-12 items-center gap-3 border-b px-4",
+        RAIL_OFFSET,
+      )}
+    >
+      <h1 className="shrink-0 text-[13px] font-medium tracking-tight">{title}</h1>
+      {children ? (
+        <div className="ml-auto flex min-w-0 flex-1 justify-end">{children}</div>
+      ) : null}
     </header>
   );
 }
@@ -54,9 +72,11 @@ function SearchField({ disabled }: { disabled: boolean }) {
       placeholder="Search memory…"
       aria-label="Search memory"
       className={cn(
-        "bg-background border-input placeholder:text-muted-foreground w-[280px]",
+        // Shrinks rather than pushing the title off. A fixed 280px crowded the
+        // heading out of the bar below ~480px.
+        "bg-background border-input placeholder:text-muted-foreground w-full min-w-0 max-w-[280px]",
         "rounded-md border px-2.5 py-1.5 text-[13px]",
-        "focus-visible:border-ring focus-visible:ring-ring/40 focus-visible:outline-none focus-visible:ring-2",
+        "focus-visible:border-ring focus-visible:ring-ring/40 focus-visible:ring-2 focus-visible:outline-none",
         "disabled:cursor-not-allowed disabled:opacity-50",
       )}
     />
@@ -67,7 +87,7 @@ function SearchField({ disabled }: { disabled: boolean }) {
 function Placeholder({ id, reach }: { id: DestinationId; reach: Reachability }) {
   const dest = DESTINATIONS.find((d) => d.id === id);
   return (
-    <div className="grid flex-1 place-items-center px-8">
+    <div className="grid h-full place-items-center px-8">
       <div className="max-w-sm text-center">
         <p className="text-[15px] font-medium tracking-tight">{dest?.label}</p>
         <p className="text-muted-foreground mt-2 text-[13px] leading-relaxed">
@@ -111,7 +131,7 @@ export function App() {
   const online = reach.state === "online";
 
   return (
-    <div className="flex h-screen">
+    <div className="relative h-svh min-h-0 overflow-hidden">
       <Sidebar
         active={active}
         onNavigate={setActive}
@@ -119,32 +139,38 @@ export function App() {
         identity="defence-live"
       />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <ViewHeader title={DESTINATIONS.find((d) => d.id === active)!.label}>
-          {active === "recall" ? <SearchField disabled={!online} /> : null}
-        </ViewHeader>
+      <TopBar title={DESTINATIONS.find((d) => d.id === active)!.label}>
+        {active === "recall" ? <SearchField disabled={!online} /> : null}
+      </TopBar>
 
-        <div className="flex min-h-0 flex-1">
-          {active === "recall" ? (
-            <>
+      <main
+        className={cn("h-full pt-12", RAIL_OFFSET, online && INSPECTOR_OFFSET)}
+      >
+        {active === "recall" ? (
+          <div className="flex h-full min-h-0">
+            {online ? (
               <div className="border-border flex w-[320px] shrink-0 flex-col border-r">
                 <div className="flex min-h-0 flex-1 items-center justify-center p-6">
                   <p className="text-muted-foreground text-center text-[13px] leading-relaxed">
-                    {online
-                      ? "Search to surface memories, and the chains of cause that surfaced with them."
-                      : "Results appear here once the memory server is running."}
+                    Search to surface memories, and the chains of cause that
+                    surfaced with them.
                   </p>
                 </div>
               </div>
-              <GraphStage reach={reach} />
-            </>
-          ) : (
-            <Placeholder id={active} reach={reach} />
-          )}
-        </div>
-      </div>
+            ) : null}
+            <GraphStage reach={reach} />
+          </div>
+        ) : (
+          <Placeholder id={active} reach={reach} />
+        )}
+      </main>
 
-      <Inspector reach={reach} />
+      {/* Only when the product is usable. With the server down there is nothing
+          to select, so an Inspector can only repeat what the stage already
+          says — and the offline screen had four panels apologising separately
+          for one problem. One statement of a problem is information; four is
+          noise, and it made an ordinary not-started-yet state read as broken. */}
+      {online ? <Inspector reach={reach} /> : null}
     </div>
   );
 }
