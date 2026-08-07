@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
 import type { Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
 
@@ -37,21 +37,17 @@ export function SearchField({ reach }: { reach: Reachability }) {
       }}
       className="flex min-w-0 flex-1 justify-end"
     >
-      <input
+      <Input
         type="search"
+        name="q"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         disabled={!usable}
         placeholder={usable ? "Search memory…" : "Search unavailable"}
         aria-label="Search memory"
-        className={cn(
-          // Shrinks rather than pushing the title off. A fixed 280px crowded
-          // the heading out of the bar below ~480px.
-          "bg-background border-input placeholder:text-muted-foreground w-full max-w-[280px] min-w-0",
-          "rounded-md border px-2.5 py-1.5 text-[13px]",
-          "focus-visible:border-ring focus-visible:ring-ring/40 focus-visible:ring-2 focus-visible:outline-none",
-          "disabled:cursor-not-allowed disabled:opacity-50",
-        )}
+        // Shrinks rather than pushing the title off. A fixed 280px crowded
+        // the heading out of the bar below ~480px.
+        className="max-w-[280px]"
       />
     </form>
   );

@@ -1,6 +1,8 @@
 import { cn } from "@/lib/utils";
 import type { RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Skeleton } from "@/components/ui/skeleton";
 
 /**
  * The result column.
@@ -77,11 +79,41 @@ function ResultRow({ memory }: { memory: RecallMemory }) {
 
 export function ResultList({ memories }: { memories: RecallMemory[] }) {
   return (
-    <div role="list" className="min-h-0 flex-1 overflow-y-auto">
+    <ScrollArea role="list" className="min-h-0 flex-1">
       {memories.map((m) => (
         <div role="listitem" key={m.id}>
           <ResultRow memory={m} />
         </div>
+      ))}
+    </ScrollArea>
+  );
+}
+
+/**
+ * Skeleton rows in the real row's shape — three content lines, a score bar,
+ * a date — rather than the "Searching…" text this replaced. `aria-hidden`
+ * because a screen reader has nothing useful to announce about placeholder
+ * shapes; the search form's own state is what's meaningful.
+ */
+function SkeletonRow() {
+  return (
+    <div className="border-border border-b px-4 py-3">
+      <Skeleton className="h-[13px] w-full" />
+      <Skeleton className="mt-1.5 h-[13px] w-[88%]" />
+      <Skeleton className="mt-1.5 h-[13px] w-[55%]" />
+      <div className="mt-2.5 flex items-center gap-2">
+        <Skeleton className="h-[3px] w-16 rounded-full" />
+        <Skeleton className="h-2.5 w-9" />
+      </div>
+    </div>
+  );
+}
+
+export function ResultListSkeleton() {
+  return (
+    <div role="list" aria-hidden="true" className="min-h-0 flex-1 overflow-y-auto">
+      {Array.from({ length: 7 }, (_, i) => (
+        <SkeletonRow key={i} />
       ))}
     </div>
   );

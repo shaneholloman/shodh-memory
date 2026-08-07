@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { recall, ApiError, NetworkError, type Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
-import { ResultList } from "./ResultList";
+import { EmptyState } from "@/components/ui/empty-state";
+import { ResultList, ResultListSkeleton } from "./ResultList";
 import { GraphStage } from "./GraphStage";
 
 /**
@@ -13,17 +14,6 @@ import { GraphStage } from "./GraphStage";
  * about. A search field that acts on Enter is also what the control already
  * promises.
  */
-
-function Message({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="grid h-full place-items-center px-6">
-      <div className="max-w-xs text-center">
-        <p className="text-[13px] font-medium tracking-tight">{title}</p>
-        <p className="text-muted-foreground mt-1.5 text-[12px] leading-relaxed">{body}</p>
-      </div>
-    </div>
-  );
-}
 
 function ResultPane({ reach }: { reach: Reachability }) {
   const profile = useSession((s) => s.profile);
@@ -42,7 +32,7 @@ function ResultPane({ reach }: { reach: Reachability }) {
 
   if (reach.state !== "online") {
     return (
-      <Message
+      <EmptyState
         title="Not connected"
         body="Results appear here once the memory server is running."
       />
@@ -51,7 +41,7 @@ function ResultPane({ reach }: { reach: Reachability }) {
 
   if (profile === null) {
     return (
-      <Message
+      <EmptyState
         title="No profile to search"
         body="This instance holds no memory yet. Recall needs a profile that already exists — searching would otherwise create an empty one."
       />
@@ -60,7 +50,7 @@ function ResultPane({ reach }: { reach: Reachability }) {
 
   if (!query.trim()) {
     return (
-      <Message
+      <EmptyState
         title="Search memory"
         body="A few words are enough. Recall starts from meaning, not from matching the words that were stored."
       />
@@ -76,16 +66,16 @@ function ResultPane({ reach }: { reach: Reachability }) {
         : error instanceof NetworkError
           ? "The server stopped responding mid-request."
           : "Something went wrong running this query.";
-    return <Message title="Recall failed" body={detail} />;
+    return <EmptyState title="Recall failed" body={detail} />;
   }
 
   if (isFetching && !data) {
-    return <Message title="Searching…" body="Running vector, keyword and graph retrieval." />;
+    return <ResultListSkeleton />;
   }
 
   if (data && data.memories.length === 0) {
     return (
-      <Message
+      <EmptyState
         title="Nothing surfaced"
         body="No memory in this profile activated strongly enough for that cue. A shorter, more general cue usually reaches further."
       />
@@ -98,7 +88,17 @@ function ResultPane({ reach }: { reach: Reachability }) {
 export function RecallView({ reach }: { reach: Reachability }) {
   return (
     <div className="flex h-full min-h-0">
-      <div className="border-border flex w-[340px] shrink-0 flex-col border-r">
+      {/* `min(340px,42vw)`, not a bare 340px: `main`'s content box is the
+          viewport minus the 56px rail and the Inspector's reserved width
+          (see INSPECTOR_OFFSET in App.tsx). Below ~676px a fixed 340px
+          column no longer fits next to a fixed-width Inspector — it was
+          overflowing past the Inspector's left edge and rendering underneath
+          it, invisibly, because `body`'s global `overflow: hidden` clips
+          rather than scrolls; GraphStage was squeezed to 0 width in the same
+          collapse. The vw cap is a no-op at desktop widths (340px is
+          untouched above ~810px) and shrinks the column smoothly below that
+          instead of letting it overflow. */}
+      <div className="border-border flex w-[min(340px,42vw)] shrink-0 flex-col border-r">
         <ResultPane reach={reach} />
       </div>
       <GraphStage />
