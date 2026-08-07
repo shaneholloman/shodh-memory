@@ -9,7 +9,10 @@
  *
  * Both helpers are ports of the old vanilla dashboard's, which were validated
  * against the live GDELT corpus: `relName` from front/index.html:569 and
- * `relClass` from front/index.html:1643-1649.
+ * `relClass` from front/index.html:1643-1649. That file has since been deleted
+ * — the React app replaced the last thing it was needed for — so every
+ * front/index.html line number in this repo resolves in git history, not in
+ * the tree. They are kept because they are the provenance of what was ported.
  */
 
 /** `Custom("hit by")` → `hit by`; `CausedBy` → `Caused By`. */

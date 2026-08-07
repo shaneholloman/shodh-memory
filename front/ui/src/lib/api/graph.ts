@@ -76,6 +76,11 @@ export interface GravitationalConnection {
    *  CreatedBy, … plus generic CoOccurs/CoRetrieved/RelatedTo bulk. */
   relation_type: string;
   strength: number;
+  /** `EdgeTier` — src/graph_memory.rs:493-501. Serde derive with no
+   *  `rename_all`, so the wire values are the variant names verbatim.
+   *  L1 working (new, dense, aggressive decay) → L2 episodic (proven) →
+   *  L3 semantic (consolidated, near-permanent). */
+  tier: "L1Working" | "L2Episodic" | "L3Semantic";
   from_position: Position3D;
   to_position: Position3D;
 }

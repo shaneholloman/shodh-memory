@@ -5,7 +5,15 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { useSession } from "@/stores/session";
 import { useUniverse } from "./useUniverse";
 import { EntityCanvas, levelFor, type Level } from "./EntityCanvas";
-import { entityTypeToken, NAMED_ENTITY_TYPES } from "./universe";
+import {
+  COOCCUR_RENDER_FLOOR,
+  entityTypeToken,
+  isEdgeRendered,
+  NAMED_ENTITY_TYPES,
+  TIER_LABEL,
+  TIER_ORDER,
+  tierToken,
+} from "./universe";
 
 /**
  * Graph — what this corpus knows.
@@ -61,6 +69,8 @@ export function GraphView({ reach }: { reach: Reachability }) {
   // Drill state lives here rather than in the canvas: the breadcrumb and the
   // canvas are two views of it, and the canvas is remounted per level.
   const [clusterId, setClusterId] = useState<number | null>(null);
+  /** Reported by the canvas so the footer states what was actually drawn. */
+  const [stats, setStats] = useState<{ hiddenEdges: number }>({ hiddenEdges: 0 });
 
   // A new corpus invalidates a drill path taken through the old one.
   useEffect(() => {
@@ -88,6 +98,22 @@ export function GraphView({ reach }: { reach: Reachability }) {
     return otherCount > 0
       ? [...named, { label: "Other", token: "--chart-5", count: otherCount }]
       : named;
+  }, [model]);
+
+  /**
+   * Tier populations, counted over the edges that are actually DRAWN.
+   *
+   * Deliberately not the server's l1_edges/l2_edges/l3_edges: those live on
+   * `/api/graph/data/{user_id}`, a different endpoint that truncates at 200
+   * relationships per tier and reports the truncated numbers as totals
+   * (src/handlers/visualization.rs:378-392, :458-459). Counting what this
+   * canvas drew means the legend and the picture can never disagree.
+   */
+  const tierCounts = useMemo(() => {
+    const counts = { L1Working: 0, L2Episodic: 0, L3Semantic: 0 } as Record<string, number>;
+    if (!model) return counts;
+    for (const e of model.edges) if (isEdgeRendered(e)) counts[e.tier] = (counts[e.tier] ?? 0) + 1;
+    return counts;
   }, [model]);
 
   if (reach.state !== "online") {
@@ -168,6 +194,7 @@ export function GraphView({ reach }: { reach: Reachability }) {
           setClusterId(id);
           selectEntity(null);
         }}
+        onStats={setStats}
       />
 
       <Breadcrumb
@@ -179,26 +206,59 @@ export function GraphView({ reach }: { reach: Reachability }) {
       />
 
       <div className="pointer-events-none absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-          {legend.map((l) => (
-            <span key={l.label} className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
-              <span className="size-2 rounded-full" style={{ background: `var(${l.token})` }} />
-              {l.label}
-              <span className="text-muted-foreground/60">{l.count}</span>
-            </span>
-          ))}
+        {/* The legend teaches the graph's three encodings, which is the only
+            thing that makes them readable: node HUE is entity type, edge HUE is
+            consolidation tier, and the two never share a palette — categorical
+            colour belongs to nodes, the tier ramp is one desaturated cool
+            family so it reads as a progression rather than as more categories. */}
+        <div className="flex flex-col gap-1.5">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            {legend.map((l) => (
+              <span
+                key={l.label}
+                className="text-muted-foreground flex items-center gap-1.5 text-[11px]"
+              >
+                <span className="size-2 rounded-full" style={{ background: `var(${l.token})` }} />
+                {l.label}
+                <span className="text-muted-foreground/60">{l.count}</span>
+              </span>
+            ))}
+          </div>
+          {level === "entities" ? (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              {TIER_ORDER.map((t) => (
+                <span
+                  key={t}
+                  className="text-muted-foreground flex items-center gap-1.5 text-[11px]"
+                >
+                  {/* A bar, not a dot: these encode edges, and matching the
+                      mark to what it describes is why the key is readable at
+                      a glance beside the node dots above. */}
+                  <span
+                    className="h-[2px] w-4 rounded-full"
+                    style={{ background: `var(${tierToken(t)})` }}
+                  />
+                  {TIER_LABEL[t]}
+                  <span className="text-muted-foreground/60">{tierCounts[t] ?? 0}</span>
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
         <span className="text-muted-foreground/70 text-[11px]">
-          {/* The corpus totals and the edge budget are stated, not hidden. The
-              endpoint is uncapped, so if a cut happened it happened here, and a
-              view that quietly drops two thirds of a graph is worse than one
-              that admits it. */}
+          {/* Every reduction between the corpus and the pixels is stated. The
+              endpoint is uncapped, so any cut happened on this side, and a view
+              that quietly drops most of a graph is worse than one that admits
+              it. Size encoding is named for the same reason — an unexplained
+              size channel is decoration that looks like data. */}
           {shown} of {model.totalEntities} · {model.totalConnections} relations
-          {model.edgesDropped > 0 ? ` (weakest ${model.edgesDropped} not drawn)` : ""} ·{" "}
-          {level === "clusters"
-            ? "click a cluster to drill in"
-            : "click an entity to inspect"}{" "}
-          · scroll to zoom
+          {model.edgesDropped > 0 ? ` · budget dropped ${model.edgesDropped}` : ""}
+          {stats.hiddenEdges > 0
+            ? ` · ${stats.hiddenEdges} co-occurrence edges below ${COOCCUR_RENDER_FLOOR} hidden`
+            : ""}{" "}
+          · size = mentions ·{" "}
+          {level === "clusters" ? "click a cluster to drill in" : "click an entity to inspect"} ·
+          scroll to zoom
         </span>
       </div>
     </section>

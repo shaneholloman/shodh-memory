@@ -8,6 +8,11 @@ import type { MemoryUniverse, UniverseStar, GravitationalConnection } from "@/li
  * numbers in here are not taste — each was set against the live GDELT/defence
  * graphs and the comments record what went wrong at the settings either side.
  *
+ * That file has since been deleted, so every front/index.html line number in
+ * this module resolves in git history rather than in the tree. The citations
+ * stay because they are where these constants came from, and a constant with
+ * no provenance is one nobody can safely change.
+ *
  * The problem being solved is scale, and it is real: `get_universe` applies no
  * cap (src/graph_memory.rs:7104-7220), so this can be 5k entities and 126k
  * edges. The old file measured 126k raw edges freezing the client build for
@@ -47,6 +52,28 @@ const RESOLUTION = 1.6;
  *  community structure looks like (front/index.html:836-840). */
 const MAX_OVERVIEW = 60;
 
+/**
+ * Minimum weight for a GENERIC co-occurrence edge to be drawn.
+ *
+ * Co-occurrence is produced pairwise, so a memory mentioning n entities emits
+ * ~n²/2 of these. On the verification corpus that is 416 CoOccurs against 5
+ * typed relations — the typed edges, which are the entire point, are one
+ * percent of the ink. Below this weight a co-occurrence says little more than
+ * "these appeared in the same paragraph once".
+ *
+ * Typed relations are NEVER floored, however weak: a LocatedIn at 0.1 is still
+ * a claim about the world, and the whole argument for this product is that
+ * those claims are the signal. The floor applies to bulk only, and the number
+ * hidden is stated on screen — a silent cut would misreport the corpus.
+ */
+export const COOCCUR_RENDER_FLOOR = 0.5;
+
+/** Whether an edge is drawn at all. Shared by the canvas and the count in the
+ *  footer so the two cannot disagree about what was hidden. */
+export function isEdgeRendered(edge: EntityEdge, floor = COOCCUR_RENDER_FLOOR): boolean {
+  return !edge.generic || edge.strength >= floor;
+}
+
 export interface EntityNode {
   id: string;
   name: string;
@@ -64,6 +91,8 @@ export interface EntityNode {
   community: number;
 }
 
+export type EdgeTier = "L1Working" | "L2Episodic" | "L3Semantic";
+
 export interface EntityEdge {
   id: string;
   source: string;
@@ -71,7 +100,26 @@ export interface EntityEdge {
   relation: string;
   strength: number;
   generic: boolean;
+  /** Consolidation tier of the underlying edge. When a pair carries several
+   *  relations the most consolidated one wins, so the drawn edge never
+   *  understates how settled the connection is. */
+  tier: EdgeTier;
 }
+
+/** L1 → L2 → L3 as an order, for "keep the most consolidated" comparisons. */
+const TIER_RANK: Record<EdgeTier, number> = { L1Working: 0, L2Episodic: 1, L3Semantic: 2 };
+
+export function tierToken(tier: EdgeTier): string {
+  return tier === "L3Semantic" ? "--edge-l3" : tier === "L2Episodic" ? "--edge-l2" : "--edge-l1";
+}
+
+export const TIER_LABEL: Record<EdgeTier, string> = {
+  L1Working: "L1 working",
+  L2Episodic: "L2 episodic",
+  L3Semantic: "L3 semantic",
+};
+
+export const TIER_ORDER: EdgeTier[] = ["L1Working", "L2Episodic", "L3Semantic"];
 
 export interface Cluster {
   id: number;
@@ -155,6 +203,7 @@ export function buildUniverse(universe: MemoryUniverse): UniverseModel {
   const relationOf = new Map<string, string>();
   const strengthOf = new Map<string, number>();
   const edgeIdOf = new Map<string, string>();
+  const tierOf = new Map<string, EdgeTier>();
 
   for (const c of kept) {
     const a = index.get(c.from_id);
@@ -170,6 +219,9 @@ export function buildUniverse(universe: MemoryUniverse): UniverseModel {
     relationOf.set(key, betterRelation(relationOf.get(key), c.relation_type));
     strengthOf.set(key, Math.max(strengthOf.get(key) ?? 0, w));
     if (!edgeIdOf.has(key)) edgeIdOf.set(key, c.id);
+    const tier = (c.tier ?? "L1Working") as EdgeTier;
+    const prevTier = tierOf.get(key);
+    if (prevTier === undefined || TIER_RANK[tier] > TIER_RANK[prevTier]) tierOf.set(key, tier);
   }
 
   for (let i = 0; i < nodes.length; i++) {
@@ -192,6 +244,7 @@ export function buildUniverse(universe: MemoryUniverse): UniverseModel {
       relation,
       strength: strengthOf.get(key) ?? 0.5,
       generic: GENERIC_RELATION.test(relation),
+      tier: tierOf.get(key) ?? "L1Working",
     });
   }
 

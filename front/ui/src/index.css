@@ -149,6 +149,27 @@
   --edge-strong: #4a4d55;
   --edge-medium: #35373d;
   --edge-weak: #26282c;
+
+  /* Edge consolidation tiers — L1 working → L2 episodic → L3 semantic.
+
+     An ORDINAL ramp, not three categories: the tiers are a progression from
+     new-and-volatile to proven to consolidated, so they are three steps of one
+     cool, desaturated slate family. Three unrelated hues would read as kinds
+     and would compete with the node-type colours, which own categorical colour
+     on this canvas.
+
+     The ramp brightens with consolidation because the ground is near-black:
+     on #08090a, "deep and solid" means MORE present, not darker. L1 sits just
+     above the resting edge greys; L3 is the most legible thing among the edges
+     without ever reaching the accent.
+
+     Deliberately low saturation, to stay clear of --node-org (#4ea7fc), which
+     is a saturated sky blue in the same hue neighbourhood, and well outside
+     the accent's orange band, the destructive pink-red and the warn amber. */
+  --edge-l1: #3f4a57;
+  --edge-l2: #64768c;
+  --edge-l3: #96abc4;
+
   --live: #4cb782;
 }
 

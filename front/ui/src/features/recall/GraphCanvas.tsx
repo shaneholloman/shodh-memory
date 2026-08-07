@@ -24,6 +24,11 @@ import { relClass, relName, type RelationClass } from "./relation";
  *
  * WHAT IT DRAWS, and why that is not what the old dashboard drew.
  *
+ * NOTE ON CITATIONS: front/index.html was the single-file vanilla dashboard and
+ * has since been deleted. Every line number below resolves in git history, not
+ * in the tree; they are kept because they are the provenance of what was ported
+ * and, more importantly, of what deliberately was not.
+ *
  * The vanilla dashboard (front/index.html) fed from
  * `GET /api/graph/{user}/universe`, whose nodes are ENTITIES — `UniverseStar`
  * is `{id, name, entity_type, salience, mention_count, is_proper_noun, …}`

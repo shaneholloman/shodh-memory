@@ -16,7 +16,14 @@ import {
   type ZoomTransform,
 } from "d3";
 import { useSession } from "@/stores/session";
-import { entityTypeToken, SMALL_GRAPH_MAX, type UniverseModel } from "./universe";
+import {
+  entityTypeToken,
+  isEdgeRendered,
+  SMALL_GRAPH_MAX,
+  tierToken,
+  type EdgeTier,
+  type UniverseModel,
+} from "./universe";
 
 /**
  * The entity knowledge-graph canvas.
@@ -25,6 +32,9 @@ import { entityTypeToken, SMALL_GRAPH_MAX, type UniverseModel } from "./universe
  * SVG DOM node per entity is what makes a tab unresponsive. d3 supplies the
  * force layout and the zoom transform algebra; the painting is manual, which is
  * the same division the old vanilla dashboard used (front/index.html:596-598).
+ *
+ * That dashboard has since been deleted, so its line numbers here resolve in
+ * git history rather than in the tree.
  *
  * TWO LEVELS, and which one shows is decided by corpus size rather than by a
  * preference:
@@ -64,6 +74,7 @@ interface CanvasLink extends SimulationLinkDatum<CanvasNode> {
   relation: string;
   strength: number;
   generic: boolean;
+  tier: EdgeTier;
   /** Stroke width for aggregated cluster links. */
   width: number;
 }
@@ -80,9 +91,18 @@ function readTokens(el: HTMLElement) {
   const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
   return {
     token: (name: string) => v(name, "#8a8f98"),
+    // Selection ONLY. DIRECTION.md: one accent, and it marks focus, the primary
+    // action and active nav — nothing else. Resting edges took this colour in
+    // the first cut of this canvas, which made the whole graph read as
+    // permanently active and left selection with nothing louder to say.
     active: v("--node-active", "#f4622e"),
     muted: v("--muted-foreground", "#8a8f98"),
     fg: v("--foreground", "#f7f8f8"),
+    // Neutral greys that exist for exactly this: edge weight mapped to value,
+    // no hue, so edges never compete with the categorical node hues.
+    edgeStrong: v("--edge-strong", "#4a4d55"),
+    edgeMedium: v("--edge-medium", "#35373d"),
+    edgeWeak: v("--edge-weak", "#26282c"),
   };
 }
 
@@ -103,11 +123,15 @@ export function EntityCanvas({
   level,
   clusterId,
   onDrillIn,
+  onStats,
 }: {
   model: UniverseModel;
   level: Level;
   clusterId: number | null;
   onDrillIn: (clusterId: number) => void;
+  /** Reports what this level actually drew, so the footer states the same
+   *  numbers the canvas used rather than recomputing them and drifting. */
+  onStats?: (stats: { hiddenEdges: number }) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -145,6 +169,10 @@ export function EntityCanvas({
         relation: `${l.count} relation${l.count === 1 ? "" : "s"}`,
         strength: l.weight,
         generic: false,
+        // An aggregate of many edges across many tiers has no single tier of
+        // its own, so the overview draws it in the neutral edge grey rather
+        // than picking one and implying a consolidation level it cannot know.
+        tier: "L1Working",
         width: 0.5 + 3.5 * Math.sqrt(l.weight / maxW),
       }));
       return { nodes, links };
@@ -157,14 +185,20 @@ export function EntityCanvas({
         ? (model.clusters[clusterId]?.members ?? [])
         : model.nodes.map((_, i) => i);
     const keep = new Set(memberIdx.map((i) => model.nodes[i].id));
-    const maxSal = Math.max(0.001, ...memberIdx.map((i) => model.nodes[i].salience));
+
+    // Size carries MENTION COUNT, not salience. The read path serves salience
+    // flat at 1.0 for most entities on this corpus, so sizing by it makes every
+    // node identical and encodes nothing; mention_count survives the same path
+    // with real variance. Sub-linear so a 60-mention hub does not swallow the
+    // graph. The legend states which of the two is being drawn.
+    const maxMentions = Math.max(1, ...memberIdx.map((i) => model.nodes[i].mentions));
 
     const nodes: CanvasNode[] = memberIdx.map((i) => {
       const n = model.nodes[i];
       return {
         id: n.id,
         label: n.name,
-        r: 5 + 9 * Math.sqrt(Math.max(0, n.salience) / maxSal),
+        r: 4.5 + 9 * Math.sqrt(Math.max(0, n.mentions) / maxMentions),
         kind: "entity",
         type: n.type,
         size: 0,
@@ -175,17 +209,35 @@ export function EntityCanvas({
       };
     });
     const links: CanvasLink[] = model.edges
-      .filter((e) => keep.has(e.source) && keep.has(e.target))
+      .filter((e) => keep.has(e.source) && keep.has(e.target) && isEdgeRendered(e))
       .map((e) => ({
         source: e.source,
         target: e.target,
         relation: e.relation,
         strength: e.strength,
         generic: e.generic,
+        tier: e.tier,
         width: 0,
       }));
     return { nodes, links };
   }, [model, level, clusterId]);
+
+  /** What the floor hid at this level, reported upward so the footer can say
+   *  so. Counted here because this is where the scope (whole graph vs one
+   *  drilled cluster) is known. */
+  const hiddenEdges = useMemo(() => {
+    if (level === "clusters") return 0;
+    const memberIdx =
+      clusterId !== null ? (model.clusters[clusterId]?.members ?? []) : model.nodes.map((_, i) => i);
+    const keep = new Set(memberIdx.map((i) => model.nodes[i].id));
+    return model.edges.filter(
+      (e) => keep.has(e.source) && keep.has(e.target) && !isEdgeRendered(e),
+    ).length;
+  }, [model, level, clusterId]);
+
+  useEffect(() => {
+    onStats?.({ hiddenEdges });
+  }, [hiddenEdges, onStats]);
 
   useEffect(() => {
     selectedRef.current = selectedEntityId;
@@ -227,6 +279,14 @@ export function EntityCanvas({
       const hovered = hoverRef.current;
       const sel = selectedRef.current;
       const focus = hovered ?? (sel ? (nodes.find((n) => n.id === sel) ?? null) : null);
+
+      // Degree at or above which a node is named at rest. Small graphs label
+      // everything; larger ones keep roughly the top slice legible instead of
+      // stacking every name on top of its neighbour.
+      const labelDegreeFloor =
+        nodes.length <= LABEL_ALWAYS_MAX
+          ? 0
+          : Math.max(2, Math.round(nodes.reduce((a, n) => a + n.degree, 0) / nodes.length));
       const lit = new Set<string>();
       if (focus) {
         lit.add(focus.id);
@@ -247,25 +307,34 @@ export function EntityCanvas({
         const on = !dimmed || (lit.has(s.id) && lit.has(g.id));
 
         if (dimmed && on) {
-          ctx!.strokeStyle = hexA(tokens.active, 0.85);
-          ctx!.lineWidth = 1.6 / t.k;
+          // The ONE place the accent appears on an edge: the selected node's
+          // own connections. That is focus, which is what the accent is for.
+          ctx!.strokeStyle = hexA(tokens.active, 0.9);
+          ctx!.lineWidth = (1.2 + 1.6 * Math.min(1, l.strength)) / t.k;
         } else if (dimmed) {
-          ctx!.strokeStyle = hexA(tokens.muted, 0.05);
+          ctx!.strokeStyle = hexA(tokens.edgeWeak, 0.5);
           ctx!.lineWidth = 0.6 / t.k;
         } else if (l.width > 0) {
           // Aggregated cluster link: `width` was precomputed from the summed
           // weight of every relation crossing between the two communities.
-          ctx!.strokeStyle = hexA(tokens.muted, 0.26);
+          ctx!.strokeStyle = hexA(tokens.edgeMedium, 0.9);
           ctx!.lineWidth = l.width / t.k;
         } else {
-          // A TYPED relation is the ontology showing through; generic
-          // co-occurrence is bulk. Drawing them alike is what turns this into a
-          // hairball, so generics recede — but not to nothing. A corpus whose
-          // extraction produced only CoOccurs edges (an early or untyped one)
-          // would otherwise render as unconnected dots, which misreports a
-          // dense graph as an empty one.
-          ctx!.strokeStyle = l.generic ? hexA(tokens.muted, 0.17) : hexA(tokens.muted, 0.5);
-          ctx!.lineWidth = (l.generic ? 0.5 : 1.1) / t.k;
+          // THREE ENCODINGS, THREE CHANNELS, deliberately not overlapping:
+          //   colour  = consolidation tier (L1 → L2 → L3), an ordinal ramp
+          //   opacity = edge weight within that tier
+          //   width   = typed relation vs generic co-occurrence
+          //
+          // Keeping them separate is what lets the graph be read: if tier also
+          // changed width it would be indistinguishable from a strong
+          // co-occurrence, and the question "is this settled knowledge or a
+          // fresh guess" is a different question from "how sure are we".
+          const w = Math.min(1, l.strength);
+          ctx!.strokeStyle = hexA(tokens.token(tierToken(l.tier)), 0.5 + 0.5 * w);
+          // Co-occurrence is background tissue — it says two entities appeared
+          // together, which in a pairwise extractor is nearly free. A typed
+          // relation is the ontology showing through, and reads above it.
+          ctx!.lineWidth = (l.generic ? 0.5 + 0.4 * w : 1.3 + 1.1 * w) / t.k;
         }
         ctx!.beginPath();
         ctx!.moveTo(s.x, s.y!);
@@ -291,14 +360,16 @@ export function EntityCanvas({
         // Cluster labels are the whole point of the overview — an unlabelled
         // bubble is not navigable.
         //
-        // Entity labels are gated on COUNT first and zoom second. A knowledge
+        // Entity labels declutter by IMPORTANCE, not by a flat count rule. A
         // graph whose nodes are anonymous dots does not show what the corpus
-        // knows, it shows that the corpus is busy; on a graph small enough for
-        // the names to fit they must be readable without touching the wheel.
-        // Above that they would overlap into noise, so they wait for a zoom
-        // that separates them.
+        // knows, it shows that the corpus is busy — but labelling all of a
+        // 5k-entity graph is a wordball. So the well-connected nodes are named
+        // at rest (they are what someone is looking for), the long tail waits
+        // for a zoom that separates it, and hover or selection always names
+        // whatever is under the pointer whatever its degree.
+        const labelWorthy = n.degree >= labelDegreeFloor;
         const showLabel =
-          n.kind === "cluster" || nodes.length <= LABEL_ALWAYS_MAX || t.k > 1.6 || isSelected;
+          n.kind === "cluster" || isSelected || n === hovered || labelWorthy || t.k > 1.9;
         if (showLabel && isLit) {
           const fontPx = (n.kind === "cluster" ? 11 : 10) / t.k;
           ctx!.font = `${fontPx}px ui-sans-serif, system-ui, sans-serif`;
