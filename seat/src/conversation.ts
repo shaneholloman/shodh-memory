@@ -2,11 +2,20 @@
  * A conversation: one pi Agent wired to shodh-memory, with two learning loops
  * closing at every turn.
  *
- * Loop 1 — memory-level (user scope): memories recalled during a turn are
- * reinforced through the backend's existing Hebbian path (POST /api/reinforce)
- * according to whether the response actually used them (citation or token
- * overlap, mirroring src/memory/feedback.rs semantics). A negative follow-up
- * from the user penalizes the previous turn's surfaced memories.
+ * Loop 1 — memory-level (user scope), two legs with strict ownership:
+ *
+ * - Implicit/momentum leg: each turn calls POST /api/proactive_context — the
+ *   only backend path that writes feedback momentum (feedback_multiplier).
+ *   It evaluates the previous turn's proactive-surfaced set against the
+ *   previous response, the current user message (followup), and the previous
+ *   run's tool actions; it also applies its own reinforce_recall + Hebbian
+ *   pass internally (src/handlers/recall.rs:1670-1720). Memories surfaced by
+ *   this channel are OWNED by it.
+ * - Explicit leg: memories recalled by the recall_memory tool (and not also
+ *   proactive-surfaced) are reinforced through POST /api/reinforce according
+ *   to citation or token overlap (mirroring src/memory/feedback.rs), with
+ *   negative-followup penalties for the previous turn. This leg moves
+ *   importance/Hebbian but NOT momentum — a backend seam, not a seat choice.
  *
  * Loop 2 — harness-level (harness scope): operational lessons about retrieval
  * and tool use are stored AS MEMORIES in an isolated namespace
@@ -23,7 +32,7 @@
 import * as crypto from "node:crypto";
 import { Agent, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { RecallMemory, ReinforceOutcome, ShodhBackend } from "./backend.js";
+import type { RecallMemory, ReinforceOutcome, ShodhBackend, ToolAction } from "./backend.js";
 import type { MemoryScope, ModelRef, ReinforceTrigger, SeatEvent, SeatEventSink, UsagePayload } from "./events.js";
 import {
 	detectNegativeKeywords,
@@ -46,6 +55,29 @@ const HARNESS_INJECT_LIMIT = 3;
 /** Caps on automatic harness captures, per conversation. */
 const MAX_EMPTY_RECALL_CAPTURES = 5;
 const MAX_TOOL_ERROR_CAPTURES = 5;
+
+/** How many proactive memories to surface and inject per turn. Kept equal so
+ * the backend's pending-feedback set contains only memories the model actually
+ * saw — otherwise the implicit loop penalizes memories that were never shown. */
+const PROACTIVE_MAX_RESULTS = 3;
+/** Matches the thresholds the existing callers use (mcp-server/index.ts, hooks/memory-hook.ts). */
+const PROACTIVE_SEMANTIC_THRESHOLD = 0.6;
+
+/** Native memory tools are excluded from tool-usage attribution: their inputs
+ * (the recall cue) trivially overlap surfaced memory content, which would turn
+ * the act of recalling into a fake "usage" signal. */
+const MEMORY_TOOL_NAMES = new Set(["recall_memory", "remember_memory", "record_seat_learning"]);
+
+/**
+ * The backend keeps ONE pending-feedback slot per user_id (set_pending
+ * overwrites, take_pending consumes — src/memory/feedback.rs). Concurrent
+ * proactive calls for the same user would corrupt each other's feedback, so
+ * feedback fields are skipped when another call for that user is in flight —
+ * the same guard mcp-server/index.ts uses (proactiveCallInFlight). This
+ * protects seat-internal concurrency only; a separate process (e.g. a Claude
+ * Code session on the same user_id) cannot be guarded from here.
+ */
+const proactiveFeedbackInFlight = new Set<string>();
 
 const BASE_SYSTEM_PROMPT = `You are the shodh-memory conversation seat: an assistant whose persistent memory is visible and inspectable by the user.
 
@@ -145,6 +177,18 @@ export class Conversation {
 	private surfaced = new Map<string, SurfacedMemory>();
 	/** Memories surfaced during the previous run (target of negative-followup penalties). */
 	private prevSurfaced = new Map<string, SurfacedMemory>();
+	/** Ids surfaced by proactive_context this run — owned by the backend's
+	 * implicit-feedback loop, excluded from the seat's explicit reinforcement. */
+	private proactiveIds = new Set<string>();
+	/** Previous run's proactive ids — excluded from explicit negative-followup
+	 * penalties because the implicit loop applies its own followup penalty. */
+	private prevProactiveIds = new Set<string>();
+	/** Final assistant text of the previous run — previous_response for the next proactive call. */
+	private lastAssistantText: string | undefined;
+	/** Tool actions since the last consumed pending set (feedback attribution window). */
+	private pendingToolActions: ToolAction[] = [];
+	/** Args captured at tool_execution_start (the end event does not carry them). */
+	private toolArgsByCallId = new Map<string, unknown>();
 	private emptyRecallQueries: string[] = [];
 	private toolErrors: { toolName: string; message: string }[] = [];
 	private assistantTexts: string[] = [];
@@ -243,6 +287,8 @@ export class Conversation {
 					tool_name: event.toolName,
 					args: event.args,
 				});
+				// tool_execution_end does not carry args; keep them for attribution.
+				this.toolArgsByCallId.set(event.toolCallId, event.args);
 				break;
 			case "tool_execution_end": {
 				this.emit({
@@ -256,6 +302,9 @@ export class Conversation {
 						typeof event.result === "string" ? event.result : JSON.stringify(event.result)?.slice(0, 500);
 					this.toolErrors.push({ toolName: event.toolName, message: message ?? "unknown error" });
 				}
+				const args = this.toolArgsByCallId.get(event.toolCallId);
+				this.toolArgsByCallId.delete(event.toolCallId);
+				this.recordToolAction(event.toolName, args, event.result, event.isError);
 				break;
 			}
 			default:
@@ -274,6 +323,8 @@ export class Conversation {
 
 		// Reset per-run state.
 		this.surfaced = new Map();
+		this.prevProactiveIds = this.proactiveIds;
+		this.proactiveIds = new Set();
 		this.emptyRecallQueries = [];
 		this.toolErrors = [];
 		this.assistantTexts = [];
@@ -287,11 +338,16 @@ export class Conversation {
 			this.emit({ type: "turn_start", turn: this.turn });
 
 			await this.applyNegativeFollowupPenalty(text);
-			await this.injectHarnessLearnings(text);
+			const proactiveBlock = await this.runProactivePass(text);
+			const harnessBlock = await this.buildHarnessLearningsBlock(text);
+			this.agent.state.systemPrompt = [this.baseSystemPrompt, proactiveBlock, harnessBlock]
+				.filter((block): block is string => Boolean(block))
+				.join("\n\n");
 
 			await this.agent.prompt(text);
 
 			await this.closeLearningLoops();
+			this.lastAssistantText = this.assistantTexts.join("\n") || undefined;
 
 			this.emit({
 				type: "turn_end",
@@ -303,6 +359,118 @@ export class Conversation {
 		} finally {
 			this.prevSurfaced = this.surfaced;
 			this.currentSink = undefined;
+		}
+	}
+
+	/** Map a finished tool call into the backend's ToolAction shape for feedback attribution. */
+	private recordToolAction(toolName: string, args: unknown, result: unknown, isError: boolean): void {
+		if (MEMORY_TOOL_NAMES.has(toolName)) return;
+		const inputs: Record<string, string> = {};
+		if (args && typeof args === "object") {
+			for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+				inputs[key] = (typeof value === "string" ? value : JSON.stringify(value) ?? "").slice(0, 500);
+			}
+		}
+		let outputSnippet: string | undefined;
+		if (result && typeof result === "object" && "content" in result) {
+			const content = (result as { content?: unknown }).content;
+			if (Array.isArray(content)) {
+				outputSnippet = content
+					.filter(
+						(block): block is { type: "text"; text: string } =>
+							typeof block === "object" &&
+							block !== null &&
+							(block as { type?: string }).type === "text" &&
+							typeof (block as { text?: unknown }).text === "string",
+					)
+					.map((block) => block.text)
+					.join(" ")
+					.slice(0, 200);
+			}
+		} else if (typeof result === "string") {
+			outputSnippet = result.slice(0, 200);
+		}
+		this.pendingToolActions.push({
+			tool_name: toolName,
+			inputs,
+			success: !isError,
+			...(outputSnippet ? { output_snippet: outputSnippet } : {}),
+		});
+	}
+
+	/**
+	 * The momentum leg of the memory-level loop. POST /api/proactive_context is
+	 * the only backend path that writes feedback momentum (feedback_multiplier);
+	 * /api/reinforce does not. This call:
+	 *
+	 * 1. Delivers the previous assistant response (+ this user message as the
+	 *    followup, + tool actions from the previous run) so the backend
+	 *    evaluates the pending surfaced set: momentum, context fingerprints,
+	 *    temporal credits, AND its own reinforce_recall/Hebbian pass
+	 *    (recall.rs:1670-1720).
+	 * 2. Surfaces a new set for this turn, which the backend stores as pending.
+	 *    Every surfaced memory is injected into the system prompt — the pending
+	 *    set must only contain memories the model actually saw, or the implicit
+	 *    loop penalizes memories that never had a chance to be used.
+	 *
+	 * Ownership rule (prevents double-counting): memories surfaced here belong
+	 * to the implicit loop; the seat's explicit /api/reinforce never touches
+	 * them (closeLearningLoops and the negative-followup pass filter them out).
+	 *
+	 * auto_ingest is explicitly false: the backend would otherwise silently
+	 * ingest the previous response as memories (its default is true), bypassing
+	 * the ledger. Seat writes stay deliberate and ledgered.
+	 */
+	private async runProactivePass(userText: string): Promise<string | undefined> {
+		const feedbackAllowed = !proactiveFeedbackInFlight.has(this.userId);
+		if (feedbackAllowed) proactiveFeedbackInFlight.add(this.userId);
+		const sendFeedback = feedbackAllowed && this.lastAssistantText !== undefined;
+		const toolActions = sendFeedback ? this.pendingToolActions.splice(0, this.pendingToolActions.length) : [];
+
+		try {
+			const startedAt = Date.now();
+			const response = await this.deps.backend.proactiveContext({
+				userId: this.userId,
+				context: userText,
+				maxResults: PROACTIVE_MAX_RESULTS,
+				semanticThreshold: PROACTIVE_SEMANTIC_THRESHOLD,
+				autoIngest: false,
+				previousResponse: sendFeedback ? this.lastAssistantText : undefined,
+				userFollowup: sendFeedback ? userText : undefined,
+				toolActions,
+			});
+
+			for (const memory of response.memories) {
+				this.proactiveIds.add(memory.id);
+			}
+			this.emit({
+				type: "proactive_context",
+				scope: "user",
+				query: userText,
+				memories: response.memories,
+				injected_memory_ids: response.memories.map((memory) => memory.id),
+				feedback: response.feedback_processed ?? null,
+				temporal_credits_applied: response.temporal_credits_applied ?? null,
+				took_ms: Date.now() - startedAt,
+			});
+
+			if (response.memories.length === 0) return undefined;
+			const lines = response.memories.map(
+				(memory) =>
+					`- [mem:${memoryShortId(memory.id)}] (${memory.memory_type}) ${memory.content.slice(0, 400)}`,
+			);
+			return `## Possibly relevant memories (auto-surfaced — cite [mem:id] if used)\n${lines.join("\n")}`;
+		} catch (error) {
+			// Momentum loop is an enhancement; its failure must not block the turn.
+			// Un-drained tool actions stay queued for the next attempt.
+			if (toolActions.length > 0) this.pendingToolActions.unshift(...toolActions);
+			this.emit({
+				type: "error",
+				message: `Proactive context failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
+			return undefined;
+		} finally {
+			if (feedbackAllowed) proactiveFeedbackInFlight.delete(this.userId);
 		}
 	}
 
@@ -318,6 +486,11 @@ export class Conversation {
 
 		const byScope = new Map<MemoryScope, string[]>();
 		for (const [memoryId, memory] of this.prevSurfaced) {
+			// Ownership: memories the proactive channel surfaced last turn get
+			// their followup penalty from the backend's implicit loop (this
+			// turn's proactive call carries user_followup) — penalizing them
+			// here too would double-count.
+			if (this.prevProactiveIds.has(memoryId)) continue;
 			const ids = byScope.get(memory.scope) ?? [];
 			ids.push(memoryId);
 			byScope.set(memory.scope, ids);
@@ -332,10 +505,10 @@ export class Conversation {
 
 	/**
 	 * Harness-level learning, read side: recall operational lessons from the
-	 * harness scope with the user message as cue and inject strong matches as
+	 * harness scope with the user message as cue and return strong matches as
 	 * a labeled system-prompt block for this run only.
 	 */
-	private async injectHarnessLearnings(userText: string): Promise<void> {
+	private async buildHarnessLearningsBlock(userText: string): Promise<string | undefined> {
 		let memories: RecallMemory[] = [];
 		try {
 			const startedAt = Date.now();
@@ -368,16 +541,12 @@ export class Conversation {
 			});
 		}
 
-		if (memories.length === 0) {
-			this.agent.state.systemPrompt = this.baseSystemPrompt;
-			return;
-		}
+		if (memories.length === 0) return undefined;
 
 		for (const memory of memories) {
 			this.surfaced.set(memory.id, { scope: "harness", content: memory.experience.content });
 		}
 		const lines = memories.map((memory) => `- ${memory.experience.content}`);
-		this.agent.state.systemPrompt = `${this.baseSystemPrompt}\n\n## Learned operating notes (from previous sessions of this assistant)\n${lines.join("\n")}`;
 		this.emit({
 			type: "harness_learning_applied",
 			memories: memories.map((memory) => ({
@@ -386,6 +555,7 @@ export class Conversation {
 				score: memory.score,
 			})),
 		});
+		return `## Learned operating notes (from previous sessions of this assistant)\n${lines.join("\n")}`;
 	}
 
 	/** Reinforce + ledger + emit, with failures surfaced as error events. */
@@ -440,6 +610,12 @@ export class Conversation {
 				{ scope: MemoryScope; outcome: ReinforceOutcome; ids: string[]; overlaps: Record<string, number>; cited: string[] }
 			>();
 			for (const [memoryId, memory] of this.surfaced) {
+				// Ownership: memories the proactive channel surfaced this turn
+				// are evaluated by the backend's implicit loop on the NEXT
+				// proactive call (which itself applies reinforce_recall +
+				// Hebbian strengthening, recall.rs:1670-1720). Reinforcing them
+				// here too would double importance and association updates.
+				if (this.proactiveIds.has(memoryId)) continue;
 				const cited = citations.has(memoryShortId(memoryId));
 				const overlap = memoryOverlap(memory.content, responseTokens);
 				const outcome: ReinforceOutcome = cited || overlap >= OVERLAP_USED_THRESHOLD ? "helpful" : "neutral";

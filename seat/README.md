@@ -52,17 +52,47 @@ citations feed the reinforcement loop below.
 Both loops store and strengthen state through the same shodh-memory machinery.
 There is no second state store.
 
-**Loop 1 — memory-level (user scope).** After each turn, memories surfaced by
-recall are reinforced through the backend's existing Hebbian path
-(`POST /api/reinforce`):
+**Loop 1 — memory-level (user scope), two legs with strict ownership.**
+`/api/reinforce` moves importance, Hebbian associations, and entity salience —
+but **not** feedback momentum. The only backend path that writes momentum (the
+`feedback_multiplier` in score attribution) is `POST /api/proactive_context`
+(`src/handlers/recall.rs:1310-1720`). The seat drives both:
 
-- *helpful* — the response cited the memory (`[mem:id]`) or shares token
-  overlap ≥ 0.1 with it (mirrors `calculate_entity_overlap` and
-  `OVERLAP_WEAK_THRESHOLD` in `src/memory/feedback.rs`);
-- *neutral* — surfaced but unused (records access, mild strengthening);
-- *misleading* — the user's next message contains a correction/frustration
-  keyword (list copied verbatim from `NEGATIVE_KEYWORDS` in
-  `src/memory/feedback.rs`); applied to the previous turn's surfaced memories.
+- *Implicit/momentum leg* — every turn calls `proactive_context` with the new
+  user message as `context`, the previous assistant message as
+  `previous_response`, the new user message as `user_followup`, and the
+  previous run's tool actions (`ToolAction` shape from
+  `src/memory/feedback.rs`; native memory tools excluded — a recall cue
+  trivially overlaps memory content and would fake a usage signal). The
+  backend evaluates the previous turn's pending surfaced set (momentum,
+  context fingerprints, temporal credits) and applies its own
+  `reinforce_recall` + Hebbian pass for helpful/misleading classifications.
+  The memories it surfaces are all injected into the system prompt (surfaced
+  set == seen set, otherwise the implicit loop penalizes memories the model
+  never saw) and are **owned by this leg**. The `proactive_context` SSE event
+  exposes the surfaced set and the feedback outcome (reinforced/weakened ids).
+- *Explicit leg* — memories recalled by the `recall_memory` tool and **not**
+  proactive-surfaced that turn are reinforced through `POST /api/reinforce`:
+  - *helpful* — cited (`[mem:id]`) or token overlap ≥ 0.1 (mirrors
+    `calculate_entity_overlap` / `OVERLAP_WEAK_THRESHOLD`);
+  - *neutral* — surfaced but unused;
+  - *misleading* — negative follow-up keywords (verbatim `NEGATIVE_KEYWORDS`
+    list), applied to the previous turn's surfaced set minus proactive-owned
+    ids.
+
+The id-level ownership split is what prevents double-counting: a memory
+surfaced by both channels in one turn is reinforced exactly once (by the
+implicit leg). Known seam: tool-recalled-only memories get no momentum, because
+the backend ties momentum to its own pending-set lifecycle
+(`set_pending`/`take_pending`, single slot per `user_id`) — moving them would
+require a backend change, not a harness workaround. For the same reason the
+seat guards concurrent proactive calls per `user_id` in-process (feedback
+fields are skipped when a call is in flight, mirroring `mcp-server/index.ts`);
+a second process using the same `user_id` cannot be guarded from here.
+
+`auto_ingest` is explicitly `false` on every call: the backend default (true)
+silently ingests the previous response as memories, which would bypass the
+ledger. Seat writes stay deliberate and ledgered.
 
 **Loop 2 — harness-level (harness scope).** The harness gets better at its own
 job by storing operational lessons *as memories* in an isolated namespace,
@@ -114,8 +144,9 @@ Revert semantics are honest about what the backend supports:
 | POST | `/v1/learning/revert` | `{event_id}` |
 
 SSE event types: `turn_start`, `text_delta`, `thinking_delta`,
-`tool_call_start`, `tool_call_end`, `memory_recall`, `memory_write`,
-`memory_reinforce`, `harness_learning_applied`, `model_changed`, `usage`
+`tool_call_start`, `tool_call_end`, `memory_recall`, `proactive_context`,
+`memory_write`, `memory_reinforce`, `harness_learning_applied`,
+`model_changed`, `usage`
 (per-call token counts and cost from pi's `Usage`), `turn_end`, `agent_end`,
 `error`. Payloads are defined in `src/events.ts`.
 

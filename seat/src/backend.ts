@@ -148,6 +148,45 @@ export interface RememberResponse {
 	success: boolean;
 }
 
+/** src/memory/feedback.rs `ToolAction` — tool-aware feedback attribution input. */
+export interface ToolAction {
+	tool_name: string;
+	inputs: Record<string, string>;
+	success: boolean;
+	output_snippet?: string;
+}
+
+/** src/handlers/recall.rs `ProactiveSurfacedMemory` (embedding is #[serde(skip)] — never sent). */
+export interface ProactiveSurfacedMemory {
+	id: string;
+	content: string;
+	memory_type: string;
+	score: number;
+	importance: number;
+	created_at: string;
+	tags: string[];
+	tier: string;
+	relevance_reason: string;
+	matched_entities?: string[];
+}
+
+/** src/handlers/recall.rs `FeedbackProcessed` */
+export interface FeedbackProcessed {
+	memories_evaluated: number;
+	reinforced: string[];
+	weakened: string[];
+}
+
+/** src/handlers/recall.rs `ProactiveContextResponse` (fields the seat consumes; extras tolerated). */
+export interface ProactiveContextResponse {
+	memories: ProactiveSurfacedMemory[];
+	memory_count: number;
+	feedback_processed?: FeedbackProcessed;
+	temporal_credits_applied?: number;
+	latency_ms: number;
+	ingested_memory_id?: string;
+}
+
 export class ShodhBackendError extends Error {
 	readonly status: number;
 	readonly body: string;
@@ -175,6 +214,25 @@ export interface RememberParams {
 	memoryType?: MemoryType;
 	tags?: string[];
 	importance?: number;
+}
+
+export interface ProactiveContextParams {
+	userId: string;
+	context: string;
+	maxResults?: number;
+	semanticThreshold?: number;
+	/**
+	 * Required, no default: the backend defaults auto_ingest to TRUE
+	 * (src/handlers/recall.rs:172-174) and silently ingests the previous
+	 * response as memories. Callers must decide explicitly.
+	 */
+	autoIngest: boolean;
+	/** Previous assistant message — triggers implicit-feedback processing of the pending surfaced set. */
+	previousResponse?: string;
+	/** The user message following that response (negative-keyword detection). */
+	userFollowup?: string;
+	/** Tool actions performed since the pending set was surfaced (tool-aware attribution). */
+	toolActions?: ToolAction[];
 }
 
 export class ShodhBackend {
@@ -235,6 +293,30 @@ export class ShodhBackend {
 			memory_type: params.memoryType,
 			tags: params.tags ?? [],
 			importance: params.importance,
+		});
+	}
+
+	/**
+	 * POST /api/proactive_context — src/handlers/recall.rs `proactive_context`.
+	 *
+	 * This is the ONLY handler that writes feedback momentum (the
+	 * `feedback_multiplier` in ScoreAttribution): when `previous_response` is
+	 * present it consumes the pending surfaced set from the PREVIOUS call,
+	 * computes implicit-feedback signals, updates momentum, and internally
+	 * applies reinforce_recall + Hebbian edge strengthening for helpful and
+	 * misleading classifications (recall.rs:1670-1720). It then surfaces a new
+	 * set and stores it as pending for the next call.
+	 */
+	proactiveContext(params: ProactiveContextParams): Promise<ProactiveContextResponse> {
+		return this.request<ProactiveContextResponse>("POST", "/api/proactive_context", {
+			user_id: params.userId,
+			context: params.context,
+			max_results: params.maxResults ?? 5,
+			semantic_threshold: params.semanticThreshold ?? 0.6,
+			auto_ingest: params.autoIngest,
+			previous_response: params.previousResponse,
+			user_followup: params.userFollowup,
+			...(params.toolActions && params.toolActions.length > 0 ? { tool_actions: params.toolActions } : {}),
 		});
 	}
 

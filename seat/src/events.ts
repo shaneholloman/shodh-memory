@@ -8,6 +8,8 @@
  */
 
 import type {
+	FeedbackProcessed,
+	ProactiveSurfacedMemory,
 	RecallFact,
 	RecallLineageEdge,
 	RecallMemory,
@@ -82,6 +84,23 @@ export type SeatEvent =
 			stats: ReinforceStats;
 			trigger: ReinforceTrigger;
 			ledger_event_id: string;
+	  }
+	| {
+			/**
+			 * One proactive_context round-trip: the memories the backend
+			 * auto-surfaced for this turn, plus the implicit-feedback outcome
+			 * for the PREVIOUS turn's surfaced set (momentum reinforced /
+			 * weakened ids), so the momentum loop is as inspectable as the
+			 * explicit one.
+			 */
+			type: "proactive_context";
+			scope: "user";
+			query: string;
+			memories: ProactiveSurfacedMemory[];
+			injected_memory_ids: string[];
+			feedback: FeedbackProcessed | null;
+			temporal_credits_applied: number | null;
+			took_ms: number;
 	  }
 	| { type: "harness_learning_applied"; memories: { id: string; content: string; score: number }[] }
 	| { type: "model_changed"; model: ModelRef }
