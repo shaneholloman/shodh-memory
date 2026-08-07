@@ -1,0 +1,195 @@
+@import "tailwindcss";
+
+/* Watermelon components ship with shadcn's `dark:` variants, so the variant
+   has to resolve. The product is dark-only — <html class="dark"> is set in
+   index.html and the token values below are the dark values. There is no
+   second theme to keep in sync. */
+@custom-variant dark (&:is(.dark *));
+
+/*
+  The token layer IS the design.
+
+  Watermelon's 260 components consume shadcn's semantic variable names
+  (--background, --primary, --border, ...). Defining those names with Linear's
+  values is what makes every component we pull from the registry land already
+  looking like Linear, instead of looking like default shadcn and needing to be
+  restyled one at a time. Change a value here, not in a component.
+
+  Linear's discipline, encoded:
+    - Neutral near-black, never blue-black. Depth is four close greys.
+    - Exactly one accent. It marks focus, the primary action, active nav —
+      nothing else. A second accent makes both mean nothing.
+    - Saturated colour is reserved for data (the graph), never for chrome.
+    - Small radii (4–8px), hairline borders, no gradients on surfaces.
+*/
+:root {
+  --background: #08090a;
+  --foreground: #f7f8f8;
+
+  --card: #0f1011;
+  --card-foreground: #f7f8f8;
+  --popover: #141516;
+  --popover-foreground: #f7f8f8;
+
+  --primary: #5e6ad2;
+  --primary-foreground: #ffffff;
+
+  --secondary: #141516;
+  --secondary-foreground: #f7f8f8;
+
+  /* `muted` is the resting surface; `muted-foreground` carries nearly all
+     label copy on this screen. */
+  --muted: #141516;
+  --muted-foreground: #8a8f98;
+
+  /* shadcn's `accent` is the hover/active *surface*, not the brand colour. */
+  --accent: #1a1b1e;
+  --accent-foreground: #f7f8f8;
+
+  --destructive: #eb5757;
+  --destructive-foreground: #ffffff;
+
+  --border: #1c1d1f;
+  --input: #26282c;
+  --ring: #5e6ad2;
+
+  --radius: 0.5rem;
+
+  /* Data hues. Used by the knowledge graph and the readouts, never by chrome.
+     Chosen to stay legible on #08090a without competing with the accent. */
+  --chart-1: #a599ff; /* technology */
+  --chart-2: #4ea7fc; /* org        */
+  --chart-3: #4cb782; /* location   */
+  --chart-4: #f2994a; /* person     */
+  --chart-5: #e0a355;
+
+  --sidebar: #0f1011;
+  --sidebar-foreground: #f7f8f8;
+  --sidebar-primary: #5e6ad2;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1a1b1e;
+  --sidebar-accent-foreground: #f7f8f8;
+  --sidebar-border: #1c1d1f;
+  --sidebar-ring: #5e6ad2;
+}
+
+/* Graph-only tokens. The canvas is not a Tailwind surface — d3 reads these
+   through getComputedStyle, so they live as plain custom properties and are
+   deliberately outside the shadcn set. */
+:root {
+  --node-technology: #a599ff;
+  --node-org: #4ea7fc;
+  --node-location: #4cb782;
+  --node-person: #f2994a;
+  --node-active: #f2994a;
+  --edge-strong: #4a4d55;
+  --edge-medium: #35373d;
+  --edge-weak: #26282c;
+  --live: #4cb782;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* Linear sets text tight. Negative tracking on display sizes is a large part
+     of why its type reads as product chrome rather than a marketing page. */
+  --tracking-tighter: -0.03em;
+  --tracking-tight: -0.02em;
+  --tracking-normal: -0.011em;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    /* Segoe UI Variable is the closest thing to Inter already present on
+       Windows. No webfont is fetched: the product ships on-device and must
+       render identically with no network. */
+    font-family:
+      "Inter var", "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui,
+      -apple-system, sans-serif;
+    letter-spacing: -0.011em;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-size: 13px;
+    margin: 0;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2b2d31;
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3d43;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* A dashboard someone reads for an hour must honour this. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility mono {
+  font-family: "Berkeley Mono", "SF Mono", ui-monospace, Consolas, monospace;
+  font-feature-settings: "zero" 1;
+  font-variant-numeric: tabular-nums;
+}
