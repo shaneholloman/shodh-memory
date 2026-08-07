@@ -311,6 +311,21 @@ fn every_live_tier_maps_to_a_distinct_graph_multiplier() {
     );
 }
 
+// FACT CORRECTION — NOT COVERED END TO END. See the handoff.
+//
+// The arbitration path (contradiction detection -> invalidation -> consumers
+// honouring it) is unit-tested at the store level in `src/memory/facts.rs`, but
+// there is deliberately NO end-to-end test here, because the one written first
+// passed VACUOUSLY: driving `remember` with aged memories and then
+// `run_maintenance(.., is_heavy = true)` extracts ZERO facts in this harness, so
+// every assertion about contradictions was trivially satisfied. Both a
+// declarative corpus and a pattern-shaped one produced facts = 0.
+//
+// A passing test that exercises nothing is worse than an absent one, so it was
+// removed rather than left to look like coverage. Whatever gates fact extraction
+// in-process needs to be isolated first — it is upstream of the invalidation
+// work and predates it.
+
 #[test]
 fn test_tier_full_cycle() {
     let mut memory = Memory::new(

@@ -416,6 +416,78 @@ pub struct SemanticFact {
     pub last_reinforced: chrono::DateTime<chrono::Utc>,
     /// Category of fact (preference, capability, relationship, procedure)
     pub fact_type: FactType,
+
+    // =========================================================================
+    // Invalidation / contradiction (trailing fields — postcard-positional).
+    //
+    // Before these, a fact could never be CORRECTED, only out-waited.
+    // `RelationshipEdge` has carried `invalidated_at` + `invalidate_relationship`
+    // + traversal that honours it for a long time; none of that machinery
+    // extended to facts. Worse, the polarity check in `find_similar` is a DEDUP
+    // guard: a claim and its negation did not merge, so they coexisted as two
+    // rows, unlinked, each ratcheting its own confidence and each extending its
+    // own half-life. The better supported a wrong fact was, the more durable it
+    // became.
+    //
+    // These mirror the edge pattern. `#[serde(default)]` plus
+    // `FACT_DEFAULT_SUFFIX` let facts written before they existed decode.
+    // =========================================================================
+    /// When this fact was superseded. `Some` means it must not influence
+    /// retrieval, must not accrue further support, and must not extend its
+    /// half-life — but it is RETAINED, not deleted, so the correction has an
+    /// auditable "what it replaced".
+    #[serde(default)]
+    pub invalidated_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Provenance of the invalidation: the id of the fact that superseded this
+    /// one. `None` alongside `Some(invalidated_at)` means it was invalidated
+    /// directly rather than by a competing fact.
+    #[serde(default)]
+    pub invalidated_by: Option<String>,
+
+    /// Ids of facts this one is in direct contradiction with, in both
+    /// directions — the surviving fact records what it superseded, and the
+    /// superseded one records its victor. This is the LINK the polarity guard
+    /// never created.
+    #[serde(default)]
+    pub contradicts: Vec<String>,
+}
+
+impl SemanticFact {
+    /// True when this fact still counts as knowledge.
+    ///
+    /// The single predicate every consumer must go through — scoring, half-life
+    /// decay, support accrual and narrative building. An invalidated fact stays
+    /// in the store for audit but stops being evidence.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.invalidated_at.is_none()
+    }
+
+    /// Mark this fact as superseded by `winner_id` at `now`.
+    ///
+    /// Idempotent: re-invalidating keeps the FIRST invalidation timestamp, so
+    /// the audit trail records when the fact stopped being believed, not the
+    /// last time something noticed.
+    pub fn invalidate(&mut self, winner_id: Option<&str>, now: chrono::DateTime<chrono::Utc>) {
+        if self.invalidated_at.is_none() {
+            self.invalidated_at = Some(now);
+            self.invalidated_by = winner_id.map(|s| s.to_string());
+        }
+        if let Some(id) = winner_id {
+            if !self.contradicts.iter().any(|c| c == id) {
+                self.contradicts.push(id.to_string());
+            }
+        }
+    }
+
+    /// Record a contradiction link without invalidating (used on the winning
+    /// side, which stays active but must remember what it displaced).
+    pub fn link_contradiction(&mut self, other_id: &str) {
+        if !self.contradicts.iter().any(|c| c == other_id) {
+            self.contradicts.push(other_id.to_string());
+        }
+    }
 }
 
 /// Types of semantic facts
@@ -620,6 +692,9 @@ impl SemanticConsolidator {
                     created_at: now,
                     last_reinforced: now,
                     fact_type,
+                    invalidated_at: None,
+                    invalidated_by: None,
+                    contradicts: Vec::new(),
                 };
 
                 result.new_fact_ids.push(fact.id.clone());
@@ -1767,6 +1842,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_reinforced: chrono::Utc::now() - chrono::Duration::days(10),
             fact_type: FactType::Pattern,
+            invalidated_at: None,
+            invalidated_by: None,
+            contradicts: Vec::new(),
         };
         let memory = create_test_memory("reinforcing memory", 0.7);
 
@@ -1792,6 +1870,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_reinforced: chrono::Utc::now(),
             fact_type: FactType::Pattern,
+            invalidated_at: None,
+            invalidated_by: None,
+            contradicts: Vec::new(),
         };
         assert!(!consolidator.should_decay_fact(&recent_fact));
 
@@ -1805,6 +1886,9 @@ mod tests {
             created_at: chrono::Utc::now() - chrono::Duration::days(365),
             last_reinforced: chrono::Utc::now() - chrono::Duration::days(100),
             fact_type: FactType::Pattern,
+            invalidated_at: None,
+            invalidated_by: None,
+            contradicts: Vec::new(),
         };
         assert!(consolidator.should_decay_fact(&old_fact));
     }
