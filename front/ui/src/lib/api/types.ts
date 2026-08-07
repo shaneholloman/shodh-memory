@@ -113,3 +113,74 @@ export interface RecallRequest {
   debug?: boolean;
   offset?: number;
 }
+
+/** `TodoStatus` — src/memory/types.rs:3406. `#[serde(rename_all =
+ *  "snake_case")]`, so the wire values are these, not the PascalCase variant
+ *  names. */
+export type TodoStatus = "backlog" | "todo" | "in_progress" | "blocked" | "done" | "cancelled";
+
+/** `TodoPriority` — src/memory/types.rs:3452. Same snake_case rule. */
+export type TodoPriority = "urgent" | "high" | "medium" | "low" | "none";
+
+/**
+ * `Todo` — src/memory/types.rs:3646. Only the fields this UI renders; the
+ * struct also carries `recurrence`, `embedding`, `comments` and
+ * `related_memory_ids`, none of which the list view needs.
+ *
+ * `id` is `#[serde(transparent)]` over a `Uuid` (types.rs:3358-3361), so it
+ * serialises as a bare string. There is no `short_id` field on the wire —
+ * `Todo::short_id()` (types.rs:3776) is a Rust-side method, not part of the
+ * JSON. The display id is composed client-side from `project_prefix` +
+ * `seq_num`, mirroring that method exactly (including its "SHO" fallback and
+ * its first-4-hex-chars fallback for legacy todos with `seq_num === 0`).
+ */
+export interface Todo {
+  id: string;
+  seq_num: number;
+  project_prefix: string | null;
+  user_id: string;
+  content: string;
+  status: TodoStatus;
+  priority: TodoPriority;
+  project_id: string | null;
+  parent_id: string | null;
+  contexts: string[];
+  tags: string[];
+  due_date: string | null;
+  blocked_on: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  sort_order: number;
+}
+
+/** `Project` — src/memory/types.rs:3911. Only the fields this UI renders. */
+export interface Project {
+  id: string;
+  user_id: string;
+  name: string;
+  prefix: string | null;
+  color: string | null;
+}
+
+/** `ListTodosRequest` — src/handlers/todos.rs:223. Only the fields this UI
+ *  sends; `include_completed` defaults to `false` server-side, which is what
+ *  the Tasks view wants for its primary list. */
+export interface ListTodosRequest {
+  user_id: string;
+  status?: TodoStatus[];
+  include_completed?: boolean;
+  limit?: number;
+}
+
+/** `TodoListResponse` — src/handlers/todos.rs:204. `count` is the total
+ *  before pagination, not `todos.length` — src/handlers/todos.rs:1335-1358
+ *  sets it from `todos.len()` before `.truncate(limit)` runs. */
+export interface TodoListResponse {
+  success: boolean;
+  count: number;
+  todos: Todo[];
+  projects: Project[];
+  formatted: string;
+}
