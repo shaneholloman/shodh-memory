@@ -24,6 +24,28 @@ Judged from the live preview, not from a description:
 
 ## Changes to make, not copy verbatim
 
+0. **Orange accent, not Gridline's teal/cyan.** This is the one place the brand
+   already has an answer: the shodh mark is a low-poly elephant in reds and
+   oranges (`src/assets/shodh-mark.png`), and the previous UI ran a warm accent
+   for the same reason. Teal would leave the mark as the only warm thing on
+   screen, fighting everything around it.
+
+   Take the accent from the mark rather than picking an orange: its dominant
+   tones are roughly `#e8342a` through `#f4622e` with a lighter `#f6893f`. The
+   accent should be the brighter end — around **`#f4622e`** — so it stays legible
+   as small text and thin strokes on `#08090a`, with a dimmer variant for
+   resting borders.
+
+   Two constraints this must not break:
+   - **Still one accent.** It marks focus, the primary action, and active nav.
+     Warm accents are louder than indigo, so it needs *less* usage, not more.
+   - **Orange must not also mean "anomaly".** The graph already uses warm hues
+     for active/anomalous nodes, and the anomalies view is built on deviation.
+     If the chrome and the alarm are the same colour, the alarm stops reading as
+     one. Move node/anomaly warmth to red (`--destructive`) and amber, and
+     reserve the accent orange for chrome. Check this before shipping — it is
+     the failure mode that actually bites.
+
 1. **Smaller icons** in the rail. Gridline's are oversized for the density this
    product needs.
 2. **Hover expands the rail** into a labelled column. Icon-only navigation fails
