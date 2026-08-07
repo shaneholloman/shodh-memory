@@ -627,6 +627,11 @@ pub async fn remember(
         }
     }
 
+    // Resolve place mentions to coordinates. Deliberately NOT written to
+    // geo_location: that field means "recorded here" and feeds the geohash
+    // radius index, while these are places the content merely talks about.
+    let toponyms = crate::gazetteer::resolve_ner_locations(&ner_entities);
+
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
@@ -634,6 +639,7 @@ pub async fn remember(
         tags: merged_entities,
         context,
         ner_entities,
+        toponyms,
         importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
         metadata: req.metadata,
         robot_id: req.robot_id.clone(),
@@ -1014,6 +1020,8 @@ pub async fn batch_remember(
             item.preceding_memory_id.clone(),
         );
 
+        let toponyms = crate::gazetteer::resolve_ner_locations(&ner_records);
+
         let experience = Experience {
             content: item.content,
             experience_type,
@@ -1021,6 +1029,7 @@ pub async fn batch_remember(
             tags: merged_entities,
             context,
             ner_entities: ner_records,
+            toponyms,
             importance_override: item.importance.map(|v| v.clamp(0.0, 1.0)),
             ..Default::default()
         };
@@ -1182,12 +1191,15 @@ pub async fn upsert_memory(
         merged_entities.truncate(validation::MAX_ENTITIES_PER_MEMORY);
     }
 
+    let toponyms = crate::gazetteer::resolve_ner_locations(&ner_entities);
+
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
         entities: merged_entities.clone(),
         tags: merged_entities,
         ner_entities,
+        toponyms,
         importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
         ..Default::default()
     };
