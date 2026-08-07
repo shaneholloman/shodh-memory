@@ -38,9 +38,12 @@ rehearsal produces a pass/fail list rather than an impression.
 | 10 | Tasks | work capture | seeded todos, priority/overdue badges |
 | 11 | Learning ledger (via chat blocks) | reviewability | reinforce/write events listed; revert works and says what it can and cannot undo |
 
-Beat 9 needs a second provider configured (local runtime installed and a model
-pulled, or a second hosted credential). If neither exists on the demo machine,
-cut the beat deliberately in rehearsal — do not improvise it live.
+Beat 9 runs on the SAME subscription credential: swap between two models of
+the configured provider (e.g. a Sonnet-class to a Haiku-class model). The
+evidence panel not changing while the prose and latency visibly do is the
+whole point, and it needs no second provider. Local runtimes (Ollama/vLLM)
+are deliberately deferred — when one is installed later, the same beat gains
+the on-device variant and the egress badge flip, with no other change.
 
 ## Rehearsal rule
 
