@@ -18,17 +18,21 @@ export function useReachability(): Reachability {
     queryFn: ({ signal }) => probeBackend(signal),
     refetchInterval: 10_000,
     // This query resolves rather than throws for every expected state, so a
-    // failure here is a real bug and should not be retried into silence.
+    // rejection here is a real bug and should not be retried into silence.
     retry: false,
     staleTime: 0,
   });
 
   const reach: Reachability = data ?? { state: "offline", detail: "not probed yet" };
 
+  // The array's identity changes on every poll even when its contents do not,
+  // so the effect depends on a serialisation of the contents rather than on the
+  // array itself. Without this it re-runs ten times a minute forever.
+  const profileKey = JSON.stringify(reach.state === "online" ? reach.profiles : []);
+
   useEffect(() => {
-    if (reach.state === "online") reconcileProfiles(reach.profiles);
-    else reconcileProfiles([]);
-  }, [reach.state, reach.state === "online" ? reach.profiles.join("\u0000") : "", reconcileProfiles]);
+    reconcileProfiles(JSON.parse(profileKey) as string[]);
+  }, [profileKey, reconcileProfiles]);
 
   return reach;
 }

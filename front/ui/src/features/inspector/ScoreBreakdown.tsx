@@ -53,8 +53,7 @@ function Row({ label, hint, value }: { label: string; hint: string; value: numbe
       <span
         className={cn("mono shrink-0 text-[11px]", lifts ? "text-primary" : "text-destructive")}
       >
-        {lifts ? "×" : "×"}
-        {value.toFixed(2)}
+        ×{value.toFixed(2)}
       </span>
     </div>
   );
