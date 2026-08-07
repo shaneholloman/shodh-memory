@@ -139,6 +139,8 @@ Revert semantics are honest about what the backend supports:
 | GET | `/v1/providers` | provider auth status — configured/source/stored, never key material |
 | PUT | `/v1/providers/{id}/key` | `{api_key}` — stored server-side (`provider-credentials.json`, 0600); a stored key beats env in pi's resolution order |
 | DELETE | `/v1/providers/{id}/key` | remove the stored key; env-var auth, if present, remains |
+| POST | `/v1/providers/{id}/oauth/start` | run pi's browser-OAuth login for the provider; SSE stream of `oauth_notify` (auth URLs, device codes, progress), `oauth_prompt` (pasted codes, selections), `oauth_complete`/`oauth_error`. One at a time per provider; disconnecting aborts |
+| POST | `/v1/providers/{id}/oauth/input` | `{prompt_id, value}` — answer a pending login prompt |
 | GET | `/v1/conversations?user_id` | persisted session list with turn counts and accumulated token/cost totals |
 | POST | `/v1/conversations` | `{user_id, provider, model, system_prompt?}` |
 | GET | `/v1/conversations/{id}` | metadata + transcript + durable events (evidence replay) |
@@ -242,17 +244,21 @@ credential before ambient env vars, so a key submitted through
 `PUT /v1/providers/{id}/key` becomes the working credential immediately, and
 `DELETE` falls back to env. `GET /v1/providers` reports, per provider: whether
 auth is configured, pi's own source label (`ANTHROPIC_API_KEY`, `OAuth`,
-`local endpoint (keyless)`, …), whether a seat-stored key exists, and whether
+`local endpoint (keyless)`, …), whether a seat-stored key exists, whether
 the provider meaningfully accepts an API key at all (ambient-only providers
-like Bedrock/Vertex do not). Key material never appears in any response.
+like Bedrock/Vertex do not), and whether pi ships a browser OAuth flow for it
+— including whether that flow is subscription-backed (`isSubscription`:
+Claude Pro/Max, ChatGPT, Copilot, …). Key material never appears in any
+response.
+
+Auth is three genuinely different shapes, and `/v1/models` labels every model
+with the consequence under its *effective* credential (`billing`):
+`"none"` (local endpoint — nothing leaves the machine), `"subscription"`
+(OAuth flat-rate plan — token counts are plan consumption, pi's per-token
+cost numbers do not describe a bill), `"metered"` (API key — they do).
 
 ## Deliberately not built
 
-- **OAuth login flows** — pi ships them (`ai/src/auth/oauth/*`), but they are
-  interactive multi-step prompt/callback flows; bridging that interaction over
-  the seat's HTTP surface is real design work, and env/API-key auth covers
-  every provider the seat targets today. `GET /v1/providers` already reports
-  OAuth-sourced auth when pi resolves it from the environment.
 - **Python/IPython kernel, installable skill packages, recursive sub-agents** —
   external design choices that do not fit this product.
 - **A second store for harness behaviors** — harness learnings are memories in

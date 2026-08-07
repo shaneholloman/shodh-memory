@@ -35,6 +35,17 @@ export interface ModelInfo {
 	max_tokens: number;
 	reasoning: boolean;
 	local: boolean;
+	/**
+	 * What a token means for this model UNDER ITS EFFECTIVE CREDENTIAL:
+	 *  - "none"         — local endpoint; nothing leaves the machine, no bill.
+	 *  - "subscription" — OAuth against a flat-rate plan (pi's
+	 *    `OAuthAuth.isSubscription`); tokens count against a plan, and pi's
+	 *    per-token cost numbers do NOT describe a bill.
+	 *  - "metered"      — API key; pi's cost numbers are the bill.
+	 * Derived from `checkAuth` at listing time, so it tracks whichever
+	 * credential actually resolves (a stored OAuth login beats an env key).
+	 */
+	billing: "none" | "subscription" | "metered";
 }
 
 /**
@@ -56,6 +67,12 @@ export interface ProviderInfo {
 	 *  provider (pi models it as `auth.apiKey.login` being present; ambient-only
 	 *  providers such as Bedrock/Vertex resolve from AWS/ADC files instead). */
 	accepts_api_key: boolean;
+	/** Whether pi ships a browser OAuth flow for this provider. */
+	oauth_available: boolean;
+	/** OAuth here is a flat-rate plan (Claude Pro/Max, ChatGPT, Copilot…). */
+	oauth_subscription: boolean;
+	/** pi's own label for the OAuth option, e.g. "Claude Pro/Max". */
+	oauth_label: string | null;
 	model_count: number;
 	local: boolean;
 }
@@ -173,6 +190,27 @@ export class ModelRegistry {
 	/** Models whose providers have working auth (env keys present, or local). */
 	async listAvailable(): Promise<ModelInfo[]> {
 		const available = await this.models.getAvailable();
+		// Billing semantics per provider, from the credential that actually
+		// resolves right now — computed once per provider, not per model.
+		const billingByProvider = new Map<string, ModelInfo["billing"]>();
+		for (const model of available) {
+			if (billingByProvider.has(model.provider)) continue;
+			if ((LOCAL_PROVIDER_IDS as readonly string[]).includes(model.provider)) {
+				billingByProvider.set(model.provider, "none");
+				continue;
+			}
+			let billing: ModelInfo["billing"] = "metered";
+			try {
+				const check = await this.models.checkAuth(model.provider);
+				const provider = this.models.getProvider(model.provider);
+				if (check?.type === "oauth" && provider?.auth.oauth?.isSubscription) {
+					billing = "subscription";
+				}
+			} catch {
+				// Unresolvable check ⇒ default to metered; never invent "free".
+			}
+			billingByProvider.set(model.provider, billing);
+		}
 		return available.map((model) => ({
 			provider: model.provider,
 			id: model.id,
@@ -181,6 +219,7 @@ export class ModelRegistry {
 			max_tokens: model.maxTokens,
 			reasoning: model.reasoning,
 			local: (LOCAL_PROVIDER_IDS as readonly string[]).includes(model.provider),
+			billing: billingByProvider.get(model.provider) ?? "metered",
 		}));
 	}
 
@@ -211,6 +250,9 @@ export class ModelRegistry {
 				auth_type: check?.type ?? null,
 				stored: stored.has(provider.id),
 				accepts_api_key: !local && Boolean(provider.auth.apiKey?.login),
+				oauth_available: !local && provider.auth.oauth !== undefined,
+				oauth_subscription: Boolean(provider.auth.oauth?.isSubscription),
+				oauth_label: provider.auth.oauth?.loginLabel ?? provider.auth.oauth?.name ?? null,
 				model_count: this.models.getModels(provider.id).length,
 				local,
 			});

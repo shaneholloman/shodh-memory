@@ -26,7 +26,9 @@
  * config load). Provider credentials never appear in any response or event.
  */
 
+import * as crypto from "node:crypto";
 import * as http from "node:http";
+import type { AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
 import type { ShodhBackend } from "./backend.js";
 import type { SeatConfig } from "./config.js";
 import { Conversation, ConversationBusyError, type ConversationDeps, UnknownModelError } from "./conversation.js";
@@ -153,6 +155,14 @@ function lastAssistantText(messages: unknown[]): string | undefined {
 export class SeatServer {
 	private readonly deps: SeatServerDeps;
 	private readonly conversations = new Map<string, Conversation>();
+	/** In-flight browser-OAuth logins, one per provider. */
+	private readonly oauthSessions = new Map<
+		string,
+		{
+			controller: AbortController;
+			prompts: Map<string, { resolve: (value: string) => void; reject: (reason: Error) => void }>;
+		}
+	>();
 	private readonly server: http.Server;
 
 	constructor(deps: SeatServerDeps) {
@@ -274,6 +284,17 @@ export class SeatServer {
 			}
 			if (method === "DELETE") {
 				await this.handleProviderKeyClear(decodeURIComponent(segments[2]), response);
+				return;
+			}
+		}
+		if (segments[0] === "v1" && segments[1] === "providers" && segments[2] && segments[3] === "oauth") {
+			const providerId = decodeURIComponent(segments[2]);
+			if (method === "POST" && segments[4] === "start" && segments.length === 5) {
+				await this.handleOAuthStart(providerId, request, response);
+				return;
+			}
+			if (method === "POST" && segments[4] === "input" && segments.length === 5) {
+				await this.handleOAuthInput(providerId, request, response);
 				return;
 			}
 		}
@@ -445,6 +466,123 @@ export class SeatServer {
 			if (error instanceof UnknownProviderError) throw new HttpError(404, error.message);
 			throw error;
 		}
+	}
+
+	/**
+	 * Browser-OAuth bridge. pi's login flows are interaction-driven
+	 * (`AuthInteraction.notify` for URLs/device codes/progress,
+	 * `AuthInteraction.prompt` for pasted codes and selections —
+	 * packages/ai/src/auth/types.ts); this streams those interactions to the
+	 * client as SSE frames and feeds prompt answers back through
+	 * POST .../oauth/input. One login at a time per provider; disconnecting
+	 * the stream aborts the flow. The resulting credential lands in the same
+	 * seat-owned store as API keys and never reaches the client.
+	 */
+	private async handleOAuthStart(
+		providerId: string,
+		request: http.IncomingMessage,
+		response: http.ServerResponse,
+	): Promise<void> {
+		const provider = this.deps.registry.models.getProvider(providerId);
+		if (!provider) throw new HttpError(404, `Unknown provider: ${providerId}`);
+		if (!provider.auth.oauth) throw new HttpError(400, `${provider.name} has no OAuth flow`);
+		if (this.oauthSessions.has(providerId)) {
+			throw new HttpError(409, `An OAuth login for ${providerId} is already in progress`);
+		}
+
+		response.writeHead(200, {
+			"Content-Type": "text/event-stream; charset=utf-8",
+			"Cache-Control": "no-cache, no-transform",
+			Connection: "keep-alive",
+			"X-Accel-Buffering": "no",
+		});
+		response.write("retry: 5000\n\n");
+		response.on("error", () => {});
+		const write = (type: string, payload: unknown): void => {
+			if (response.writableEnded || response.destroyed) return;
+			try {
+				response.write(`event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`);
+			} catch {
+				// Disconnect handler aborts the flow.
+			}
+		};
+
+		const controller = new AbortController();
+		const session = {
+			controller,
+			prompts: new Map<string, { resolve: (value: string) => void; reject: (reason: Error) => void }>(),
+		};
+		this.oauthSessions.set(providerId, session);
+		request.on("close", () => {
+			if (!response.writableEnded) controller.abort();
+		});
+		const heartbeat = setInterval(() => {
+			if (!response.writableEnded) response.write(": ping\n\n");
+		}, SSE_HEARTBEAT_MS);
+
+		const interaction: AuthInteraction = {
+			signal: controller.signal,
+			notify: (event) => write("oauth_notify", event),
+			prompt: (prompt: AuthPrompt) => {
+				const promptId = crypto.randomUUID();
+				write("oauth_prompt", {
+					prompt_id: promptId,
+					type: prompt.type,
+					message: prompt.message,
+					placeholder: "placeholder" in prompt ? prompt.placeholder : undefined,
+					options: prompt.type === "select" ? prompt.options : undefined,
+				});
+				return new Promise<string>((resolve, reject) => {
+					session.prompts.set(promptId, { resolve, reject });
+					// Either the whole flow or this one prompt can be cancelled
+					// out from under us (pi races manual-code prompts against
+					// callback servers).
+					const cancel = () => {
+						if (session.prompts.delete(promptId)) {
+							write("oauth_prompt_cancelled", { prompt_id: promptId });
+							reject(new Error("Prompt cancelled"));
+						}
+					};
+					controller.signal.addEventListener("abort", cancel, { once: true });
+					prompt.signal?.addEventListener("abort", cancel, { once: true });
+				});
+			},
+		};
+
+		try {
+			await this.deps.registry.models.login(providerId, "oauth", interaction);
+			const info = (await this.deps.registry.listProviders()).find(
+				(candidate) => candidate.id === providerId,
+			);
+			write("oauth_complete", { provider: info ?? null });
+		} catch (error) {
+			write("oauth_error", {
+				message: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			clearInterval(heartbeat);
+			for (const [, pending] of session.prompts) pending.reject(new Error("Login finished"));
+			session.prompts.clear();
+			this.oauthSessions.delete(providerId);
+			if (!response.writableEnded) response.end();
+		}
+	}
+
+	private async handleOAuthInput(
+		providerId: string,
+		request: http.IncomingMessage,
+		response: http.ServerResponse,
+	): Promise<void> {
+		const body = parseJson<{ prompt_id?: string; value?: string }>(await readBody(request));
+		if (!body.prompt_id || typeof body.value !== "string") {
+			throw new HttpError(400, "prompt_id and value are required");
+		}
+		const session = this.oauthSessions.get(providerId);
+		const pending = session?.prompts.get(body.prompt_id);
+		if (!session || !pending) throw new HttpError(404, "No such pending prompt");
+		session.prompts.delete(body.prompt_id);
+		pending.resolve(body.value);
+		sendJson(response, 200, { accepted: true });
 	}
 
 	private async handleMessage(
