@@ -1,7 +1,9 @@
 import type { Reachability } from "@/lib/api";
 
 /**
- * The right rail.
+ * The Inspector — the single object-detail surface. Every list in the product
+ * feeds this one pane, which is what makes a click lead somewhere instead of
+ * terminating (see WORKFLOWS.md).
  *
  * Was four permanent stat panels — Memory tiers / Graph / Connected LLMs /
  * Detail — which meant that with nothing selected the rail read as four
@@ -12,10 +14,20 @@ import type { Reachability } from "@/lib/api";
  * selection it explains what this pane is for rather than showing empty
  * counters. Real counts land here once their handlers are read; nothing is
  * invented in the meantime.
+ *
+ * Positioned absolutely rather than as a flex column, on purpose. The d3
+ * canvas wants the stage's full width so a force layout is not centred inside
+ * a lopsided box, and this pane will float over its right edge once that
+ * lands. Until then `main` reserves the same width, so nothing is occluded in
+ * the meantime — the geometry changes when the canvas arrives, not the
+ * structure.
  */
 export function Inspector({ reach }: { reach: Reachability }) {
   return (
-    <aside className="border-border bg-card w-[280px] shrink-0 overflow-y-auto border-l">
+    <aside
+      aria-label="Detail"
+      className="border-border bg-card absolute right-0 bottom-0 top-12 z-20 w-[280px] overflow-y-auto border-l"
+    >
       <header className="border-border border-b px-4 py-3">
         <h2 className="text-[12px] font-medium tracking-tight">Detail</h2>
         <p className="text-muted-foreground mt-0.5 text-[11px] leading-relaxed">
