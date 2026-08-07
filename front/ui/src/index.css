@@ -64,9 +64,13 @@
 
   /* The accent is taken from the shodh mark (src/assets/shodh-mark.png), a
      low-poly elephant in reds and oranges, rather than picked. Its tones run
-     ~#e8342a to #f4622e. The brighter end is the only one that works as small
-     text: #f4622e on #08090a is ~5:1 (passes AA), while the mark's #e8342a is
-     ~3.9:1 and fails. */
+     ~#e8342a to #f4622e.
+
+     Measured on #08090a: #f4622e is 6.29:1, #e8342a is 4.70:1. Both clear AA
+     for text, so contrast does not decide this. The brighter end is taken for
+     the headroom: the accent also has to carry 1px SVG strokes and 3px status
+     dots, which no text ratio covers, and it has to stay separable from
+     --destructive (#f2555a, 5.90:1) at a glance. */
   --primary: #f4622e;
   /* Near-black, NOT white. White on #f4622e is ~3.1:1 and fails AA — the
      primary button would ship unreadable. Near-black on it is ~6:1. This pairs
@@ -250,4 +254,58 @@
   font-family: "Berkeley Mono", "SF Mono", ui-monospace, Consolas, monospace;
   font-feature-settings: "zero" 1;
   font-variant-numeric: tabular-nums;
+}
+
+/* The graticule the Gridline direction is named for. A measured surface rather
+   than a flat void: it gives the stage a sense of extent, and it is the same
+   ruling the graph canvas will be plotted against once it lands, so the empty
+   state and the populated one share a floor.
+
+   Masked to fade at the edges. An edge-to-edge grid reads as a spreadsheet;
+   one that falls away reads as a field the content sits on. */
+@utility graticule {
+  background-image:
+    linear-gradient(to right, var(--border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--border) 1px, transparent 1px);
+  background-size: 56px 56px;
+  background-position: center center;
+  opacity: 0.5;
+  mask-image: radial-gradient(
+    ellipse 75% 65% at 50% 50%,
+    #000 25%,
+    transparent 78%
+  );
+}
+
+/* Activation travelling along an edge. A short dash on a long gap, so exactly
+   one pulse is in flight per edge; the offset is animated rather than the
+   geometry, which keeps it off the layout path.
+
+   This is the product's actual mechanism, not decoration — the reason a memory
+   nobody searched for surfaces is that activation propagates. Showing it move
+   is the most honest thing this illustration can do.
+
+   The global prefers-reduced-motion rule in @layer base forces every animation
+   to one iteration at 0.01ms, which lands these at dashoffset 0 — a resting
+   diagram with no motion. That is the correct fallback and needs no branch. */
+@keyframes shodh-activation-flow {
+  from {
+    stroke-dashoffset: var(--flow-span);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes shodh-node-pulse {
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+    transform: scale(1);
+  }
+  20% {
+    opacity: 1;
+    transform: scale(1.6);
+  }
 }

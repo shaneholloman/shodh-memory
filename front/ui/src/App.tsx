@@ -41,11 +41,63 @@ import { Inspector } from "@/components/Inspector";
 const RAIL_OFFSET = "pl-14";
 const INSPECTOR_OFFSET = "pr-[280px]";
 
+/**
+ * Connection state, said once for the whole product.
+ *
+ * Gridline's segmented strip, carrying the one piece of live state this app
+ * actually has. It replaces three separate statements of the same fact — a
+ * card in the middle of the stage, a row at the foot of the rail, and a line
+ * in the Inspector — which between them made an ordinary not-started-yet state
+ * read as something broken.
+ *
+ * A state and its remedy travel together. "Offline" on its own sends people to
+ * check their network when the server simply is not running.
+ */
+function StatusStrip({ reach }: { reach: Reachability }) {
+  const { tone, state, remedy } =
+    reach.state === "online"
+      ? {
+          tone: "text-[var(--live)]",
+          state: "Connected",
+          remedy: "Memory server reachable",
+        }
+      : reach.state === "unauthorized"
+        ? {
+            tone: "text-destructive",
+            state: "Key rejected",
+            remedy: `Server answered ${reach.status} — set SHODH_API_KEY to the key it was started with`,
+          }
+        : {
+            tone: "text-warn",
+            state: "Not running",
+            remedy: "Start the shodh backend — nothing is lost while it is down",
+          };
+
+  return (
+    <div className="bg-muted mono hidden h-[26px] min-w-0 shrink items-center overflow-hidden rounded-md text-[11px] sm:flex">
+      <span
+        className={cn(
+          "border-sidebar flex h-full shrink-0 items-center gap-2 border-r-2 px-2.5",
+          tone,
+        )}
+      >
+        <span className="size-1.5 shrink-0 rounded-full bg-current" />
+        {state}
+      </span>
+      <span className="text-muted-foreground hidden h-full min-w-0 items-center px-2.5 lg:flex">
+        <span className="truncate">{remedy}</span>
+      </span>
+    </div>
+  );
+}
+
 function TopBar({
   title,
+  reach,
   children,
 }: {
   title: string;
+  reach: Reachability;
   children?: React.ReactNode;
 }) {
   return (
@@ -56,10 +108,16 @@ function TopBar({
         RAIL_OFFSET,
       )}
     >
+      {/* Everything but the title sits right. The rail expands over this bar
+          from the left, so anything in its first 224px gets occluded on hover
+          — and a status strip sliced mid-word reads as a rendering fault. The
+          title is the one thing that can afford to go: while the rail is open
+          it is showing its own header, which names the product anyway. */}
       <h1 className="shrink-0 text-[13px] font-medium tracking-tight">{title}</h1>
-      {children ? (
-        <div className="ml-auto flex min-w-0 flex-1 justify-end">{children}</div>
-      ) : null}
+      <div className="ml-auto flex min-w-0 items-center gap-3 pl-3">
+        <StatusStrip reach={reach} />
+        {children}
+      </div>
     </header>
   );
 }
@@ -132,14 +190,9 @@ export function App() {
 
   return (
     <div className="relative h-svh min-h-0 overflow-hidden">
-      <Sidebar
-        active={active}
-        onNavigate={setActive}
-        reach={reach}
-        identity="defence-live"
-      />
+      <Sidebar active={active} onNavigate={setActive} identity="defence-live" />
 
-      <TopBar title={DESTINATIONS.find((d) => d.id === active)!.label}>
+      <TopBar title={DESTINATIONS.find((d) => d.id === active)!.label} reach={reach}>
         {active === "recall" ? <SearchField disabled={!online} /> : null}
       </TopBar>
 
@@ -158,7 +211,7 @@ export function App() {
                 </div>
               </div>
             ) : null}
-            <GraphStage reach={reach} />
+            <GraphStage />
           </div>
         ) : (
           <Placeholder id={active} reach={reach} />
