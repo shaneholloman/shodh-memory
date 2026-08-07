@@ -360,7 +360,6 @@ const MAX_CONTEXT_LENGTH = 4000; // max chars sent to backend (MiniLM truncates 
 // The backend uses this to evaluate whether surfaced memories were helpful.
 // Guard against concurrent proactive_context calls corrupting feedback state.
 let lastProactiveResponse: string = "";
-let lastUserContext: string = "";
 let proactiveCallInFlight = false;
 
 // =============================================================================
@@ -2887,14 +2886,10 @@ const handleCallTool = async (request: CallToolRequest) => {
           };
         }
 
-        // Capture current context as the user_followup for NEXT call.
-        // (this message is the user's reaction to whatever we surfaced last time)
         // Guard: if another proactive_context call is in-flight, skip feedback
         // to avoid corrupted state from concurrent updates.
         const skipFeedback = proactiveCallInFlight;
         proactiveCallInFlight = true;
-        const previousUserContext = skipFeedback ? "" : lastUserContext;
-        lastUserContext = cleanedContext;
 
         // Single API call to the full proactive context pipeline:
         // feedback loop, coactivation, segmented ingest, semantic todos, context reminders.
@@ -2914,7 +2909,16 @@ const handleCallTool = async (request: CallToolRequest) => {
             // Implicit feedback: send previous response so backend can evaluate which memories helped.
             // Skipped if another proactive_context call was in-flight (prevents corrupted feedback).
             previous_response: skipFeedback ? undefined : (lastProactiveResponse || undefined),
-            user_followup: (skipFeedback || !lastProactiveResponse) ? undefined : (previousUserContext || undefined),
+            // user_followup means "the user's message AFTER the agent response"
+            // (src/memory/feedback.rs feeds it to detect_negative_keywords
+            // against the pending surfaced set). The pending set was created on
+            // the PREVIOUS call, alongside lastProactiveResponse; the user's
+            // reaction to that response is THIS message. This previously sent
+            // the message from BEFORE the response — the original ask — so the
+            // negative-keyword scan ran against the question instead of the
+            // reaction, and corrections like "no, that's wrong" never
+            // registered as negative feedback.
+            user_followup: (skipFeedback || !lastProactiveResponse) ? undefined : (cleanedContext || undefined),
             // Tool-aware feedback attribution: causal signal from tool/actuator actions
             ...(tool_actions.length > 0 ? { tool_actions } : {}),
           });
