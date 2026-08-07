@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { Search, TriangleAlert, ListChecks, ChevronDown, MessageSquare, KeyRound } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Reachability } from "@/lib/api";
+import { isHumanProfile, type Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import shodhMark from "@/assets/shodh-mark.png";
 
@@ -125,9 +125,19 @@ function ProfileSwitcher({ reach, open }: { reach: Reachability; open: boolean }
   const profile = useSession((s) => s.profile);
   const setProfile = useSession((s) => s.setProfile);
 
-  if (reach.state !== "online" || reach.profiles.length === 0 || !profile) return null;
+  // The seat stores its own lessons under `<user>.seat-harness` — a real
+  // backend profile, but machinery, not a person. Offering it here invites
+  // exactly the mistake the switcher exists to prevent: a human reading (or
+  // writing!) the harness's internal scope as if it were their memory. It
+  // remains reachable through the API and the learning ledger, where its
+  // contents render with context instead of masquerading as a user.
+  const humanProfiles = reach.state === "online"
+    ? reach.profiles.filter(isHumanProfile)
+    : [];
 
-  const single = reach.profiles.length === 1;
+  if (reach.state !== "online" || humanProfiles.length === 0 || !profile) return null;
+
+  const single = humanProfiles.length === 1;
 
   return (
     <div className="border-sidebar-border border-t px-2 py-2">
@@ -144,7 +154,7 @@ function ProfileSwitcher({ reach, open }: { reach: Reachability; open: boolean }
                 onChange={(e) => setProfile(e.target.value)}
                 className="text-muted-foreground hover:text-foreground focus-visible:ring-ring min-w-0 flex-1 cursor-pointer appearance-none truncate bg-transparent text-[11px] focus-visible:ring-2 focus-visible:outline-none"
               >
-                {reach.profiles.map((p) => (
+                {humanProfiles.map((p) => (
                   <option key={p} value={p} className="bg-popover text-popover-foreground">
                     {p}
                   </option>

@@ -35,7 +35,7 @@
  *   node seat/eval/lessons-ab.mjs --provider anthropic --model claude-sonnet-5
  */
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -209,6 +209,25 @@ async function main() {
     { SHODH_MEMORY_PATH: path.join(scratch, "backend"), SHODH_API_KEYS: API_KEY, SHODH_PORT: String(BACKEND_PORT) },
     scratch,
   );
+  // A non-local provider needs the credential the user signed in with. It
+  // lives in the DEFAULT seat data dir; the eval seat runs on scratch so its
+  // conversations and ledger never touch real state — so carry over the
+  // credential file alone, never the store. Local/fixture runs skip this.
+  if (!usingFixture) {
+    const defaultDataDir =
+      process.platform === "win32"
+        ? path.join(process.env.LOCALAPPDATA ?? "", "shodh", "seat-harness")
+        : path.join(process.env.XDG_DATA_HOME ?? path.join(process.env.HOME ?? "", ".local", "share"), "shodh", "seat-harness");
+    const credFile = path.join(defaultDataDir, "provider-credentials.json");
+    if (existsSync(credFile)) {
+      mkdirSync(path.join(scratch, "seat"), { recursive: true });
+      copyFileSync(credFile, path.join(scratch, "seat", "provider-credentials.json"));
+      console.log("carried provider credential into scratch seat");
+    } else {
+      console.log(`WARNING: no credential file at ${credFile} — non-local provider will fail auth`);
+    }
+  }
+
   launch("seat", process.execPath, [path.join(here, "..", "dist", "index.js")], {
     SHODH_API_URL: backendBase(),
     SHODH_API_KEY: API_KEY,
