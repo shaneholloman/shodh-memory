@@ -7728,14 +7728,12 @@ impl MemorySystem {
     /// must use [`reinforce_recall_with_momentum`](Self::reinforce_recall_with_momentum)
     /// with [`MomentumPolicy::Skip`] instead.
     ///
-    /// NOTE: [`reinforce_recall_tracked`](Self::reinforce_recall_tracked) does
-    /// NOT route through here — it delegates to `Retriever::reinforce_recall`,
-    /// which predates both this momentum write and the entity-edge Hebbian
-    /// updates above, and applies neither. The two methods are therefore not
-    /// interchangeable despite the names. Unifying them changes the stats
-    /// `reinforce_recall_tracked` reports (`associations_strengthened` becomes a
-    /// real graph coactivation count rather than a pair count), so it is left
-    /// alone here rather than folded into an unrelated fix.
+    /// This is the ONLY implementation of memory reinforcement.
+    /// [`reinforce_recall_tracked`](Self::reinforce_recall_tracked) and the
+    /// `_with_momentum` variants are adapters over it. `RetrievalEngine` used to
+    /// carry a second, divergent implementation; it was deleted rather than
+    /// bypassed, because a `pub` method that silently does two thirds of the job
+    /// is a footgun whether or not anything in-tree still calls it.
     pub fn reinforce_recall(
         &self,
         memory_ids: &[MemoryId],
@@ -8045,13 +8043,36 @@ impl MemorySystem {
         Ok(stats)
     }
 
-    /// Reinforce using a tracked recall (convenience wrapper)
+    /// Reinforce using a tracked recall.
+    ///
+    /// A thin adapter over [`reinforce_recall`](Self::reinforce_recall): it
+    /// unwraps the tracked retrieval's ids and applies the identical
+    /// reinforcement. There is exactly one implementation of reinforcement on
+    /// `MemorySystem`, and this is not a second one.
+    ///
+    /// It used to be. Until this change it delegated to
+    /// `RetrievalEngine::reinforce_recall`, a parallel implementation that
+    /// applied no momentum, no graph coactivation, no entity-edge Hebbian
+    /// updates and no prediction-error weighting, and that wrote straight to
+    /// storage past the working/session caches. Same name, same arguments,
+    /// materially different behaviour.
     pub fn reinforce_recall_tracked(
         &self,
         tracked: &TrackedRetrieval,
         outcome: RetrievalOutcome,
     ) -> Result<ReinforcementStats> {
-        self.retriever.reinforce_tracked(tracked, outcome)
+        self.reinforce_recall_tracked_with_momentum(tracked, outcome, MomentumPolicy::Apply)
+    }
+
+    /// [`reinforce_recall_tracked`](Self::reinforce_recall_tracked) with
+    /// explicit control over the momentum write. See [`MomentumPolicy`].
+    pub fn reinforce_recall_tracked_with_momentum(
+        &self,
+        tracked: &TrackedRetrieval,
+        outcome: RetrievalOutcome,
+        momentum_policy: MomentumPolicy,
+    ) -> Result<ReinforcementStats> {
+        self.reinforce_recall_with_momentum(&tracked.memory_ids(), outcome, momentum_policy)
     }
 
     /// Perform graph maintenance (decay old edges, prune weak ones)
