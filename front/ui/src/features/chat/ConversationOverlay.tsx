@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState , useRef} from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -63,6 +63,59 @@ export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
   const setModel = useChat((s) => s.setModel);
 
   const [mode, setMode] = useState<Mode>("minimized");
+
+  const dockRef = useRef<HTMLElement | null>(null);
+
+
+  // The stages' bottom hint strips live at the same edge this panel docks
+
+  // to, and were being clipped underneath it (found during reactive-surface
+
+  // verification: "13 l…"). Rather than teach three views the overlay's
+
+  // geometry, the overlay publishes its measured footprint as a CSS custom
+
+  // property and the strips pad by it — one source of truth, measured from
+
+  // the DOM rect so every width variant (expanded/minimized/narrow
+
+  // viewport) is exact. Cleared on unmount so /chat and dismissed states
+
+  // reclaim the space.
+
+  useEffect(() => {
+
+    const el = dockRef.current;
+
+    if (!el) return;
+
+    const apply = () => {
+
+      const inset = Math.max(0, window.innerWidth - el.getBoundingClientRect().left) + 12;
+
+      document.documentElement.style.setProperty("--overlay-dock-inset", `${inset}px`);
+
+    };
+
+    apply();
+
+    const ro = new ResizeObserver(apply);
+
+    ro.observe(el);
+
+    window.addEventListener("resize", apply);
+
+    return () => {
+
+      ro.disconnect();
+
+      window.removeEventListener("resize", apply);
+
+      document.documentElement.style.removeProperty("--overlay-dock-inset");
+
+    };
+
+  });
   const [dismissed, setDismissed] = useState(false);
 
   const lookupModel = useBillingLookup(seat.state === "online");
@@ -108,6 +161,7 @@ export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
 
   const body = (
     <section
+      ref={dockRef}
       aria-label="Conversation"
       className={cn(
         "border-border bg-card fixed bottom-3 z-40 flex flex-col rounded-lg border shadow-2xl shadow-black/50",
