@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
+import { RecallDiagram } from "@/components/RecallDiagram";
 
 /**
  * The graph stage.
@@ -19,24 +20,14 @@ const NODE_LEGEND = [
   { label: "Person", token: "var(--node-person)" },
 ] as const;
 
-function StageMessage({
-  title,
-  body,
-  action,
-}: {
-  title: string;
-  body: string;
-  action?: React.ReactNode;
-}) {
+/** A server-state notice. Sits above the diagram; never replaces it. */
+function StageNotice({ title, body }: { title: string; body: string }) {
   return (
-    <div className="absolute inset-0 grid place-items-center px-8">
-      <div className="max-w-sm text-center">
-        <p className="text-[15px] font-medium tracking-tight">{title}</p>
-        <p className="text-muted-foreground mt-2 text-[13px] leading-relaxed">
-          {body}
-        </p>
-        {action ? <div className="mt-4">{action}</div> : null}
-      </div>
+    <div className="border-border bg-card max-w-md rounded-lg border px-4 py-3 text-center">
+      <p className="text-[13px] font-medium tracking-tight">{title}</p>
+      <p className="text-muted-foreground mt-1 text-[12px] leading-relaxed">
+        {body}
+      </p>
     </div>
   );
 }
@@ -53,22 +44,27 @@ export function GraphStage({ reach }: { reach: Reachability }) {
         How this connects
       </div>
 
-      {reach.state === "offline" ? (
-        <StageMessage
-          title="No memory server"
-          body="Start the shodh backend and this fills in. Nothing is lost while it is down — the graph is rebuilt from what the server already holds."
-        />
-      ) : reach.state === "unauthorized" ? (
-        <StageMessage
-          title="The server rejected this key"
-          body="The dashboard reached the memory server, but its API key was refused. Set SHODH_API_KEY for shodh-front to the key the server was started with."
-        />
-      ) : (
-        <StageMessage
-          title="Nothing recalled yet"
-          body="Cue a recall and the memories it surfaces — with the causal chains that lit up alongside them — are drawn here."
-        />
-      )}
+      {/* Whatever the connection state, an empty stage is the moment someone is
+          working out what this thing does — so the diagram shows in all three.
+          A server problem is reported as a notice above it rather than
+          replacing the only thing on screen that explains anything. */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-6">
+        {reach.state !== "online" ? (
+          <StageNotice
+            title={
+              reach.state === "offline"
+                ? "Memory server not running"
+                : "The server rejected this key"
+            }
+            body={
+              reach.state === "offline"
+                ? "Start the shodh backend and this fills in. Nothing is lost while it is down."
+                : "Set SHODH_API_KEY for shodh-front to the key the server was started with."
+            }
+          />
+        ) : null}
+        <RecallDiagram />
+      </div>
 
       {/* The legend decodes the canvas, so it renders only when there is a
           canvas to decode — a colour key over an empty stage explains nothing.
