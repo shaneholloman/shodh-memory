@@ -479,8 +479,21 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         return EntityLabel::Module;
     }
 
-    // Default: Technology (reasonable fallback for unknown tags)
-    EntityLabel::Technology
+    // Default: Concept — an honest "we did not recognise this".
+    //
+    // This used to fall through to `Technology`, which is a CLAIM, not a
+    // default: every unrecognised tag asserted a specific ontological class.
+    // The rules above are a dev-ops keyword matcher (kubernetes, postgres,
+    // ci-cd, …), so on any corpus that is not about infrastructure almost
+    // everything reaches this line — and the graph renders a uniform wall of
+    // "Technology" nodes under a legend that promises an ontology. A visibly
+    // wrong type is worse than a visibly absent one: it is indistinguishable
+    // from a confident correct answer.
+    //
+    // `Concept` is the same label the NER path already uses for entities whose
+    // class it could not resolve (`NerEntityType::Misc`), so unrecognised
+    // surfaces from both paths now agree instead of disagreeing.
+    EntityLabel::Concept
 }
 
 /// Memory tier for edge consolidation
@@ -9493,7 +9506,14 @@ mod tests {
         assert_eq!(classify_tag_label("router.rs"), EntityLabel::Module);
         assert_eq!(classify_tag_label("ci-cd"), EntityLabel::Pipeline);
         // Unknown → Technology fallback
-        assert_eq!(classify_tag_label("widgetron"), EntityLabel::Technology);
+        // CHANGED: the fallthrough was `Technology`; it is now `Concept`.
+        // "widgetron" matches none of the rules above, and labelling an
+        // unrecognised surface `Technology` is an assertion the matcher cannot
+        // support — it made every unrecognised tag indistinguishable from a
+        // confidently-classified one, and rendered the graph as a flat wall of
+        // "Technology". `Concept` is what the NER path already emits for
+        // unresolved classes, so the two agree.
+        assert_eq!(classify_tag_label("widgetron"), EntityLabel::Concept);
     }
 
     #[test]
