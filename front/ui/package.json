@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
+    "@types/topojson-client": "^3.1.5",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "d3": "^7.9.0",
@@ -22,7 +23,9 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.2",
+    "simple-icons": "^16.28.0",
     "tailwind-merge": "^3.6.0",
+    "topojson-client": "^3.1.0",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

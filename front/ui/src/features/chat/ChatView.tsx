@@ -127,6 +127,17 @@ export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReach
   const title =
     activeSummary?.title ?? detail?.title ?? (convo?.turns[0]?.userText.slice(0, 60) || "Conversation");
 
+  // MUST stay above the `!seatUp` early return below. This is a hook, and it
+  // was previously called after it — so the render where the seat came up went
+  // from 66 hooks to more than 66 and React threw "Rendered more hooks than
+  // during the previous render", blanking the whole app. It only reproduced on
+  // the transition (seat down, then up), which is exactly the path a demo takes
+  // and exactly the path a build and a typecheck do not.
+  //
+  // `useBillingLookup` already takes `seatUp` and returns a lookup that yields
+  // null while the seat is down, so hoisting it costs nothing.
+  const lookupModel = useBillingLookup(seatUp);
+
   if (!seatUp) {
     return (
       <EmptyState
@@ -152,7 +163,6 @@ export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReach
     setActive(id);
   };
 
-  const lookupModel = useBillingLookup(seatUp);
   const activeModelInfo = lookupModel(convo?.model ?? activeSummary?.model ?? null);
 
   const totals = convo?.totals ?? activeSummary?.usage ?? null;

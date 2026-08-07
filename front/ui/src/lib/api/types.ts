@@ -4,9 +4,16 @@
  * handler it is not listed here, and nothing is added speculatively.
  */
 
-/** `RecallExperience` — src/handlers/types.rs:256 */
+/** `RecallExperience` — src/handlers/types.rs:255 */
 export interface RecallExperience {
   content: string;
+  /** Debug rendering of a closed enum, Title-Cased — recall serialises
+   *  `format!("{:?}", experience_type)` (src/handlers/recall.rs:822). The set is
+   *  the one `/api/remember` validates against: Observation, Decision, Learning,
+   *  Error, Discovery, Pattern, Context, Task, CodeEdit, FileAccess, Search,
+   *  Command, Conversation, Intention. Typed as `string` because the wire type
+   *  is `Option<String>` and a union here would turn a server-side enum
+   *  addition into a compile error in the client. */
   memory_type: string | null;
   tags: string[];
   /** `[lat, lon, alt]` WGS84. Absent unless the memory carries coordinates —

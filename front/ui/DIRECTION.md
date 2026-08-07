@@ -96,6 +96,14 @@ Radix Tooltip; expanding the rail instead makes tooltips redundant, so that
 dependency — and Sheet, which only existed for the mobile drawer the expanding
 rail also covers — is not needed.
 
+> Since written: the Geo destination added `topojson-client` (~10 kB) to decode
+> the vendored basemap. That is not part of the Gridline port — the finding
+> above still holds for the chrome — but "zero new dependencies" is no longer
+> true of the app as a whole. There is still no *map library* and no tile
+> client: `d3-geo` came in transitively with `d3`, and the basemap is a
+> committed file, because the single-file no-network constraint forbids
+> fetching one.
+
 ## Also dropped from Gridline, deliberately
 
 - **Its theme switch**, and the `MutationObserver` + `localStorage` plumbing
@@ -111,9 +119,13 @@ rail also covers — is not needed.
 Gridline's shell is `absolute rail + absolute header + main`. It has no third
 column, and `WORKFLOWS.md` makes the Inspector the spine. Resolved: the
 Inspector is **absolutely positioned**, out of the flex flow, so the d3 canvas
-can later take the stage's full width with the panel floated over its right
-edge. Until then `main` reserves the same width so nothing is occluded — the
-geometry changes when the canvas lands, not the structure.
+can take the stage's full width with the panel floated over its right edge.
+
+The canvas has since landed, and the decision held: `main` reserves the
+Inspector's width and the graph and geo canvases fill the stage beneath it,
+with no structural change from when the stage held only the explainer diagram.
+The Inspector now accompanies `/geo` as well as `/recall` — both render the
+same recall result set and both select into it.
 
 It also renders **only when the server is reachable**. Offline there is nothing
 to select, so it could only repeat what the stage already says; the offline

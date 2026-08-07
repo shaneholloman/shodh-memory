@@ -18,7 +18,7 @@ process and never reach a client.
 client (SSE) ──► SeatServer (node:http)
                     │
                     ├─ ModelRegistry ── pi builtin providers (env-key auth)
-                    │                └─ local providers: Ollama / LM Studio
+                    │                └─ local providers: Ollama / LM Studio / vLLM
                     │                   (custom pi provider, openai-completions
                     │                    API + per-model baseUrl)
                     │
@@ -162,10 +162,16 @@ SSE event types: `turn_start`, `text_delta`, `thinking_delta`,
 
 pi ships no Ollama/LM Studio/vLLM provider, but every pi `Model` carries its
 own `baseUrl` and the `openai-completions` implementation dials it directly.
-The registry therefore registers two custom providers (`ollama`, `lmstudio`)
-built with `createProvider` + `openAICompletionsApi()`, keyless auth, and
-dynamic model discovery via `GET {baseUrl}/models`. Any other OpenAI-compatible
-endpoint works the same way.
+The registry therefore registers three custom providers (`ollama`, `lmstudio`,
+`vllm`) built with `createProvider` + `openAICompletionsApi()`, keyless auth,
+and dynamic model discovery via `GET {baseUrl}/models`. Any other
+OpenAI-compatible endpoint works the same way.
+
+All three are listed in `LOCAL_PROVIDER_IDS` (`src/models-registry.ts`), and
+that membership is what makes them keyless, billed as `none` and flagged
+`local` — those three properties are derived from the list rather than restated
+per provider, so registering another local endpoint is a one-line change plus
+its base-URL config knob.
 
 ## MCP bridge
 
@@ -193,6 +199,7 @@ attribution that MCP text framing cannot.
 | `SEAT_DATA_DIR` | `%LOCALAPPDATA%\shodh\seat-harness` (win) / XDG data dir | ledger location — deliberately outside watched/synced folders |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434/v1` | Ollama OpenAI-compat endpoint |
 | `LMSTUDIO_BASE_URL` | `http://127.0.0.1:1234/v1` | LM Studio endpoint |
+| `VLLM_BASE_URL` | `http://127.0.0.1:8000/v1` | vLLM endpoint (`vllm serve` default port) |
 | `SEAT_LOCAL_CONTEXT_WINDOW` / `SEAT_LOCAL_MAX_TOKENS` | `32768` / `8192` | advertised limits for local models |
 | `SEAT_MCP_SERVERS` | — | path to MCP servers JSON |
 | Provider keys | — | pi's env conventions (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, …) |

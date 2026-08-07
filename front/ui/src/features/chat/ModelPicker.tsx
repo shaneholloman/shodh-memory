@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Cpu } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
+import { ProviderLogo } from "@/components/ui/provider-logo";
 import { listModels } from "@/lib/seat/client";
 import type { ModelRef, SeatModelInfo } from "@/lib/seat/types";
 import { formatContext } from "@/lib/format";
@@ -185,7 +186,12 @@ export function ModelPicker({
             ) : (
               models.map(([provider, group]) => (
                 <li key={provider}>
-                  <div className="text-muted-foreground/70 px-2 pt-2 pb-1 text-[10px] tracking-wide uppercase">
+                  {/* The mark sits on the GROUP header rather than on every
+                      row: the rows under it all share the provider, so per-row
+                      logos would repeat the same glyph down the list and add
+                      noise instead of information. */}
+                  <div className="text-muted-foreground/70 flex items-center gap-1.5 px-2 pt-2 pb-1 text-[10px] tracking-wide uppercase">
+                    <ProviderLogo provider={provider} className="size-3" />
                     {provider}
                   </div>
                   <ul>

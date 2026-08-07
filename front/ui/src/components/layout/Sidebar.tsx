@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Search, TriangleAlert, ListChecks, ChevronDown, MessageSquare, KeyRound } from "lucide-react";
+import {
+  Search,
+  TriangleAlert,
+  ListChecks,
+  ChevronDown,
+  MessageSquare,
+  KeyRound,
+  Globe,
+  Share2,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isHumanProfile, type Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
@@ -53,6 +62,20 @@ export const DESTINATIONS = [
     label: "Recall",
     icon: Search,
     caption: "Search memory and see what connects",
+  },
+  {
+    id: "graph",
+    path: "/graph",
+    label: "Graph",
+    icon: Share2,
+    caption: "The entities this corpus knows and how they relate",
+  },
+  {
+    id: "geo",
+    path: "/geo",
+    label: "Geo",
+    icon: Globe,
+    caption: "Where the current results happened",
   },
   {
     id: "anomalies",
@@ -128,9 +151,7 @@ function ProfileSwitcher({ reach, open }: { reach: Reachability; open: boolean }
   // The seat stores its own lessons under `<user>.seat-harness` — a real
   // backend profile, but machinery, not a person. Offering it here invites
   // exactly the mistake the switcher exists to prevent: a human reading (or
-  // writing!) the harness's internal scope as if it were their memory. It
-  // remains reachable through the API and the learning ledger, where its
-  // contents render with context instead of masquerading as a user.
+  // writing!) the harness's internal scope as if it were their memory.
   const humanProfiles = reach.state === "online"
     ? reach.profiles.filter(isHumanProfile)
     : [];

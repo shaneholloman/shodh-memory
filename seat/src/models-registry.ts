@@ -77,7 +77,13 @@ export interface ProviderInfo {
 	local: boolean;
 }
 
-const LOCAL_PROVIDER_IDS = ["ollama", "lmstudio"] as const;
+/**
+ * Providers served from this machine. Membership here is what makes a provider
+ * keyless, billed as "none" and flagged `local` — all three fall out of this
+ * list rather than being restated per provider, so adding an id is the whole
+ * change.
+ */
+const LOCAL_PROVIDER_IDS = ["ollama", "lmstudio", "vllm"] as const;
 
 interface LocalProviderOptions {
 	id: (typeof LOCAL_PROVIDER_IDS)[number];
@@ -168,6 +174,21 @@ export class ModelRegistry {
 				id: "lmstudio",
 				name: "LM Studio",
 				baseUrl: config.lmStudioBaseUrl,
+				contextWindow: config.localContextWindow,
+				maxTokens: config.localMaxTokens,
+			}),
+		);
+		// vLLM serves the same OpenAI-compatible surface as the other two —
+		// `vllm serve` mounts /v1/models and /v1/chat/completions — so it needs
+		// no separate discovery path. It is the one of the three built for
+		// throughput serving rather than desktop use, which is what makes it
+		// worth having: the same conversation can run against a workstation's
+		// batching server without leaving the machine.
+		this.models.setProvider(
+			localProvider({
+				id: "vllm",
+				name: "vLLM",
+				baseUrl: config.vllmBaseUrl,
 				contextWindow: config.localContextWindow,
 				maxTokens: config.localMaxTokens,
 			}),
