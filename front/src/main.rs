@@ -6,10 +6,17 @@
 //! Server-Sent-Events endpoint (`/api/events`, the live recall river) forwards
 //! without buffering.
 //!
+//! It also reverse-proxies `/seat/*` to the conversation-seat harness
+//! (`SHODH_SEAT_URL`), stripping the `/seat` prefix and injecting its bearer
+//! token — the browser holds neither the backend API key nor the seat token,
+//! and the seat's SSE message stream forwards unbuffered like the backend's.
+//!
 //! Env:
 //!   SHODH_FRONT_PORT   listen port           (default 8787)
 //!   SHODH_API_URL      backend base URL       (default http://127.0.0.1:3030)
 //!   SHODH_API_KEY      injected as X-API-Key  (default empty)
+//!   SHODH_SEAT_URL     seat harness base URL  (default http://127.0.0.1:3141)
+//!   SHODH_SEAT_TOKEN   injected as Authorization: Bearer (default empty)
 
 use axum::{
     body::{Body, Bytes},
@@ -30,6 +37,8 @@ const D3_JS: &str = include_str!("../assets/d3.v7.min.js");
 struct Backend {
     base: String,
     api_key: String,
+    seat_base: String,
+    seat_token: String,
     client: reqwest::Client,
 }
 
@@ -44,10 +53,17 @@ async fn main() {
         .trim_end_matches('/')
         .to_string();
     let api_key = std::env::var("SHODH_API_KEY").unwrap_or_default();
+    let seat_base = std::env::var("SHODH_SEAT_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:3141".to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let seat_token = std::env::var("SHODH_SEAT_TOKEN").unwrap_or_default();
 
     let backend = Backend {
         base: base.clone(),
         api_key,
+        seat_base,
+        seat_token,
         client: reqwest::Client::new(),
     };
 
@@ -55,6 +71,7 @@ async fn main() {
         .route("/", get(index))
         .route("/assets/d3.v7.min.js", get(d3))
         .route("/api/{*path}", any(proxy))
+        .route("/seat/{*path}", any(seat_proxy))
         .with_state(backend);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -99,6 +116,42 @@ async fn proxy(
         req = req.header("X-API-Key", &backend.api_key);
     }
 
+    forward(req, &backend.base).await
+}
+
+/// Reverse-proxy `/seat/*` to the conversation-seat harness, stripping the
+/// `/seat` prefix (`/seat/v1/models` → `{SHODH_SEAT_URL}/v1/models`) and
+/// injecting the seat bearer token. Streaming end-to-end — the seat's message
+/// endpoint is SSE.
+async fn seat_proxy(
+    State(backend): State<Backend>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path_and_query = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or_else(|| uri.path());
+    let stripped = path_and_query.strip_prefix("/seat").unwrap_or(path_and_query);
+    let target = format!("{}{}", backend.seat_base, stripped);
+
+    let mut req = backend.client.request(method, &target).body(body);
+    for name in ["content-type", "accept"] {
+        if let Some(v) = headers.get(name) {
+            req = req.header(name, v);
+        }
+    }
+    if !backend.seat_token.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", backend.seat_token));
+    }
+
+    forward(req, &backend.seat_base).await
+}
+
+/// Send a proxied request and stream the response back unbuffered.
+async fn forward(req: reqwest::RequestBuilder, upstream: &str) -> Response {
     match req.send().await {
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status().as_u16())
@@ -124,7 +177,7 @@ async fn proxy(
         }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
-            format!("shodh-front proxy error → {}: {e}", backend.base),
+            format!("shodh-front proxy error → {upstream}: {e}"),
         )
             .into_response(),
     }
