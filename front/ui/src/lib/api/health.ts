@@ -13,6 +13,19 @@ import { api, ApiError, NetworkError } from "./client";
  * The previous version of this probe fetched exactly this and threw the body
  * away, then the UI hardcoded an identity string next to it.
  */
+/**
+ * Backend profiles that belong to a person, as opposed to machinery.
+ *
+ * The seat stores its lessons under `<user>.seat-harness` — a real per-user
+ * store on the backend (that is what gives it watertight isolation), which
+ * means GET /api/users lists it like any other profile. Every human-facing
+ * surface — the switcher, the profile count, and especially the auto-select
+ * that picks a profile on first load — must see only human profiles, or a
+ * fresh session could silently open ON the harness scope and read machinery
+ * as memory.
+ */
+export const isHumanProfile = (profile: string): boolean => !profile.endsWith(".seat-harness");
+
 export type Reachability =
   | { state: "online"; profiles: string[] }
   | { state: "unauthorized"; status: number }

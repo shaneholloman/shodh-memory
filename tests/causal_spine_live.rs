@@ -47,10 +47,15 @@ fn label_of(s: &str) -> EntityLabel {
 
 #[test]
 fn causal_spine_on_real_bridge_prose() {
-    if !dep_parser::is_available() {
-        eprintln!("SKIP causal_spine_on_real_bridge_prose: set SHODH_SPACY_MODEL_PATH");
-        return;
-    }
+    // Was a skip-if-unavailable guard. The bundle is now compiled into the
+    // binary, so an unavailable parser is a DEFECT, not an environment
+    // condition — and a test that skips itself when the thing it covers is
+    // missing is precisely how the causal spine stayed dark without anyone
+    // noticing. Fail loudly instead.
+    assert!(
+        dep_parser::is_available(),
+        "dependency parser must be available from the embedded bundle"
+    );
     let dir = tempfile::tempdir().unwrap();
     let graph = GraphMemory::new(dir.path(), None).unwrap();
 
