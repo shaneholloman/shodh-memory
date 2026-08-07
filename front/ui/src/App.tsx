@@ -1,79 +1,88 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { probeBackend, type Reachability } from "@/lib/api";
-import { TopBar } from "@/components/TopBar";
+import {
+  Sidebar,
+  DESTINATIONS,
+  type DestinationId,
+} from "@/components/Sidebar";
 import { GraphStage } from "@/components/GraphStage";
-import { SidePanel, PanelEmpty } from "@/components/SidePanel";
+import { Inspector } from "@/components/Inspector";
 
-const VIEWS = ["Live", "Anomalies", "Work"] as const;
-type View = (typeof VIEWS)[number];
+/**
+ * Every control rendered here is wired to something. Three that were not have
+ * been removed rather than left inert:
+ *
+ *  - "LLM-free / Deterministic / On-device" pills. Positioning copy in product
+ *    chrome, doing nothing. Those claims belong where someone is deciding
+ *    whether to adopt this, not where they are using it.
+ *  - An identity dropdown with no menu behind it. The identity is still shown,
+ *    as text, until switching users is implemented.
+ *  - Graph affordance hints ("scroll to zoom") describing interactions that do
+ *    not exist until the canvas is ported. They render with the canvas.
+ */
 
-/** Segmented nav. Active state is a filled surface, not an underline + accent. */
-function ViewTabs({
-  view,
-  onChange,
+/**
+ * Page header.
+ *
+ * Removing the old tab strip left the three columns with no shared top edge —
+ * the search field floated at y=0 against a sidebar whose first item sat 60px
+ * lower, and nothing lined up. One header row spanning the content area gives
+ * every view the same anchor and is where a view-scoped control (here, search)
+ * belongs.
+ */
+function ViewHeader({
+  title,
+  children,
 }: {
-  view: View;
-  onChange: (v: View) => void;
+  title: string;
+  children?: React.ReactNode;
 }) {
   return (
-    <nav className="flex items-center gap-1">
-      {VIEWS.map((v) => (
-        <button
-          key={v}
-          type="button"
-          onClick={() => onChange(v)}
-          aria-current={v === view ? "page" : undefined}
-          className={cn(
-            "rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors duration-100",
-            "focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-2",
-            v === view
-              ? "bg-accent text-accent-foreground"
-              : "text-muted-foreground hover:text-foreground hover:bg-accent/60",
-          )}
-        >
-          {v}
-        </button>
-      ))}
-    </nav>
+    <header className="border-border flex h-12 shrink-0 items-center gap-3 border-b px-4">
+      <h1 className="text-[13px] font-medium tracking-tight">{title}</h1>
+      {children ? <div className="ml-auto flex items-center">{children}</div> : null}
+    </header>
   );
 }
 
-function CueBar() {
+function SearchField({ disabled }: { disabled: boolean }) {
   return (
-    <div className="border-border border-b p-3">
-      <div className="flex gap-2">
-        <input
-          type="text"
-          placeholder="Cue a recall…"
-          aria-label="Cue a recall"
-          className={cn(
-            "bg-card border-input placeholder:text-muted-foreground flex-1",
-            "rounded-md border px-2.5 py-2 text-[13px]",
-            "focus-visible:border-ring focus-visible:ring-ring/40 focus-visible:outline-none focus-visible:ring-2",
-          )}
-        />
-        <button
-          type="button"
-          className={cn(
-            "bg-primary text-primary-foreground rounded-md px-3 text-[13px] font-medium",
-            "hover:bg-primary/90 transition-colors duration-100",
-            "focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-2",
-          )}
-        >
-          Recall
-        </button>
+    <input
+      type="search"
+      disabled={disabled}
+      placeholder="Search memory…"
+      aria-label="Search memory"
+      className={cn(
+        "bg-background border-input placeholder:text-muted-foreground w-[280px]",
+        "rounded-md border px-2.5 py-1.5 text-[13px]",
+        "focus-visible:border-ring focus-visible:ring-ring/40 focus-visible:outline-none focus-visible:ring-2",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+      )}
+    />
+  );
+}
+
+/** A destination that has no content yet says so plainly, in its own terms. */
+function Placeholder({ id, reach }: { id: DestinationId; reach: Reachability }) {
+  const dest = DESTINATIONS.find((d) => d.id === id);
+  return (
+    <div className="grid flex-1 place-items-center px-8">
+      <div className="max-w-sm text-center">
+        <p className="text-[15px] font-medium tracking-tight">{dest?.label}</p>
+        <p className="text-muted-foreground mt-2 text-[13px] leading-relaxed">
+          {dest?.caption}.{" "}
+          {reach.state === "online"
+            ? "Nothing to show yet."
+            : "Start the memory server to see it."}
+        </p>
       </div>
-      <p className="text-muted-foreground mt-2 text-[11px] leading-relaxed">
-        One cue surfaces a cascade of associated memories, plus the causal
-        chains that lit up with them.
-      </p>
     </div>
   );
 }
 
 export function App() {
-  const [view, setView] = useState<View>("Live");
+  const [active, setActive] = useState<DestinationId>("recall");
   const [reach, setReach] = useState<Reachability>({
     state: "offline",
     detail: "not probed yet",
@@ -89,8 +98,7 @@ export function App() {
     };
 
     void run();
-    // Re-probe so the dashboard recovers on its own once the server comes up,
-    // rather than needing a reload.
+    // Recover on its own once the server comes up, instead of needing a reload.
     const timer = window.setInterval(() => void run(), 10_000);
 
     return () => {
@@ -100,59 +108,43 @@ export function App() {
     };
   }, []);
 
-  return (
-    <div className="flex h-screen flex-col">
-      <TopBar reach={reach} identity="defence-live" />
+  const online = reach.state === "online";
 
-      <div className="border-border flex h-10 flex-shrink-0 items-center border-b px-3">
-        <ViewTabs view={view} onChange={setView} />
+  return (
+    <div className="flex h-screen">
+      <Sidebar
+        active={active}
+        onNavigate={setActive}
+        reach={reach}
+        identity="defence-live"
+      />
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <ViewHeader title={DESTINATIONS.find((d) => d.id === active)!.label}>
+          {active === "recall" ? <SearchField disabled={!online} /> : null}
+        </ViewHeader>
+
+        <div className="flex min-h-0 flex-1">
+          {active === "recall" ? (
+            <>
+              <div className="border-border flex w-[320px] shrink-0 flex-col border-r">
+                <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+                  <p className="text-muted-foreground text-center text-[13px] leading-relaxed">
+                    {online
+                      ? "Search to surface memories, and the chains of cause that surfaced with them."
+                      : "Results appear here once the memory server is running."}
+                  </p>
+                </div>
+              </div>
+              <GraphStage reach={reach} />
+            </>
+          ) : (
+            <Placeholder id={active} reach={reach} />
+          )}
+        </div>
       </div>
 
-      <main className="grid min-h-0 flex-1 grid-cols-[340px_1fr_300px]">
-        <div className="border-border bg-card flex min-h-0 flex-col border-r">
-          <CueBar />
-          <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            <p className="text-[13px] font-medium tracking-tight">
-              The river is still
-            </p>
-            <p className="text-muted-foreground mt-2 text-[13px] leading-relaxed">
-              Each recall blooms into the memories it surfaced and the causal
-              chains that lit up with them — spreading activation, made visible.
-            </p>
-          </div>
-        </div>
-
-        <GraphStage reach={reach} />
-
-        <aside className="border-border bg-card min-h-0 overflow-y-auto border-l">
-          <SidePanel
-            title="Memory tiers"
-            hint="How much is held: working, session, long-term."
-          >
-            <PanelEmpty>Counts appear once the server is reachable.</PanelEmpty>
-          </SidePanel>
-          <SidePanel
-            title="Graph"
-            hint="Entities and typed relations learned from text — no LLM."
-          >
-            <PanelEmpty>No graph loaded.</PanelEmpty>
-          </SidePanel>
-          <SidePanel
-            title="Connected clients"
-            hint="Sessions writing to this memory right now."
-          >
-            <PanelEmpty>Nothing connected.</PanelEmpty>
-          </SidePanel>
-          <SidePanel
-            title="Detail"
-            hint="Every belief traces to its source episodes."
-          >
-            <PanelEmpty>
-              Select a node, an edge, or a surfaced memory.
-            </PanelEmpty>
-          </SidePanel>
-        </aside>
-      </main>
+      <Inspector reach={reach} />
     </div>
   );
 }
