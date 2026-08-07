@@ -8245,6 +8245,7 @@ impl MemorySystem {
                             forman_curvature: None,
                             endpoint_selectivity: None,
                             provenance,
+                            promoted_at: None,
                         };
                         if graph_guard.add_relationship(edge).is_ok() {
                             edges_added += 1;
@@ -8625,6 +8626,7 @@ impl MemorySystem {
                             forman_curvature: None,
                             endpoint_selectivity: None,
                             provenance,
+                            promoted_at: None,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {
@@ -10506,6 +10508,7 @@ mod companion_injection_tests {
                 evidence_span: None,
                 typed_by: None,
             }],
+            promoted_at: None,
         };
         graph.add_relationship(edge).expect("add edge");
     }
@@ -10534,6 +10537,7 @@ mod companion_injection_tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(edge).expect("add edge");
     }
@@ -10761,6 +10765,7 @@ mod companion_rerank_tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(edge).expect("add edge");
     }

@@ -552,6 +552,51 @@ impl EdgeTier {
             Self::L3Semantic => None,
         }
     }
+
+    /// Minimum elapsed time, in seconds, between the moment an edge entered this
+    /// tier and the moment it may leave it for the next one.
+    ///
+    /// Strength alone is not evidence of consolidation. From the birth weight of
+    /// 0.4 a single `strengthen` call clears `L1_PROMOTION_THRESHOLD` and three
+    /// clear `L2_PROMOTION_THRESHOLD`, while three independent strengthen paths
+    /// touch the same entity edges within one request — so without a clock, one
+    /// conversational turn promoted an edge from "working" all the way to
+    /// "near-permanent semantic".
+    ///
+    /// The separations deliberately **mirror the memory-tier clock** rather than
+    /// inventing a second set of numbers: 30 minutes for the first step
+    /// ([`TIER_PROMOTION_WORKING_AGE_SECS`](crate::constants::TIER_PROMOTION_WORKING_AGE_SECS))
+    /// and 24 hours for the second
+    /// ([`TIER_PROMOTION_SESSION_AGE_SECS`](crate::constants::TIER_PROMOTION_SESSION_AGE_SECS)).
+    /// Those are the synaptic-consolidation window (McGaugh 2000) and the
+    /// sleep-dependent hippocampal→cortical transfer window (Rasch & Born 2013)
+    /// respectively — the same biology the edge tiers cite, so the two
+    /// consolidation clocks now at least tick in the same units.
+    ///
+    /// How fast an edge in this tier experiences time on the Wixted hybrid decay
+    /// curve, relative to the L2/episodic reference.
+    ///
+    /// L1 does not use the hybrid curve at all (it has its own aggressive
+    /// exponential via `tier_decay_factor`), so its value here is the inert
+    /// reference 1.0 and is never read; L2 IS the reference; L3 is
+    /// [`crate::decay::L3_TIME_SCALE_VS_L2`], the ratio that
+    /// `L2_DECAY_PER_DAY` and `L3_DECAY_PER_MONTH` jointly assert.
+    pub fn decay_time_scale(&self) -> f64 {
+        match self {
+            Self::L1Working | Self::L2Episodic => 1.0,
+            Self::L3Semantic => crate::decay::L3_TIME_SCALE_VS_L2,
+        }
+    }
+
+    /// `None` for L3: there is no next tier.
+    pub fn promotion_min_separation_secs(&self) -> Option<i64> {
+        use crate::constants::*;
+        match self {
+            Self::L1Working => Some(TIER_PROMOTION_WORKING_AGE_SECS),
+            Self::L2Episodic => Some(TIER_PROMOTION_SESSION_AGE_SECS),
+            Self::L3Semantic => None,
+        }
+    }
 }
 
 /// Long-Term Potentiation status for edges (PIPE-4)
@@ -765,6 +810,33 @@ pub struct RelationshipEdge {
     /// `SHODH_PROVENANCE_MAX_SOURCES` (default 8) at write time.
     #[serde(default)]
     pub provenance: Vec<ProvenanceRecord>,
+
+    /// When this edge last moved UP a tier (L1→L2 or L2→L3).
+    ///
+    /// The promotion clock. Tier promotion used to be a pure function of
+    /// strength, so from the birth weight of 0.4 it took **one** `strengthen`
+    /// call to reach L2 and **three** to reach L3 — and three independent
+    /// strengthen paths hit the same entity edges within a SINGLE request
+    /// (`graph_retrieval::batch_strengthen_synapses`,
+    /// `MemorySystem::reinforce_recall_with_momentum`, and
+    /// `recall::strengthen_episode_entity_edges`). One noisy conversation could
+    /// therefore mint a "near-permanent semantic" edge carrying a 4× retrieval
+    /// trust multiplier and a 90-day prune shield.
+    ///
+    /// Consolidation is defined by *sustained* evidence, not by a burst of
+    /// co-activation inside one turn, so promotion now also requires elapsed
+    /// time since the previous promotion — see
+    /// [`EdgeTier::promotion_min_separation_secs`]. `None` means "never
+    /// promoted", in which case the clock is anchored at `created_at`; that
+    /// makes legacy edges and edges minted directly into L2 (lineage bridges,
+    /// fact edges) behave identically to freshly born ones without a
+    /// special case.
+    ///
+    /// Trailing field: `#[serde(default)]` plus the 4th byte of
+    /// [`EDGE_PROVENANCE_DEFAULT_SUFFIX`] let records written before this field
+    /// existed decode to `None`.
+    #[serde(default)]
+    pub promoted_at: Option<DateTime<Utc>>,
 }
 
 /// How an edge's relation type was decided for a given attestation.
@@ -927,10 +999,11 @@ fn merge_provenance(trail: &mut Vec<ProvenanceRecord>, record: ProvenanceRecord)
 /// Postcard defaults for every trailing `RelationshipEdge` field added after the
 /// postcard cutover (#192), in field order: `endpoint_selectivity: Option` (None
 /// = `0x00`), `forman_curvature: Option` (None = `0x00`), `provenance: Vec` (empty
-/// = varint `0x00`). `try_decode_compat` appends these one at a time, so a record
-/// missing any suffix of these fields decodes (postcard has no `#[serde(default)]`
-/// EOF tolerance). Keep in sync with any new trailing field.
-const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
+/// = varint `0x00`), `promoted_at: Option` (None = `0x00`). `try_decode_compat`
+/// appends these one at a time, so a record missing any suffix of these fields
+/// decodes (postcard has no `#[serde(default)]` EOF tolerance). Keep in sync with
+/// any new trailing field.
+const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00, 0x00];
 
 /// Decode a stored `RelationshipEdge`, tolerating legacy records written before
 /// the `provenance` field existed. See [`crate::serialization::try_decode_compat`].
@@ -998,9 +1071,68 @@ impl RelationshipEdge {
     /// `None` otherwise. This enables the memory-edge coupling: edge promotions
     /// can signal the memory layer to boost the associated memory's importance.
     pub fn strengthen(&mut self) -> Option<(String, String)> {
+        self.strengthen_at(Utc::now())
+    }
+
+    /// Strengthen as of an explicit `now`, returning any tier promotion.
+    ///
+    /// `strengthen()` is the production entry point (`now = Utc::now()`); this
+    /// variant takes the clock as a parameter for the same reason
+    /// [`decay_at`](Self::decay_at) does — promotion is now time-gated (see
+    /// [`EdgeTier::promotion_min_separation_secs`]), so any test that wants to
+    /// observe a second promotion would otherwise have to sleep for 30 minutes.
+    pub fn strengthen_at(&mut self, now: DateTime<Utc>) -> Option<(String, String)> {
+        self.strengthen_scaled_at(now, 1.0)
+    }
+
+    /// Importance-gated Hebbian strengthening.
+    ///
+    /// Identical to `strengthen()` but scales the Hebbian boost by source memory
+    /// importance. The importance is mapped to [`STRENGTHEN_IMPORTANCE_FLOOR`, 1.0],
+    /// so even low-importance memories still strengthen edges (preventing starvation),
+    /// but high-importance memories get disproportionately stronger edges — making
+    /// them win during spreading activation traversal.
+    ///
+    /// Use this instead of `strengthen()` when the source memory importance is known
+    /// (e.g., in `reinforce_recall` where recalled memory IDs are available).
+    ///
+    /// [`STRENGTHEN_IMPORTANCE_FLOOR`]: crate::constants::STRENGTHEN_IMPORTANCE_FLOOR
+    pub fn strengthen_with_importance(&mut self, importance: f32) -> Option<(String, String)> {
+        self.strengthen_with_importance_at(importance, Utc::now())
+    }
+
+    /// [`strengthen_with_importance`](Self::strengthen_with_importance) as of an
+    /// explicit `now`. See [`strengthen_at`](Self::strengthen_at) for why the
+    /// clock is a parameter.
+    pub fn strengthen_with_importance_at(
+        &mut self,
+        importance: f32,
+        now: DateTime<Utc>,
+    ) -> Option<(String, String)> {
+        use crate::constants::*;
+        let scale = STRENGTHEN_IMPORTANCE_FLOOR + importance * (1.0 - STRENGTHEN_IMPORTANCE_FLOOR);
+        self.strengthen_scaled_at(now, scale)
+    }
+
+    /// The single implementation of Hebbian strengthening.
+    ///
+    /// `strengthen` and `strengthen_with_importance` were two hand-copied bodies
+    /// differing only in this `boost_scale` factor (1.0 vs
+    /// `STRENGTHEN_IMPORTANCE_FLOOR + importance·(1 − FLOOR)`, a 5× spread in
+    /// arrival rate at identical criteria — deliberate, and preserved). Keeping
+    /// two copies of the LTP-detection and tier-promotion blocks was a latent
+    /// drift risk on the codebase's most safety-relevant transition; there is now
+    /// one copy, which is also the only place the promotion clock has to be
+    /// enforced. That matters because three independent call paths strengthen the
+    /// same entity edges within one request — a gate at any single call site
+    /// would be bypassed by the other two.
+    fn strengthen_scaled_at(
+        &mut self,
+        now: DateTime<Utc>,
+        boost_scale: f32,
+    ) -> Option<(String, String)> {
         use crate::constants::*;
 
-        let now = Utc::now();
         self.activation_count += 1;
         self.last_activated = now;
 
@@ -1013,7 +1145,7 @@ impl RelationshipEdge {
             EdgeTier::L2Episodic => TIER_CO_ACCESS_BOOST * 0.8,
             EdgeTier::L3Semantic => TIER_CO_ACCESS_BOOST * 0.5,
         };
-        let boost = (LTP_LEARNING_RATE + tier_boost) * (1.0 - self.strength);
+        let boost = (LTP_LEARNING_RATE + tier_boost) * (1.0 - self.strength) * boost_scale;
         self.strength = (self.strength + boost).min(1.0);
 
         // PIPE-4: Multi-scale LTP detection (only upgrade, never downgrade)
@@ -1052,159 +1184,88 @@ impl RelationshipEdge {
             }
         }
 
-        // Tier promotion: check if strength exceeds current tier's promotion threshold
-        let mut promotion_result = None;
-        if let Some(threshold) = self.tier.promotion_threshold() {
-            if self.strength >= threshold {
-                if let Some(next_tier) = self.tier.next_tier() {
-                    let old_tier = self.tier;
-                    self.tier = next_tier;
-                    // Preserve strength if already above next tier's initial weight
-                    self.strength = self.strength.max(next_tier.initial_weight());
-
-                    // PIPE-4: Initialize activation_timestamps on L1→L2 promotion
-                    if old_tier == EdgeTier::L1Working {
-                        self.activation_timestamps =
-                            Some(VecDeque::with_capacity(ACTIVATION_HISTORY_L2_CAPACITY));
-                        // Seed with current timestamp
-                        if let Some(ref mut ts) = self.activation_timestamps {
-                            ts.push_back(now);
-                        }
-                    }
-
-                    // Expand capacity on L2→L3 promotion
-                    if old_tier == EdgeTier::L2Episodic {
-                        if let Some(ref mut ts) = self.activation_timestamps {
-                            let current = ts.capacity();
-                            if current < ACTIVATION_HISTORY_L3_CAPACITY {
-                                ts.reserve(ACTIVATION_HISTORY_L3_CAPACITY - current);
-                            }
-                        }
-                    }
-
-                    tracing::debug!(
-                        "Edge {} promoted: {:?} → {:?}",
-                        self.uuid,
-                        old_tier,
-                        self.tier
-                    );
-
-                    promotion_result =
-                        Some((format!("{:?}", old_tier), format!("{:?}", self.tier)));
-                }
-            }
-        }
-
         // PIPE-5: L3 auto-LTP removed - now handled by unified ltp_readiness()
         // The readiness formula combines strength + activation count + entity confidence,
         // ensuring both intensity and repetition evidence are required for Full LTP.
 
-        promotion_result
+        self.try_promote_at(now)
     }
 
-    /// Importance-gated Hebbian strengthening.
+    /// The one place an edge changes tier upward.
     ///
-    /// Identical to `strengthen()` but scales the Hebbian boost by source memory
-    /// importance. The importance is mapped to [`STRENGTHEN_IMPORTANCE_FLOOR`, 1.0],
-    /// so even low-importance memories still strengthen edges (preventing starvation),
-    /// but high-importance memories get disproportionately stronger edges — making
-    /// them win during spreading activation traversal.
+    /// Two conditions, both required:
     ///
-    /// Use this instead of `strengthen()` when the source memory importance is known
-    /// (e.g., in `reinforce_recall` where recalled memory IDs are available).
-    pub fn strengthen_with_importance(&mut self, importance: f32) -> Option<(String, String)> {
+    /// 1. **Strength** ≥ the current tier's promotion threshold — the original
+    ///    criterion, unchanged.
+    /// 2. **Sustained evidence**: at least
+    ///    [`EdgeTier::promotion_min_separation_secs`] has elapsed since this edge
+    ///    entered its current tier. The anchor is `promoted_at`, falling back to
+    ///    `created_at` for an edge that has never been promoted — which covers
+    ///    both legacy records (field absent, decodes to `None`) and the two
+    ///    production paths that mint directly into L2 (lineage bridges, fact
+    ///    edges) without ever passing through here.
+    ///
+    /// Consequence, and the point of the change: a burst of strengthen calls
+    /// inside a single request can advance an edge **at most one tier**, no
+    /// matter how many paths touch it. Reaching L3 now takes ≥30 minutes to L2
+    /// and ≥24 hours more to L3, which is what "consolidated" is supposed to
+    /// mean. Promotion remains monotonic and at most one step per call.
+    ///
+    /// Returns `Some((old_tier_name, new_tier_name))` on promotion. This enables
+    /// the memory-edge coupling: edge promotions can signal the memory layer to
+    /// boost the associated memory's importance.
+    fn try_promote_at(&mut self, now: DateTime<Utc>) -> Option<(String, String)> {
         use crate::constants::*;
 
-        let scale = STRENGTHEN_IMPORTANCE_FLOOR + importance * (1.0 - STRENGTHEN_IMPORTANCE_FLOOR);
-
-        let now = Utc::now();
-        self.activation_count += 1;
-        self.last_activated = now;
-
-        self.record_activation_timestamp(now);
-
-        let tier_boost = match self.tier {
-            EdgeTier::L1Working => TIER_CO_ACCESS_BOOST,
-            EdgeTier::L2Episodic => TIER_CO_ACCESS_BOOST * 0.8,
-            EdgeTier::L3Semantic => TIER_CO_ACCESS_BOOST * 0.5,
-        };
-        // Scale the boost by importance: high-importance → full boost, low → 20% floor
-        let boost = (LTP_LEARNING_RATE + tier_boost) * (1.0 - self.strength) * scale;
-        self.strength = (self.strength + boost).min(1.0);
-
-        // LTP detection (same as strengthen — only upgrade, never downgrade)
-        let new_ltp_status = self.detect_ltp_status(now);
-        if new_ltp_status.priority() > self.ltp_status.priority() {
-            let old_status = self.ltp_status;
-            self.ltp_status = new_ltp_status;
-
-            let bonus = match new_ltp_status {
-                LtpStatus::Burst { .. } => 0.05,
-                LtpStatus::Weekly => 0.1,
-                LtpStatus::Full => 0.2,
-                LtpStatus::None => 0.0,
-            };
-            self.strength = (self.strength + bonus).min(1.0);
-
-            tracing::debug!(
-                "Edge {} LTP upgrade: {:?} → {:?} (activations: {}, age: {} days)",
-                self.uuid,
-                old_status,
-                self.ltp_status,
-                self.activation_count,
-                (now - self.created_at).num_days()
-            );
+        let threshold = self.tier.promotion_threshold()?;
+        if self.strength < threshold {
+            return None;
         }
+        let next_tier = self.tier.next_tier()?;
 
-        if self.ltp_status.is_burst_expired() {
-            let weekly_check = self.detect_weekly_pattern();
-            if weekly_check {
-                self.ltp_status = LtpStatus::Weekly;
-            } else {
-                self.ltp_status = LtpStatus::None;
+        // Sustained-evidence gate. `promoted_at.unwrap_or(created_at)` is the
+        // moment this edge entered its current tier.
+        if let Some(min_secs) = self.tier.promotion_min_separation_secs() {
+            let entered_tier_at = self.promoted_at.unwrap_or(self.created_at);
+            if (now - entered_tier_at).num_seconds() < min_secs {
+                return None;
             }
         }
 
-        // Tier promotion
-        let mut promotion_result = None;
-        if let Some(threshold) = self.tier.promotion_threshold() {
-            if self.strength >= threshold {
-                if let Some(next_tier) = self.tier.next_tier() {
-                    let old_tier = self.tier;
-                    self.tier = next_tier;
-                    self.strength = self.strength.max(next_tier.initial_weight());
+        let old_tier = self.tier;
+        self.tier = next_tier;
+        self.promoted_at = Some(now);
+        // Preserve strength if already above next tier's initial weight
+        self.strength = self.strength.max(next_tier.initial_weight());
 
-                    if old_tier == EdgeTier::L1Working {
-                        self.activation_timestamps =
-                            Some(VecDeque::with_capacity(ACTIVATION_HISTORY_L2_CAPACITY));
-                        if let Some(ref mut ts) = self.activation_timestamps {
-                            ts.push_back(now);
-                        }
-                    }
+        // PIPE-4: Initialize activation_timestamps on L1→L2 promotion
+        if old_tier == EdgeTier::L1Working {
+            self.activation_timestamps =
+                Some(VecDeque::with_capacity(ACTIVATION_HISTORY_L2_CAPACITY));
+            // Seed with current timestamp
+            if let Some(ref mut ts) = self.activation_timestamps {
+                ts.push_back(now);
+            }
+        }
 
-                    if old_tier == EdgeTier::L2Episodic {
-                        if let Some(ref mut ts) = self.activation_timestamps {
-                            let current = ts.capacity();
-                            if current < ACTIVATION_HISTORY_L3_CAPACITY {
-                                ts.reserve(ACTIVATION_HISTORY_L3_CAPACITY - current);
-                            }
-                        }
-                    }
-
-                    tracing::debug!(
-                        "Edge {} promoted: {:?} → {:?}",
-                        self.uuid,
-                        old_tier,
-                        self.tier
-                    );
-
-                    promotion_result =
-                        Some((format!("{:?}", old_tier), format!("{:?}", self.tier)));
+        // Expand capacity on L2→L3 promotion
+        if old_tier == EdgeTier::L2Episodic {
+            if let Some(ref mut ts) = self.activation_timestamps {
+                let current = ts.capacity();
+                if current < ACTIVATION_HISTORY_L3_CAPACITY {
+                    ts.reserve(ACTIVATION_HISTORY_L3_CAPACITY - current);
                 }
             }
         }
 
-        promotion_result
+        tracing::debug!(
+            "Edge {} promoted: {:?} → {:?}",
+            self.uuid,
+            old_tier,
+            self.tier
+        );
+
+        Some((format!("{:?}", old_tier), format!("{:?}", self.tier)))
     }
 
     /// Record an activation timestamp (PIPE-4)
@@ -1351,10 +1412,24 @@ impl RelationshipEdge {
 
     /// Apply time-based decay to this synapse
     ///
-    /// Uses tier-aware decay model (3-tier memory consolidation):
-    /// - L1 (Working): ~2.9%/hour decay (λ=0.029), max 48 hours before prune
-    /// - L2 (Episodic): ~3.1%/day decay (λ=0.031), max 30 days before prune
-    /// - L3 (Semantic): ~2%/month decay (λ=0.02/720h), near-permanent
+    /// Uses a tier-aware decay model (3-tier memory consolidation). The three
+    /// tiers use TWO different curves, not three:
+    /// - **L1 (Working)**: simple exponential, `L1_DECAY_PER_HOUR` λ=0.029/h
+    ///   (~2.9%/hour), max 48 hours before prune. This is the only tier that
+    ///   still routes through `decay::tier_decay_factor`.
+    /// - **L2 (Episodic)**: the Wixted 2004 hybrid — exponential λ=0.693/day
+    ///   below `DECAY_CROSSOVER_DAYS` (3), power-law β=0.5 above — pruned at 30
+    ///   days. This is the reference curve.
+    /// - **L3 (Semantic)**: the SAME hybrid on a time axis scaled by
+    ///   `decay::L3_TIME_SCALE_VS_L2` (≈0.0215), i.e. ~46.5× slower, which is the
+    ///   ratio `L2_DECAY_PER_DAY` and `L3_DECAY_PER_MONTH` jointly assert.
+    ///   Pruned at 90 days.
+    ///
+    /// Note that L2's *shipped* exponential rate (0.693/day) is far faster than
+    /// `L2_DECAY_PER_DAY` (0.031/day) describes; only the L2:L3 ratio is wired,
+    /// deliberately, because re-rating L2 in absolute terms would move every
+    /// episodic edge in the retrieval substrate and is a measured decision, not a
+    /// correctness fix.
     ///
     /// PIPE-4: Multi-scale LTP protection
     /// - Burst: 2x slower decay (temporary, 48h)
@@ -1441,12 +1516,22 @@ impl RelationshipEdge {
             }
             EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
                 // L2/L3: Wixted 2004 hybrid (exponential consolidation → power-law long-term)
+                // on a TIER-SCALED time axis. Both tiers used to share one
+                // unscaled call — identical decay — which made "L3 is
+                // near-permanent" false in the executed path and left
+                // L2_DECAY_PER_DAY / L3_DECAY_PER_MONTH with no production
+                // reference. L2 is the κ=1 reference (unchanged); L3 ages at the
+                // ratio those two constants assert. See `decay::L3_TIME_SCALE_VS_L2`.
                 let days = hours_elapsed / 24.0;
                 // Burst/Weekly/Full LTP all use the potentiated (slower) power-law.
                 // decay_factor() returns exactly 0.5 for Burst, so `<` would exclude it
                 // (off-by-one) and decay Burst edges at the non-potentiated rate.
                 let is_potentiated = ltp_factor <= 0.5;
-                let decay = crate::decay::hybrid_decay_factor(days, is_potentiated);
+                let decay = crate::decay::hybrid_decay_factor_scaled(
+                    days,
+                    is_potentiated,
+                    self.tier.decay_time_scale(),
+                );
                 let prune_threshold = self.tier.prune_threshold();
                 // Min age before pruning: 30 days for L2, 90 days for L3
                 let min_prune_hours = if matches!(self.tier, EdgeTier::L3Semantic) {
@@ -1534,6 +1619,7 @@ impl RelationshipEdge {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         }
     }
 
@@ -1563,12 +1649,20 @@ impl RelationshipEdge {
         let (decay_factor, _) = match self.tier {
             EdgeTier::L1Working => tier_decay_factor(hours_elapsed, 0, ltp_factor),
             EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
-                // Wixted 2004 hybrid: exponential consolidation → power-law long-term
+                // Wixted 2004 hybrid: exponential consolidation → power-law long-term,
+                // on the same tier-scaled time axis `decay_at` uses. This is the
+                // read path (spreading activation), so it MUST agree with the
+                // write path — an L3 edge that decays slowly in storage but fast
+                // at scoring time would be the worst of both.
                 let days = hours_elapsed / 24.0;
                 // Inclusive: Burst decay_factor() == 0.5 must take the potentiated path.
                 let is_potentiated = ltp_factor <= 0.5;
                 (
-                    crate::decay::hybrid_decay_factor(days, is_potentiated),
+                    crate::decay::hybrid_decay_factor_scaled(
+                        days,
+                        is_potentiated,
+                        self.tier.decay_time_scale(),
+                    ),
                     false,
                 )
             }
@@ -2848,6 +2942,7 @@ impl GraphMemory {
                 evidence_span: Some((0, span_len)),
                 typed_by: Some(typed_by),
             }],
+            promoted_at: None,
         }
     }
 
@@ -5776,6 +5871,7 @@ impl GraphMemory {
                         forman_curvature: None,
                         endpoint_selectivity: None,
                         provenance: Vec::new(),
+                        promoted_at: None,
                     };
 
                     let key = edge.uuid.as_bytes();
@@ -6127,6 +6223,7 @@ impl GraphMemory {
                         evidence_span: None,
                         typed_by: None,
                     }],
+                    promoted_at: None,
                 };
                 if self.add_relationship(edge).is_ok() {
                     created += 1;
@@ -9287,6 +9384,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         // Causal chain a → b → c (cause = from_entity).
         graph
@@ -9365,6 +9463,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         }
     }
 
@@ -9778,6 +9877,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         // Caroline --LocatedIn--> Denver; Melanie --CreatedBy--> painting;
         // plus a CoOccurs distractor edge Caroline--painting.
@@ -10047,6 +10147,418 @@ mod tests {
         );
     }
 
+    // =====================================================================
+    // RelationshipEdge postcard schema evolution.
+    //
+    // There was NO old-bytes round-trip test for `RelationshipEdge` before
+    // this — the provenance increment took EDGE_PROVENANCE_DEFAULT_SUFFIX
+    // from 2 bytes to 3 with the compat path unexercised. Postcard is
+    // positional and carries no field presence, so a wrong suffix does not
+    // fail loudly: it silently mis-decodes every edge in a live store. These
+    // two tests exercise the two legacy generations that can exist on disk.
+    // =====================================================================
+
+    /// A `RelationshipEdge` exactly as serialized before `promoted_at` existed:
+    /// every field through `provenance`, nothing after it. This is the shape of
+    /// every edge already in the live RocksDB store.
+    #[derive(serde::Serialize)]
+    struct LegacyEdgeThroughProvenance {
+        uuid: Uuid,
+        from_entity: Uuid,
+        to_entity: Uuid,
+        relation_type: RelationType,
+        strength: f32,
+        created_at: DateTime<Utc>,
+        valid_at: DateTime<Utc>,
+        invalidated_at: Option<DateTime<Utc>>,
+        source_episode_id: Option<Uuid>,
+        context: String,
+        last_activated: DateTime<Utc>,
+        activation_count: u32,
+        ltp_status: LtpStatus,
+        tier: EdgeTier,
+        activation_timestamps: Option<VecDeque<DateTime<Utc>>>,
+        entity_confidence: Option<f32>,
+        endpoint_selectivity: Option<f32>,
+        forman_curvature: Option<f32>,
+        provenance: Vec<ProvenanceRecord>,
+    }
+
+    /// The older generation still: stops at `entity_confidence`, so it is short
+    /// by FOUR fields. `try_decode_compat` must append the defaults one at a
+    /// time to reach it.
+    #[derive(serde::Serialize)]
+    struct LegacyEdgeThroughEntityConfidence {
+        uuid: Uuid,
+        from_entity: Uuid,
+        to_entity: Uuid,
+        relation_type: RelationType,
+        strength: f32,
+        created_at: DateTime<Utc>,
+        valid_at: DateTime<Utc>,
+        invalidated_at: Option<DateTime<Utc>>,
+        source_episode_id: Option<Uuid>,
+        context: String,
+        last_activated: DateTime<Utc>,
+        activation_count: u32,
+        ltp_status: LtpStatus,
+        tier: EdgeTier,
+        activation_timestamps: Option<VecDeque<DateTime<Utc>>>,
+        entity_confidence: Option<f32>,
+    }
+
+    #[test]
+    fn legacy_edge_without_promoted_at_decodes_to_none() {
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+        let from = Uuid::new_v4();
+        let to = Uuid::new_v4();
+        let episode = Uuid::new_v4();
+
+        let legacy = LegacyEdgeThroughProvenance {
+            uuid,
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::Causes,
+            strength: 0.63,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(episode),
+            context: "a pre-promoted_at record".to_string(),
+            last_activated: now,
+            activation_count: 7,
+            ltp_status: LtpStatus::Weekly,
+            tier: EdgeTier::L2Episodic,
+            activation_timestamps: None,
+            entity_confidence: Some(0.8),
+            endpoint_selectivity: Some(0.31),
+            forman_curvature: Some(-2.0),
+            provenance: vec![ProvenanceRecord {
+                source_episode_id: episode,
+                mention_count: 2,
+                first_observed: now,
+                last_observed: now,
+                confidence: Some(0.9),
+                evidence_span: Some((3, 11)),
+                typed_by: Some(TypingMethod::Cue),
+            }],
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+        let (decoded, needs_migration) = decode_relationship_edge(&bytes).unwrap();
+
+        // Everything that WAS on disk must survive untouched — a wrong suffix
+        // length would shift the tail and corrupt these silently.
+        assert_eq!(decoded.uuid, uuid);
+        assert_eq!(decoded.from_entity, from);
+        assert_eq!(decoded.to_entity, to);
+        assert_eq!(decoded.relation_type, RelationType::Causes);
+        assert!((decoded.strength - 0.63).abs() < 1e-6);
+        assert_eq!(decoded.activation_count, 7);
+        assert_eq!(decoded.ltp_status, LtpStatus::Weekly);
+        assert_eq!(decoded.tier, EdgeTier::L2Episodic);
+        assert_eq!(decoded.entity_confidence, Some(0.8));
+        assert_eq!(decoded.endpoint_selectivity, Some(0.31));
+        assert_eq!(decoded.forman_curvature, Some(-2.0));
+        assert_eq!(decoded.provenance.len(), 1);
+        assert_eq!(decoded.provenance[0].mention_count, 2);
+        assert_eq!(decoded.provenance[0].evidence_span, Some((3, 11)));
+
+        // ...and the new field backfills to None.
+        assert_eq!(
+            decoded.promoted_at, None,
+            "a record written before promoted_at existed must default to None"
+        );
+        assert!(
+            needs_migration,
+            "legacy-shaped record should be flagged for rewrite-on-read"
+        );
+
+        // A legacy L2 edge with promoted_at=None anchors its promotion clock at
+        // created_at — it is NOT instantly eligible for L3 just because the
+        // field is absent. This is the property that makes the None fallback
+        // safe on a live store.
+        let mut edge = decoded;
+        edge.strength = 0.95;
+        assert!(
+            edge.try_promote_at(now + Duration::hours(1)).is_none(),
+            "1h after birth is short of the 24h L2→L3 separation"
+        );
+        assert!(
+            edge.try_promote_at(now + Duration::hours(25)).is_some(),
+            "25h after birth clears it"
+        );
+    }
+
+    #[test]
+    fn legacy_edge_short_by_four_fields_decodes() {
+        // The compat path appends defaults ONE AT A TIME; a record missing
+        // endpoint_selectivity, forman_curvature, provenance AND promoted_at
+        // exercises all four bytes of EDGE_PROVENANCE_DEFAULT_SUFFIX.
+        assert_eq!(
+            EDGE_PROVENANCE_DEFAULT_SUFFIX.len(),
+            4,
+            "suffix must carry one default per trailing field added since the postcard cutover"
+        );
+
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+        let legacy = LegacyEdgeThroughEntityConfidence {
+            uuid,
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::Knows,
+            strength: 0.42,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "an even older record".to_string(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+        let (decoded, needs_migration) = decode_relationship_edge(&bytes).unwrap();
+
+        assert_eq!(decoded.uuid, uuid);
+        assert!((decoded.strength - 0.42).abs() < 1e-6);
+        assert_eq!(decoded.tier, EdgeTier::L1Working);
+        assert_eq!(decoded.endpoint_selectivity, None);
+        assert_eq!(decoded.forman_curvature, None);
+        assert!(decoded.provenance.is_empty());
+        assert_eq!(decoded.promoted_at, None);
+        assert!(needs_migration);
+    }
+
+    #[test]
+    fn current_edge_round_trips_promoted_at() {
+        // Forward direction: a promoted_at that IS set must survive encode/decode
+        // with no migration flag. Postcard truncates chrono to its serde repr, so
+        // compare at second granularity.
+        let now = Utc::now();
+        let mut edge = create_test_edge_with_tier(0.75, 0, EdgeTier::L2Episodic);
+        edge.promoted_at = Some(now);
+
+        let bytes = crate::serialization::encode(&edge).unwrap();
+        let (decoded, needs_migration) = decode_relationship_edge(&bytes).unwrap();
+
+        assert!(
+            !needs_migration,
+            "a current-schema record needs no migration"
+        );
+        let got = decoded.promoted_at.expect("promoted_at must round-trip");
+        assert_eq!(
+            got.timestamp(),
+            now.timestamp(),
+            "promoted_at must survive the postcard round trip"
+        );
+    }
+
+    // =====================================================================
+    // Edge-tier invariant (c): promotion requires SUSTAINED evidence.
+    // =====================================================================
+
+    #[test]
+    fn a_single_requests_burst_cannot_promote_past_one_step() {
+        // The defect this pins: from birth weight 0.4 it took ONE strengthen
+        // call to clear L1_PROMOTION_THRESHOLD (0.5) and three to clear
+        // L2_PROMOTION_THRESHOLD (0.7) — and three independent strengthen paths
+        // touch the same entity edges inside a single request
+        // (batch_strengthen_synapses, reinforce_recall_with_momentum,
+        // strengthen_episode_entity_edges). One conversational turn could mint an
+        // L3 edge carrying EDGE_TIER_TRUST_L3 = 0.80 and a 90-day prune shield.
+        //
+        // Setup is the WORST case for the gate: an edge already old enough for
+        // its first promotion, then hammered. It must advance exactly one tier.
+        use crate::constants::*;
+        let mut edge = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        edge.created_at = Utc::now() - Duration::seconds(TIER_PROMOTION_WORKING_AGE_SECS + 1);
+        assert_eq!(edge.tier, EdgeTier::L1Working);
+
+        // 25 strengthen calls, all at the same instant — a single request.
+        let request_instant = Utc::now();
+        let mut promotions = Vec::new();
+        for _ in 0..25 {
+            if let Some(p) = edge.strengthen_at(request_instant) {
+                promotions.push(p);
+            }
+        }
+
+        assert_eq!(
+            promotions.len(),
+            1,
+            "a burst inside one instant may advance at most one tier, got {promotions:?}"
+        );
+        assert_eq!(
+            edge.tier,
+            EdgeTier::L2Episodic,
+            "the edge must stop at L2 no matter how hard it is strengthened"
+        );
+        // Strength is well past L2_PROMOTION_THRESHOLD — it is the CLOCK, not a
+        // strength shortfall, that is holding the edge back.
+        assert!(
+            edge.strength >= L2_PROMOTION_THRESHOLD,
+            "strength {} should already clear the L3 bar",
+            edge.strength
+        );
+
+        // 23h 59m after the L2 promotion: still not enough.
+        let almost = request_instant + Duration::seconds(TIER_PROMOTION_SESSION_AGE_SECS - 60);
+        assert!(edge.strengthen_at(almost).is_none());
+        assert_eq!(edge.tier, EdgeTier::L2Episodic);
+
+        // Past 24h: the second step is finally allowed, and only one.
+        let next_day = request_instant + Duration::seconds(TIER_PROMOTION_SESSION_AGE_SECS + 1);
+        let mut later_promotions = Vec::new();
+        for _ in 0..25 {
+            if let Some(p) = edge.strengthen_at(next_day) {
+                later_promotions.push(p);
+            }
+        }
+        assert_eq!(later_promotions.len(), 1, "one step per window");
+        assert_eq!(edge.tier, EdgeTier::L3Semantic);
+        assert_eq!(edge.promoted_at, Some(next_day));
+
+        // L3 is terminal — no further promotion, ever.
+        let much_later = next_day + Duration::days(365);
+        assert!(edge.strengthen_at(much_later).is_none());
+        assert_eq!(edge.tier, EdgeTier::L3Semantic);
+    }
+
+    #[test]
+    fn importance_weighted_strengthen_obeys_the_same_promotion_clock() {
+        // `strengthen_with_importance` was a hand-copied twin of `strengthen`
+        // with its own promotion block. Both now route through
+        // `strengthen_scaled_at` → `try_promote_at`, so the gate cannot be
+        // bypassed by choosing the other entry point — which matters because the
+        // three strengthen paths in one request do not all use the same one.
+        use crate::constants::*;
+        let mut edge = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        edge.created_at = Utc::now() - Duration::seconds(TIER_PROMOTION_WORKING_AGE_SECS + 1);
+
+        let instant = Utc::now();
+        let mut promotions = 0;
+        for _ in 0..25 {
+            if edge.strengthen_with_importance_at(1.0, instant).is_some() {
+                promotions += 1;
+            }
+        }
+        assert_eq!(promotions, 1, "the importance path shares the same clock");
+        assert_eq!(edge.tier, EdgeTier::L2Episodic);
+    }
+
+    #[test]
+    fn importance_scaling_is_preserved_by_the_unification() {
+        // The 5x arrival-rate spread between the two entry points is deliberate
+        // (STRENGTHEN_IMPORTANCE_FLOOR = 0.2 ⇒ scale ∈ [0.2, 1.0]) and must
+        // survive collapsing them onto one implementation.
+        //
+        // L2 edge at 0.3, boost coefficient = LTP_LEARNING_RATE + 0.15*0.8 = 0.22.
+        //   full importance (scale 1.0): 0.3 + 0.22 * 0.7 * 1.0 = 0.454
+        //   zero importance (scale 0.2): 0.3 + 0.22 * 0.7 * 0.2 = 0.3308
+        let now = Utc::now();
+        let mut high = create_test_edge_with_tier(0.3, 0, EdgeTier::L2Episodic);
+        let mut low = create_test_edge_with_tier(0.3, 0, EdgeTier::L2Episodic);
+        let mut plain = create_test_edge_with_tier(0.3, 0, EdgeTier::L2Episodic);
+
+        high.strengthen_with_importance_at(1.0, now);
+        low.strengthen_with_importance_at(0.0, now);
+        plain.strengthen_at(now);
+
+        assert!(
+            (high.strength - 0.454).abs() < 1e-5,
+            "got {}",
+            high.strength
+        );
+        assert!((low.strength - 0.3308).abs() < 1e-5, "got {}", low.strength);
+        assert!(
+            (plain.strength - high.strength).abs() < 1e-6,
+            "importance 1.0 must equal the unweighted path exactly"
+        );
+    }
+
+    // =====================================================================
+    // Edge-tier invariant (d), L2-vs-L3 half: the two tiers must decay at
+    // measurably different rates. Before this change they dispatched to the
+    // same call and differed only in prune gates.
+    // =====================================================================
+
+    #[test]
+    fn l2_and_l3_edges_decay_at_measurably_different_rates() {
+        // Same starting strength, same elapsed time, same LTP status — the ONLY
+        // difference is the tier. Derivations (non-potentiated, so λ=0.693,
+        // β=0.5, crossover 3 days):
+        //   L2, 30 days: power-law leg
+        //     f = exp(-0.693×3) × (30/3)^-0.5 = 0.12505521 × 0.31622777 = 0.03954593
+        //     strength = 0.8 × 0.03954593 = 0.03163674
+        //   L3, 30 days: scaled age 30 × 0.021505376 = 0.64516129 days ⇒ exponential leg
+        //     f = exp(-0.693 × 0.64516129) = exp(-0.44709677) = 0.63948202
+        //     strength = 0.8 × 0.63948202 = 0.51158562
+        let mut l2 = create_test_edge_with_tier(0.8, 30, EdgeTier::L2Episodic);
+        let mut l3 = create_test_edge_with_tier(0.8, 30, EdgeTier::L3Semantic);
+
+        l2.decay();
+        l3.decay();
+
+        assert!(
+            (l2.strength - 0.031_636_74).abs() < 1e-5,
+            "L2 at 30 days should be ~0.0316, got {}",
+            l2.strength
+        );
+        assert!(
+            (l3.strength - 0.511_585_62).abs() < 1e-5,
+            "L3 at 30 days should be ~0.5116, got {}",
+            l3.strength
+        );
+        assert!(
+            l3.strength > l2.strength * 15.0,
+            "L3 must retain far more strength than L2: l3={} l2={}",
+            l3.strength,
+            l2.strength
+        );
+    }
+
+    #[test]
+    fn effective_strength_agrees_with_decay_on_the_tier_split() {
+        // The read path (spreading activation) and the write path must apply the
+        // same curve. If `effective_strength` kept the unscaled hybrid, an L3
+        // edge would decay slowly in storage but fast at scoring time — the fix
+        // would be invisible exactly where it is supposed to matter.
+        let mut l3_written = create_test_edge_with_tier(0.8, 30, EdgeTier::L3Semantic);
+        let l3_read = create_test_edge_with_tier(0.8, 30, EdgeTier::L3Semantic);
+
+        let read_view = l3_read.effective_strength();
+        l3_written.decay();
+
+        assert!(
+            (read_view - l3_written.strength).abs() < 1e-5,
+            "read view {read_view} and decayed strength {} must agree",
+            l3_written.strength
+        );
+    }
+
+    #[test]
+    fn l1_decay_is_untouched_by_the_tier_split() {
+        // L1 has its own aggressive exponential via `tier_decay_factor` and is
+        // deliberately NOT part of this change — invariant (d) is only half
+        // fixed. Pinning L1 makes that explicit rather than accidental.
+        //   f(48h) = exp(-0.029 × 48) = exp(-1.392) = 0.2485
+        //   strength = 0.9 × 0.2485 = 0.22365
+        let mut l1 = create_test_edge_with_tier(0.9, 2, EdgeTier::L1Working);
+        l1.decay();
+        assert!(
+            (l1.strength - 0.223_65).abs() < 1e-3,
+            "L1 48h decay unchanged, got {}",
+            l1.strength
+        );
+    }
+
     #[test]
     fn delete_entity_scrubs_episode_index() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -10168,6 +10680,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: vec![make_record(e1), make_record(e2)],
+            promoted_at: None,
         };
         let edge_uuid = graph.add_relationship(edge).unwrap();
 
@@ -10229,6 +10742,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
 
         let edge_uuid = graph.add_relationship(make_edge()).unwrap();
@@ -10330,6 +10844,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         }
     }
 
@@ -10394,21 +10909,50 @@ mod tests {
 
     #[test]
     fn test_ltp_threshold_potentiation() {
+        use crate::constants::*;
+
+        // LTP is an L2+ mechanism: `record_activation_timestamp` returns early
+        // for L1 (working edges "die too quickly to need history"), and
+        // `ltp_readiness()` returns 0 at L1. So an edge can only potentiate once
+        // it has legitimately reached L2.
+        //
+        // Before the promotion clock landed this was invisible, because a single
+        // strengthen call promoted L1→L2 instantly — a fresh edge could reach
+        // Full LTP (10x decay protection AND prune immunity) inside one instant.
+        // That was the same "burst buys permanence" pathology the clock exists to
+        // stop, so the coupling is intended: potentiation, like promotion, now
+        // requires the edge to survive the 30-minute consolidation window first.
         let mut edge = create_test_edge(0.5, 0);
         assert!(!edge.is_potentiated());
 
-        // Strengthen 10 times (LTP_THRESHOLD = 10)
+        // Ten activations while still inside the L1 window: no promotion, and
+        // therefore no potentiation either.
+        let birth = edge.created_at;
         for _ in 0..10 {
-            let _ = edge.strengthen();
+            let _ = edge.strengthen_at(birth);
+        }
+        assert_eq!(edge.tier, EdgeTier::L1Working);
+        assert!(
+            !edge.is_potentiated(),
+            "an edge that has not consolidated to L2 must not be potentiated, \
+             however hard it is hit inside one instant"
+        );
+
+        // Past the window: the first call promotes to L2 and seeds the activation
+        // history; the rest accumulate it. LTP_THRESHOLD is 10 activations.
+        let after_window = birth + Duration::seconds(TIER_PROMOTION_WORKING_AGE_SECS + 1);
+        for _ in 0..10 {
+            let _ = edge.strengthen_at(after_window);
         }
 
+        assert_eq!(edge.tier, EdgeTier::L2Episodic);
         assert!(
             edge.is_potentiated(),
-            "Should be potentiated after 10 activations"
+            "Should be potentiated after 10 activations at L2"
         );
         assert!(
             matches!(edge.ltp_status, LtpStatus::Full),
-            "Should have Full LTP status after 10 activations"
+            "Should have Full LTP status after 10 activations at L2"
         );
         assert!(
             edge.strength > 0.7,
@@ -10470,13 +11014,23 @@ mod tests {
 
     #[test]
     fn test_pipe4_l1_promotes_and_tracks() {
-        // L1 edges that promote to L2 should start tracking timestamps
+        // L1 edges that promote to L2 should start tracking timestamps.
+        //
+        // The loop is bounded and clocked: promotion now needs BOTH strength
+        // >= L1_PROMOTION_THRESHOLD (0.5) and 30 minutes since the edge entered
+        // L1. An unclocked `while` loop over `strengthen()` would spin forever,
+        // because a test performs all its activations inside the same instant.
+        use crate::constants::*;
         let mut edge = create_test_edge(0.3, 0);
         assert!(matches!(edge.tier, EdgeTier::L1Working));
 
-        // Strengthen until it promotes to L2 (L1_PROMOTION_THRESHOLD = 0.5)
-        while matches!(edge.tier, EdgeTier::L1Working) {
-            let _ = edge.strengthen();
+        let born = edge.created_at;
+        let after_window = born + Duration::seconds(TIER_PROMOTION_WORKING_AGE_SECS + 1);
+        for _ in 0..10 {
+            if !matches!(edge.tier, EdgeTier::L1Working) {
+                break;
+            }
+            let _ = edge.strengthen_at(after_window);
         }
 
         // After promotion to L2, should start tracking
@@ -10488,6 +11042,13 @@ mod tests {
         assert!(
             edge.activation_timestamps.is_some(),
             "L2 edges should track timestamps after promotion"
+        );
+        // And the promotion clock is stamped, so the next step is gated on it
+        // rather than on birth.
+        assert_eq!(
+            edge.promoted_at,
+            Some(after_window),
+            "promotion must stamp promoted_at — it is the anchor for the next step"
         );
     }
 
@@ -11094,6 +11655,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(edge).unwrap();
 
@@ -11134,6 +11696,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         let edge_id = graph.add_relationship(edge).unwrap();
         let start = graph.get_relationship(&edge_id).unwrap().unwrap().strength;
@@ -11271,6 +11834,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(edge).unwrap();
 
@@ -11341,6 +11905,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         let edge_uuid = graph.add_relationship(edge).unwrap();
 
@@ -11417,6 +11982,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
 
         let high_edge_uuid = graph
@@ -11770,6 +12336,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(edge).unwrap()
     }
@@ -12024,6 +12591,7 @@ mod tests {
             forman_curvature: Some(-5.0),
             endpoint_selectivity: Some(0.05), // very low = stop-word
             provenance: Vec::new(),
+            promoted_at: None,
         };
 
         let mut high_sel_edge = RelationshipEdge {
@@ -12046,6 +12614,7 @@ mod tests {
             forman_curvature: Some(-5.0),
             endpoint_selectivity: Some(2.0), // high = concept, above threshold
             provenance: Vec::new(),
+            promoted_at: None,
         };
 
         low_sel_edge.decay();
@@ -12095,6 +12664,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None, // not computed yet
             provenance: Vec::new(),
+            promoted_at: None,
         };
 
         let mut edge_high = RelationshipEdge {
@@ -12117,6 +12687,7 @@ mod tests {
             forman_curvature: Some(-2.0),
             endpoint_selectivity: Some(5.0), // high selectivity
             provenance: Vec::new(),
+            promoted_at: None,
         };
 
         edge_none.decay();
@@ -12351,6 +12922,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         }
     }
 
@@ -12762,6 +13334,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         }
     }
 

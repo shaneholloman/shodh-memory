@@ -2042,6 +2042,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(mk_edge(hub, target_h)).unwrap();
         graph.add_relationship(mk_edge(rare, target_r)).unwrap();
@@ -2128,6 +2129,7 @@ mod tests {
                 forman_curvature: None,
                 endpoint_selectivity: None,
                 provenance: Vec::new(),
+                promoted_at: None,
             })
             .unwrap();
 
@@ -2656,6 +2658,7 @@ mod tests {
                 forman_curvature: None,
                 endpoint_selectivity: None,
                 provenance: Vec::new(),
+                promoted_at: None,
             })
             .unwrap();
 

@@ -736,6 +736,7 @@ mod tests {
             entity_confidence: Some(0.9),
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
             forman_curvature: None,
         }
     }

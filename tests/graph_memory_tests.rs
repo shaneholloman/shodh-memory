@@ -116,6 +116,7 @@ fn create_relationship(
         endpoint_selectivity: None,
         forman_curvature: None,
         provenance: Vec::new(),
+        promoted_at: None,
     }
 }
 
@@ -153,6 +154,7 @@ fn create_relationship_with_plasticity(
         endpoint_selectivity: None,
         forman_curvature: None,
         provenance: Vec::new(),
+        promoted_at: None,
     }
 }
 
@@ -899,17 +901,30 @@ fn test_long_term_potentiation_threshold() {
     let entity_a = Uuid::new_v4();
     let entity_b = Uuid::new_v4();
 
+    use shodh_memory::constants::TIER_PROMOTION_WORKING_AGE_SECS;
+
     let mut edge = create_relationship(entity_a, entity_b, RelationType::Knows, 0.5);
     assert!(
         !edge.is_potentiated(),
         "Edge should not be potentiated initially"
     );
 
+    // The activation counts below are exactly the ones this test always used
+    // (4 then 5). The only change is the CLOCK: promotion now requires 30
+    // minutes since the edge entered its tier, and LTP is an L2+ mechanism
+    // (`record_activation_timestamp` skips L1 edges), so the edge has to be past
+    // the consolidation window for burst detection to have any history at all.
+    // Activation #1 promotes L1→L2 and seeds timestamp #1; #2–#4 bring the
+    // window to 4; #5 reaches LTP_BURST_THRESHOLD.
+    let birth = edge.created_at;
+    let after_window = birth + Duration::seconds(TIER_PROMOTION_WORKING_AGE_SECS + 1);
+
     // PIPE-4: Multi-scale LTP — Burst LTP fires at 5 rapid activations in 24h
     // Strengthen 4 times (below burst threshold of 5)
     for _ in 0..4 {
-        edge.strengthen();
+        edge.strengthen_at(after_window);
     }
+    assert_eq!(edge.tier, EdgeTier::L2Episodic);
     assert!(
         !edge.is_potentiated(),
         "Edge should not be potentiated at 4 activations (burst threshold is 5)"
@@ -917,7 +932,7 @@ fn test_long_term_potentiation_threshold() {
 
     // Strengthen once more (reaches burst threshold)
     let pre_ltp_strength = edge.strength;
-    edge.strengthen();
+    edge.strengthen_at(after_window);
 
     assert!(
         edge.is_potentiated(),
@@ -926,6 +941,40 @@ fn test_long_term_potentiation_threshold() {
     assert!(
         edge.strength > pre_ltp_strength,
         "Burst LTP should give bonus strength"
+    );
+}
+
+#[test]
+fn an_unconsolidated_l1_edge_cannot_potentiate_inside_one_instant() {
+    // The other half of the coupling introduced by the promotion clock, pinned
+    // on its own so it cannot drift.
+    //
+    // LTP is an L2+ mechanism: `record_activation_timestamp` returns early for
+    // L1 ("working edges die too quickly to need history") and `ltp_readiness()`
+    // is zero at L1. Before the clock landed, one strengthen call promoted an
+    // edge to L2 instantly, so a fresh edge could collect Burst or even Full LTP
+    // — 2x-10x decay protection AND prune immunity — inside a single request.
+    // "Hit 20 times in one instant" is precisely the evidence the clock exists
+    // to discount, and potentiation must discount it too.
+    let mut edge = create_relationship(Uuid::new_v4(), Uuid::new_v4(), RelationType::Knows, 0.5);
+    let birth = edge.created_at;
+
+    for _ in 0..20 {
+        edge.strengthen_at(birth);
+    }
+
+    assert_eq!(
+        edge.tier,
+        EdgeTier::L1Working,
+        "20 activations in one instant must not consolidate an edge"
+    );
+    assert!(
+        !edge.is_potentiated(),
+        "and an un-consolidated edge must not be potentiated"
+    );
+    assert!(
+        edge.activation_timestamps.is_none(),
+        "L1 edges record no activation history, so burst detection has nothing to fire on"
     );
 }
 
