@@ -311,34 +311,335 @@ fn every_live_tier_maps_to_a_distinct_graph_multiplier() {
     );
 }
 
-// FACT CORRECTION — NOT COVERED END TO END. See the handoff.
-//
-// The arbitration path (contradiction detection -> invalidation -> consumers
-// honouring it) is unit-tested at the store level in `src/memory/facts.rs`, but
-// there is deliberately NO end-to-end test here, because the one written first
-// passed VACUOUSLY: driving `remember` with aged memories and then
-// `run_maintenance(.., is_heavy = true)` extracts ZERO facts in this harness, so
-// every assertion about contradictions was trivially satisfied. Both a
-// declarative corpus and a pattern-shaped one produced facts = 0.
-//
-// A passing test that exercises nothing is worse than an absent one, so it was
-// removed rather than left to look like coverage.
-//
-// The cause was then isolated, and it is NOT any of the obvious gates:
-//   * `fact_extraction_needed` starts `true`, so the heavy cycle does run it.
-//   * The incremental watermark is NOT the filter — instrumenting
-//     `memory/mod.rs` showed `all=2, new_since_watermark=2,
-//     watermark=1970-01-01`, i.e. both aged memories reach the consolidator.
-//   * Thresholds are not the filter either. Calling
-//     `SemanticConsolidator::with_thresholds(..)` directly on the same two
-//     memories yields `facts=0` at (min_support 2, min_age 7), (1, 7) AND
-//     (1, 0).
-//
-// So the candidate EXTRACTOR produces no candidates for plain declarative
-// sentences — consolidation never gets anything to cluster. An end-to-end fact
-// test therefore needs corpus text the extractor actually recognises, and
-// establishing what that is belongs to the fact-extraction layer, not to the
-// invalidation work.
+// =============================================================================
+// FACT CORRECTION — END TO END
+// =============================================================================
+
+/// A creation timestamp `days` in the past, pinned to WHOLE MILLISECONDS.
+///
+/// The incremental fact-extraction watermark is persisted as
+/// `created_at.timestamp_millis()` and the next cycle filters with a strict
+/// `created_at > watermark`. `Utc::now()` carries sub-millisecond digits, so a
+/// memory always compares as newer than the watermark it just produced and is
+/// re-consolidated on every subsequent cycle.
+///
+/// In production that is merely wasteful — dedup absorbs the re-derivation. In a
+/// two-cycle test it is fatal and silently so: cycle two re-ingests the claim
+/// memories alongside the correction, and since the two share most of their
+/// content stems they land in ONE Jaccard cluster, producing a single merged
+/// fact (observed: one fact with four source memories) instead of a claim plus a
+/// contradicting correction. Pinning the fixture to whole milliseconds makes the
+/// watermark round-trip exactly, so each cycle sees only its own cohort.
+fn days_ago_ms(days: i64) -> chrono::DateTime<chrono::Utc> {
+    let t = chrono::Utc::now() - chrono::Duration::days(days);
+    chrono::DateTime::from_timestamp_millis(t.timestamp_millis()).expect("valid timestamp")
+}
+
+/// Store a plain declarative memory with a pinned importance and creation time.
+///
+/// `importance_override` is set so cluster-representative selection (highest
+/// candidate confidence wins) is deterministic rather than a function of the
+/// importance heuristic.
+fn declarative_memory(content: &str, importance: f32) -> Experience {
+    Experience {
+        content: content.to_string(),
+        experience_type: ExperienceType::Observation,
+        importance_override: Some(importance),
+        ..Default::default()
+    }
+}
+
+/// remember -> extraction -> contradiction -> invalidation, in one run.
+///
+/// This test existed once, passed VACUOUSLY, and was deleted. The harness
+/// extracted ZERO facts, so every assertion about contradictions was trivially
+/// satisfied. The cause was the candidate extractor, not the invalidation work:
+/// three gates in series on the only route a plain declarative sentence had —
+/// `ExperienceType::Observation` only, `importance >= 0.5`, and a hard
+/// requirement that the sentence literally contain one of the NER entities —
+/// each of which fails CLOSED. `remember` defaults to `Observation`,
+/// `calculate_importance` gives `Observation` the 0.05 catch-all weight so the
+/// default type could not reach 0.5, and NER emission is empty for whole classes
+/// of records. See `SemanticConsolidator::extract_fact_candidates`.
+///
+/// It is resurrected with the non-vacuity assertion FIRST: `facts > 0` is
+/// checked, and the identity of the extracted fact pinned, before anything about
+/// arbitration is asserted. The test cannot pass again by exercising nothing.
+///
+/// TWO maintenance cycles, deliberately. Facts minted in one `consolidate` batch
+/// are all written AFTER the arbitration loop (`store_batch` runs once the loop
+/// finishes), so no fact in a batch can see its batch-mates in the store.
+/// Contradiction can only fire when the correction arrives on a LATER cycle than
+/// the claim — which is also how a correction arrives in the world. The
+/// incremental watermark cooperates: it advances to the newest processed
+/// memory's `created_at`, so the claim memories are excluded from cycle two by
+/// the same mechanism that admits the correction.
+#[test]
+fn a_corrected_report_supersedes_the_initial_claim_end_to_end() {
+    use shodh_memory::similarity::cosine_similarity;
+
+    let (system, _dir) = setup_memory_system();
+    let user = "e2e-correction";
+
+    // Both cohorts are older than CONSOLIDATION_MIN_AGE_DAYS (7). The correction
+    // is NEWER than the claim so it clears the watermark that cycle one leaves
+    // behind, and the claim does not (the filter is a strict `>` — see
+    // `days_ago_ms` for why the millisecond pinning matters).
+    let claim_at = days_ago_ms(40);
+    let correction_at = days_ago_ms(20);
+
+    // CONSOLIDATION_MIN_SUPPORT is 2, so each claim needs two DISTINCT memories
+    // whose extracted sentences cluster together. Corroboration is what mints a
+    // fact — that is the filter that replaced the entity gate.
+    const CLAIM: &str =
+        "Initial reports said four crew members were injured in the bridge collapse";
+    const CLAIM_ECHO: &str =
+        "Early reports said four crew members were injured in the bridge collapse";
+    // The correction is worded as a minimal negation of the claim on purpose.
+    // `find_contradiction` reuses dedup's thresholds — cosine >= 0.80 AND
+    // Jaccard >= 0.30 AND a shared entity — with polarity INVERTED, so a
+    // contradiction only registers between two claims the system would otherwise
+    // have considered the same fact. Those thresholds are load-bearing for the
+    // invalidation semantics and are not to be relaxed to make a test pass; the
+    // corpus wording is what has to clear them.
+    const CORRECTION: &str =
+        "Corrected reports confirm no crew members were injured in the bridge collapse";
+    const CORRECTION_ECHO: &str =
+        "Later reports confirm no crew members were injured in the bridge collapse";
+
+    // ── Cycle 1: the claim ──────────────────────────────────────────────────
+    system
+        .remember(
+            declarative_memory(&format!("{CLAIM}."), 0.9),
+            Some(claim_at),
+        )
+        .expect("remember claim");
+    system
+        .remember(
+            declarative_memory(&format!("{CLAIM_ECHO}."), 0.8),
+            Some(claim_at),
+        )
+        .expect("remember claim echo");
+
+    system
+        .run_maintenance(1.0, user, true)
+        .expect("heavy maintenance");
+
+    let after_claim = system.get_facts(user, 100).expect("facts");
+    // NON-VACUITY. Everything below is meaningless if this is empty, which is
+    // exactly the state the deleted version of this test shipped in.
+    assert!(
+        !after_claim.is_empty(),
+        "extraction produced no facts from two corroborating declarative memories — \
+         the candidate extractor is silent again and every assertion below is vacuous"
+    );
+    let claim_fact = after_claim
+        .iter()
+        .find(|f| f.fact.contains("crew members were injured"))
+        .unwrap_or_else(|| {
+            panic!("expected the claim to be extracted verbatim, got {after_claim:?}")
+        })
+        .clone();
+    assert!(
+        claim_fact.is_active(),
+        "a freshly extracted fact must be active"
+    );
+
+    // ── Cycle 2: the correction ─────────────────────────────────────────────
+    system
+        .remember(
+            declarative_memory(&format!("{CORRECTION}."), 0.9),
+            Some(correction_at),
+        )
+        .expect("remember correction");
+    system
+        .remember(
+            declarative_memory(&format!("{CORRECTION_ECHO}."), 0.8),
+            Some(correction_at),
+        )
+        .expect("remember correction echo");
+
+    system
+        .run_maintenance(1.0, user, true)
+        .expect("heavy maintenance");
+
+    let after_correction = system.get_facts(user, 100).expect("facts");
+    let correction_fact = after_correction
+        .iter()
+        .find(|f| f.fact.contains("no crew members were injured"))
+        .unwrap_or_else(|| panic!("the correction was never extracted, got {after_correction:?}"))
+        .clone();
+
+    // ── Arbitration ─────────────────────────────────────────────────────────
+    let store = system.fact_store();
+    let settled_claim = store
+        .get(user, &claim_fact.id)
+        .expect("read claim")
+        .expect("claim still stored — invalidation retains, never deletes");
+
+    // A failure here is almost always one of `find_contradiction`'s three gates
+    // rather than the arbitration rule, so report all three.
+    if settled_claim.is_active() {
+        let claim_emb = store.get_embedding(user, &claim_fact.id).ok().flatten();
+        let corr_emb = store
+            .get_embedding(user, &correction_fact.id)
+            .ok()
+            .flatten();
+        let cosine = match (&claim_emb, &corr_emb) {
+            (Some(a), Some(b)) => cosine_similarity(a, b),
+            _ => f32::NAN,
+        };
+        let shared: Vec<&String> = claim_fact
+            .related_entities
+            .iter()
+            .filter(|e| correction_fact.related_entities.contains(e))
+            .collect();
+        panic!(
+            "the correction did not supersede the claim.\n  claim: {:?}\n  correction: {:?}\n  \
+             cosine (needs >= FACT_DEDUP_COSINE_THRESHOLD 0.80): {cosine}\n  \
+             claim entities: {:?}\n  correction entities: {:?}\n  shared entities \
+             (needs >= 1): {shared:?}",
+            settled_claim.fact,
+            correction_fact.fact,
+            claim_fact.related_entities,
+            correction_fact.related_entities,
+        );
+    }
+
+    assert_eq!(
+        settled_claim.invalidated_by.as_deref(),
+        Some(correction_fact.id.as_str()),
+        "the superseded claim must name its victor"
+    );
+    assert!(
+        settled_claim.contradicts.contains(&correction_fact.id),
+        "the link must be recorded on the superseded side"
+    );
+    assert!(
+        !settled_claim.source_memories.is_empty(),
+        "invalidation must not break the trust chain back to the episodes"
+    );
+
+    let settled_correction = store
+        .get(user, &correction_fact.id)
+        .expect("read correction")
+        .expect("correction stored");
+    assert!(
+        settled_correction.is_active(),
+        "the winning correction must remain active"
+    );
+    assert!(
+        settled_correction.contradicts.contains(&claim_fact.id),
+        "the winner must remember what it displaced"
+    );
+}
+
+/// A superseded fact must not be resurrected by the ON-DEMAND distillation path.
+///
+/// `find_similar` deliberately still MATCHES invalidated rows — that is what
+/// stops a corrected claim and its correction from trading places on every
+/// cycle. `run_maintenance` therefore checks `is_active()` before reinforcing.
+/// `distill_facts` did not, so a wrong claim (which normally stays in the corpus
+/// and is re-extracted forever) would get its `last_reinforced` refreshed and,
+/// since the disuse half-life grows with support, become MORE durable each time
+/// someone asked for a distillation.
+///
+/// The bug was unreachable until now for the same reason this whole branch
+/// exists: the candidate extractor produced nothing, so the reinforcement branch
+/// never ran with real input.
+///
+/// Non-vacuity: the fact count must stay at 1. If `find_similar` had failed to
+/// match the dead row at all, the re-derivation would be stored as a SECOND
+/// fact, and the "unchanged timestamp" assertions would pass while testing
+/// nothing.
+#[test]
+fn on_demand_distillation_does_not_resurrect_an_invalidated_fact() {
+    let (system, _dir) = setup_memory_system();
+    let user = "e2e-no-resurrect";
+
+    let first_at = days_ago_ms(40);
+    let later_at = days_ago_ms(20);
+
+    system
+        .remember(
+            declarative_memory(
+                "Initial reports said four crew members were injured in the bridge collapse.",
+                0.9,
+            ),
+            Some(first_at),
+        )
+        .expect("remember claim");
+    system
+        .remember(
+            declarative_memory(
+                "Early reports said four crew members were injured in the bridge collapse.",
+                0.8,
+            ),
+            Some(first_at),
+        )
+        .expect("remember claim echo");
+
+    let distilled = system.distill_facts(user, 2, 7).expect("distill");
+    assert!(
+        distilled.facts_extracted >= 1,
+        "on-demand distillation extracted nothing — the rest of this test is vacuous"
+    );
+
+    let store = system.fact_store();
+    let facts = store.list(user, 100).expect("list");
+    assert_eq!(facts.len(), 1, "expected exactly one distilled fact");
+    let mut dead = facts[0].clone();
+
+    // Supersede it, then record the state that must not move.
+    dead.invalidate(Some("some-later-correction"), chrono::Utc::now());
+    store.update(user, &dead).expect("invalidate");
+    let frozen_reinforced = dead.last_reinforced;
+    let frozen_support = dead.support_count;
+
+    // The wrong claim is still in the corpus and gets re-asserted.
+    system
+        .remember(
+            declarative_memory(
+                "Initial dispatches said four crew members were injured in the bridge collapse.",
+                0.9,
+            ),
+            Some(later_at),
+        )
+        .expect("remember re-derivation");
+    system
+        .remember(
+            declarative_memory(
+                "Early dispatches said four crew members were injured in the bridge collapse.",
+                0.8,
+            ),
+            Some(later_at),
+        )
+        .expect("remember re-derivation echo");
+
+    system.distill_facts(user, 2, 7).expect("distill again");
+
+    let after = store.list(user, 100).expect("list");
+    assert_eq!(
+        after.len(),
+        1,
+        "the re-derivation must have been RECOGNISED as the dead fact, not stored as a \
+         second row — otherwise the assertions below prove nothing. Got: {after:?}"
+    );
+
+    let settled = store.get(user, &dead.id).expect("read").expect("stored");
+    assert!(
+        !settled.is_active(),
+        "a superseded fact must stay superseded"
+    );
+    assert_eq!(
+        settled.last_reinforced, frozen_reinforced,
+        "re-deriving a dead fact must not extend its half-life"
+    );
+    assert_eq!(
+        settled.support_count, frozen_support,
+        "a dead fact must not accrue support"
+    );
+}
 
 #[test]
 fn test_tier_full_cycle() {
