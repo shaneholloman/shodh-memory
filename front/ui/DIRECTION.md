@@ -64,16 +64,57 @@ Judged from the live preview, not from a description:
 ## Source
 
 Captured from `ui.watermelon.sh/dashboard/gridline-dashboard` (Source Code tab)
-into `scratchpad/gridline-src.json` — 13 files, ~72 kB. The registry endpoint
-`registry.watermelon.sh/r/gridline-dashboard.json` returns the SPA 404 page as
-HTML, so `shadcn add` cannot fetch it; the site advertises a command that does
-not work. The files are lifted from that JSON instead.
+into `front/ui/.reference/gridline-src.json` — 13 files, ~72 kB, gitignored. The
+registry endpoint `registry.watermelon.sh/r/gridline-dashboard.json` returns the
+SPA 404 page as HTML, so `shadcn add` cannot fetch it; the site advertises a
+command that does not work. The files are lifted from that JSON instead.
 
-## Unverified before this lands
+## Verified 2026-08-07 — the premise holds
 
-- Its npm dependencies (Radix set, `@tabler/icons-react`) and which map library
-  it uses — not yet identified.
-- Whether its components read shadcn's semantic variables or hardcode their own
-  colours. If they hardcode, the token layer buys nothing and each component
-  needs restyling. **This is still the untested premise the whole approach rests
-  on** and should be checked with one component before porting the rest.
+All three open questions are now settled by reading the captured source, not by
+inference.
+
+**The token layer carries.** Across all 13 files: **0** raw hex literals, **148**
+semantic-token utilities, **22** hardcoded palette classes. Every one of those 22
+is in `modelling-dashboard.tsx` or `flexibility-dashboard.tsx` — the two *content*
+views, replaced wholesale — where they serve as chart-series and status palettes.
+The chrome we actually port (`app-sidebar`, `top-navbar`, `dashboard-shell`,
+`sidebar-navigation-item`) is 100% token-driven: `bg-sidebar`,
+`border-sidebar-border`, `text-primary`, `bg-primary/10`. Setting `--primary` to
+orange propagated through it with no component edits. Confirmed in the browser.
+
+**Dependencies: `lucide-react`, not `@tabler/icons-react`** (an earlier note here
+was wrong). Plus Radix via `@/components/ui/{tooltip,switch,sheet,dropdown-menu,
+button,card,input,drawer}`, and a Watermelon-specific `icon-lg` button size that
+stock shadcn does not have.
+
+**No map library.** The region-pin map is hand-built SVG inside
+`flexibility-dashboard.tsx`. There is nothing to adopt and nothing to install.
+
+**Net new dependencies for the port: zero.** Gridline hangs its rail labels off
+Radix Tooltip; expanding the rail instead makes tooltips redundant, so that
+dependency — and Sheet, which only existed for the mobile drawer the expanding
+rail also covers — is not needed.
+
+## Also dropped from Gridline, deliberately
+
+- **Its theme switch**, and the `MutationObserver` + `localStorage` plumbing
+  behind it. This product is dark-only; the control would toggle nothing, which
+  is exactly the inert chrome we removed everywhere else.
+- **Its version strip** (`v2.4.1 → v2.4.2`). The affordance is a good match for
+  belief drift, but there is no version feed behind it yet, and chrome that
+  displays invented data is worse than chrome that is absent. It comes back when
+  something real feeds it.
+
+## Layout decision — where the Inspector lives
+
+Gridline's shell is `absolute rail + absolute header + main`. It has no third
+column, and `WORKFLOWS.md` makes the Inspector the spine. Resolved: the
+Inspector is **absolutely positioned**, out of the flex flow, so the d3 canvas
+can later take the stage's full width with the panel floated over its right
+edge. Until then `main` reserves the same width so nothing is occluded — the
+geometry changes when the canvas lands, not the structure.
+
+It also renders **only when the server is reachable**. Offline there is nothing
+to select, so it could only repeat what the stage already says; the offline
+screen previously had four panels apologising separately for one problem.
