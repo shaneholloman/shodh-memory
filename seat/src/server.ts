@@ -58,6 +58,7 @@ interface CreateConversationBody {
 	provider?: string;
 	model?: string;
 	system_prompt?: string;
+	harness_learning?: boolean;
 }
 
 class HttpError extends Error {
@@ -408,6 +409,9 @@ export class SeatServer {
 				userId: body.user_id,
 				model,
 				systemPrompt: typeof body.system_prompt === "string" ? body.system_prompt : undefined,
+				// Default true; `harness_learning: false` exists for A/B evaluation
+				// control arms only (see ConversationOptions.harnessLearning).
+				harnessLearning: body.harness_learning !== false,
 			});
 		} catch (error) {
 			throw new HttpError(400, error instanceof Error ? error.message : String(error));

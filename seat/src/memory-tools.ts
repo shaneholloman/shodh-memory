@@ -25,9 +25,13 @@ export interface MemoryToolContext {
 	/** Register memories surfaced this turn so the turn-end loop can reinforce them. */
 	onSurfaced(scope: MemoryScope, memories: { id: string; content: string }[]): void;
 	/** A recall came back empty — candidate harness learning. */
-	onEmptyRecall(query: string): void;
+	onWeakRecall(query: string, resultCount: number, bestFinalScore: number): void;
 	ledger: LearningLedger;
 }
+
+/** Absolute fusion-score floor under which a recall counts as a miss for
+ *  lesson capture. See the miss-detection comment at the recall tool. */
+const RECALL_MISS_FLOOR = 0.15;
 
 const RECALL_MODES: RecallMode[] = [
 	"hybrid",
@@ -137,12 +141,33 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 				took_ms: tookMs,
 			});
 
-			if (response.memories.length === 0) {
-				context.onEmptyRecall(params.query);
-				return textResult(
-					"No memories matched this cue. Consider retrying with concrete entity names or a broader phrasing.",
-					response,
-				);
+			// A miss is "nothing USEFUL", not "literally nothing". Semantic recall
+			// returns top-K for almost any cue once a corpus exists, so a
+			// zero-length check alone never fires and the lesson-capture loop it
+			// feeds goes dead — found by the lessons A/B eval, whose teach cues
+			// all "hit" a one-memory corpus about something else entirely.
+			// final_score is the pipeline's absolute fusion output (present
+			// because recall runs debug:true); the normalized `score` cannot be
+			// used here — it is relative to the top hit, so the top hit is always
+			// ~0.95 no matter how bad it is.
+			//
+			// The floor is calibrated from one observed corpus (a true semantic
+			// match measured 0.66; weak single-leg matches land an order of
+			// magnitude lower) and is deliberately conservative. Recorded in the
+			// capture text so future tuning has data.
+			const bestFinal = response.memories.reduce(
+				(best, memory) => Math.max(best, memory.score_attribution?.final_score ?? 0),
+				0,
+			);
+			const miss = response.memories.length === 0 || bestFinal < RECALL_MISS_FLOOR;
+			if (miss) {
+				context.onWeakRecall(params.query, response.memories.length, bestFinal);
+				if (response.memories.length === 0) {
+					return textResult(
+						"No memories matched this cue. Consider retrying with concrete entity names or a broader phrasing.",
+						response,
+					);
+				}
 			}
 
 			const lines: string[] = [`Found ${response.memories.length} memories:`];

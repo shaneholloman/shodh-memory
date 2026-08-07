@@ -23,14 +23,33 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..");
 
-const BACKEND_PORT = 3098;
-const SEAT_PORT = 3142;
-const FIXTURE_PORT = 3210;
+let BACKEND_PORT = 0;
+let SEAT_PORT = 0;
+let FIXTURE_PORT = 0;
 const API_KEY = "e2e-fixed-key";
 const USER = "e2e";
 const BACKEND_EXE =
   process.env.BACKEND_EXE ??
   path.join(repoRoot, "target", "x86_64-pc-windows-msvc", "debug", "shodh-memory-server.exe");
+
+
+/** Pick a currently-free TCP port from the OS. There is an inherent race
+ *  between closing the probe listener and the child binding it, but eval
+ *  processes start immediately and the alternative — fixed ports — caused a
+ *  real failure: a leftover service on the same port answered the health
+ *  probe and the run proceeded against the WRONG process, failing seven
+ *  assertions downstream of an auth mismatch. */
+async function freePort() {
+  const { createServer } = await import("node:net");
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
 
 const results = [];
 function record(name, ok, detail = "") {
@@ -73,11 +92,11 @@ async function waitFor(url, headers, timeoutMs = 60_000) {
 }
 
 const backendHeaders = { "X-API-Key": API_KEY, "Content-Type": "application/json" };
-const seatBase = `http://127.0.0.1:${SEAT_PORT}`;
+const seatBase = () => `http://127.0.0.1:${SEAT_PORT}`;
 
 /** POST a message and collect the full SSE event stream until agent_end. */
 async function sendMessage(conversationId, text) {
-  const res = await fetch(`${seatBase}/v1/conversations/${conversationId}/messages`, {
+  const res = await fetch(`${seatBase()}/v1/conversations/${conversationId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
@@ -99,6 +118,9 @@ async function sendMessage(conversationId, text) {
 }
 
 async function main() {
+  BACKEND_PORT = await freePort();
+  SEAT_PORT = await freePort();
+  FIXTURE_PORT = await freePort();
   const scratch = mkdtempSync(path.join(tmpdir(), "shodh-e2e-"));
   const backendData = path.join(scratch, "backend");
   const seatData = path.join(scratch, "seat");
@@ -138,7 +160,7 @@ async function main() {
     await waitFor(`http://127.0.0.1:${BACKEND_PORT}/health`),
     "backend /health never came up — is the binary built?",
   );
-  assert("seat up", await waitFor(`${seatBase}/healthz`), "seat /healthz never came up");
+  assert("seat up", await waitFor(`${seatBase()}/healthz`), "seat /healthz never came up");
 
   // ── seed ─────────────────────────────────────────────────────────────────
   const seeds = [
@@ -158,7 +180,7 @@ async function main() {
   assert("seeded 3 memories", seeded === 3, `seeded ${seeded}/3`);
 
   // ── model discovery ──────────────────────────────────────────────────────
-  const models = await (await fetch(`${seatBase}/v1/models?refresh=1`)).json();
+  const models = await (await fetch(`${seatBase()}/v1/models?refresh=1`)).json();
   const fixture = (models.models ?? []).find((m) => m.id === "fixture-deterministic-v1");
   assert("fixture model discovered via lmstudio path", Boolean(fixture));
   assert(
@@ -169,7 +191,7 @@ async function main() {
 
   // ── conversation ─────────────────────────────────────────────────────────
   const convo = await (
-    await fetch(`${seatBase}/v1/conversations`, {
+    await fetch(`${seatBase()}/v1/conversations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_id: USER, provider: fixture.provider, model: fixture.id }),
@@ -214,7 +236,7 @@ async function main() {
 
   // ── ledger ───────────────────────────────────────────────────────────────
   const ledger = await (
-    await fetch(`${seatBase}/v1/learning/events?conversation_id=${convo.conversation_id}`)
+    await fetch(`${seatBase()}/v1/learning/events?conversation_id=${convo.conversation_id}`)
   ).json();
   assert("ledger recorded learning events", (ledger.events?.length ?? 0) > 0, `0 events`);
 
@@ -222,9 +244,9 @@ async function main() {
   seat.kill();
   await new Promise((r) => setTimeout(r, 1000));
   seat = launch("seat", process.execPath, [path.join(here, "..", "dist", "index.js")], seatEnv);
-  assert("seat restarted", await waitFor(`${seatBase}/healthz`));
+  assert("seat restarted", await waitFor(`${seatBase()}/healthz`));
   const detail = await (
-    await fetch(`${seatBase}/v1/conversations/${convo.conversation_id}`)
+    await fetch(`${seatBase()}/v1/conversations/${convo.conversation_id}`)
   ).json();
   assert(
     "conversation persisted across restart (2 turns)",
