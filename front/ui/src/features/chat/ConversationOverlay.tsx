@@ -9,6 +9,7 @@ import type { SeatReachability } from "@/lib/seat/types";
 import { formatCost, formatTokens } from "@/lib/format";
 import { useChat } from "@/stores/chat";
 import { Button } from "@/components/ui/button";
+import { ProviderLogo } from "@/components/ui/provider-logo";
 import { Composer } from "./Composer";
 import { EgressBadge } from "./EgressBadge";
 import { costIsReal, useBillingLookup } from "./useBilling";
@@ -130,7 +131,15 @@ export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
           aria-label={mode === "expanded" ? "Minimize conversation" : "Expand conversation"}
           className="hover:bg-accent/60 focus-visible:ring-ring flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none"
         >
-          <MessageSquare aria-hidden="true" className="text-muted-foreground size-3.5 shrink-0" />
+          {/* Logo first: it identifies the provider faster than the model id
+              can be read, and it is what makes this bar scannable from across
+              a room during a demo. Falls back to the message glyph only when
+              there is no model to identify. */}
+          {model ? (
+            <ProviderLogo provider={model.provider} className="size-3.5" />
+          ) : (
+            <MessageSquare aria-hidden="true" className="text-muted-foreground size-3.5 shrink-0" />
+          )}
           <span className="mono min-w-0 flex-1 truncate text-[11px]">{label}</span>
           {streaming ? (
             // Streaming is stated, not animated into a spinner: a spinner says
