@@ -7037,6 +7037,68 @@ impl GraphMemory {
         })
     }
 
+    /// Count edges per tier, with mean decay-aware strength for each.
+    ///
+    /// Deliberately NOT folded into [`get_stats`](Self::get_stats): that method
+    /// reads three atomics and is called from the periodic maintenance loop, so
+    /// it must stay O(1). This is a full O(E) scan of the relationships column
+    /// family, for observability surfaces that ask for it explicitly.
+    ///
+    /// Uses an uncached iterator so a census cannot evict the working set of a
+    /// live server, matching [`get_all_entities`](Self::get_all_entities).
+    pub fn edge_tier_census(&self) -> Result<EdgeTierCensus> {
+        let mut census = EdgeTierCensus::default();
+        let (mut l1_sum, mut l2_sum, mut l3_sum) = (0.0f64, 0.0f64, 0.0f64);
+
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        let iter = self.db.iterator_cf_opt(
+            self.relationships_cf(),
+            read_opts,
+            rocksdb::IteratorMode::Start,
+        );
+
+        for (_, value) in iter.flatten() {
+            let Ok((edge, _)) = decode_relationship_edge(&value) else {
+                continue;
+            };
+            census.total_scanned += 1;
+
+            let strength = edge.effective_strength();
+            match edge.tier {
+                EdgeTier::L1Working => {
+                    census.l1_working += 1;
+                    l1_sum += strength as f64;
+                }
+                EdgeTier::L2Episodic => {
+                    census.l2_episodic += 1;
+                    l2_sum += strength as f64;
+                }
+                EdgeTier::L3Semantic => {
+                    census.l3_semantic += 1;
+                    l3_sum += strength as f64;
+                }
+            }
+
+            if strength < edge.tier.prune_threshold() {
+                census.below_prune_threshold += 1;
+            }
+        }
+
+        let mean = |sum: f64, n: usize| {
+            if n == 0 {
+                0.0
+            } else {
+                (sum / n as f64) as f32
+            }
+        };
+        census.l1_mean_strength = mean(l1_sum, census.l1_working);
+        census.l2_mean_strength = mean(l2_sum, census.l2_episodic);
+        census.l3_mean_strength = mean(l3_sum, census.l3_semantic);
+
+        Ok(census)
+    }
+
     /// Get all entities in the graph
     pub fn get_all_entities(&self) -> Result<Vec<EntityNode>> {
         let mut entities = Vec::new();
@@ -7114,7 +7176,32 @@ impl GraphMemory {
     /// Get the Memory Universe visualization data
     /// Returns entities as "stars" with positions based on their relationships,
     /// sized by salience, and colored by entity type.
+    /// Whether a relation type carries no extracted meaning — the co-occurrence
+    /// substrate rather than a typed relation.
+    fn is_generic_relation(relation_type: &RelationType) -> bool {
+        matches!(
+            relation_type,
+            RelationType::CoOccurs | RelationType::RelatedTo
+        )
+    }
+
+    /// Direction-independent key for an entity pair.
+    fn unordered_pair(a: Uuid, b: Uuid) -> (Uuid, Uuid) {
+        if a <= b {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    /// Project the graph for visualization with the default read filter.
     pub fn get_universe(&self) -> Result<MemoryUniverse> {
+        self.get_universe_filtered(UniverseFilter::default())
+    }
+
+    /// Project the graph for visualization, applying `filter` and reporting
+    /// exactly what it removed on [`MemoryUniverse::filter`].
+    pub fn get_universe_filtered(&self, filter: UniverseFilter) -> Result<MemoryUniverse> {
         let entities = self.get_all_entities()?;
         let relationships = self.get_all_relationships()?;
 
@@ -7182,13 +7269,54 @@ impl GraphMemory {
             }
         }
 
+        // Pairs already joined by a TYPED edge. A bare generic edge over the same
+        // pair adds nothing a viewer can act on, and is the main source of
+        // doubled lines between two nodes. Unordered key: direction does not make
+        // a co-occurrence edge informative.
+        let typed_pairs: HashSet<(Uuid, Uuid)> = relationships
+            .iter()
+            .filter(|rel| !Self::is_generic_relation(&rel.relation_type))
+            .map(|rel| Self::unordered_pair(rel.from_entity, rel.to_entity))
+            .collect();
+
+        let mut report = UniverseFilterReport {
+            min_generic_strength: filter.min_generic_strength,
+            hide_redundant_generic: filter.hide_redundant_generic,
+            ..Default::default()
+        };
+
         // Create gravitational connections AFTER star positions are finalized
         // This ensures from_position/to_position match current star positions
         let connections: Vec<GravitationalConnection> = relationships
             .iter()
+            .filter(|rel| {
+                // Typed edges are never hidden: a typed relation is an extraction
+                // result, and suppressing it would misrepresent what is known.
+                if !Self::is_generic_relation(&rel.relation_type) {
+                    return true;
+                }
+                if rel.effective_strength() < filter.min_generic_strength {
+                    report.hidden_weak_generic += 1;
+                    return false;
+                }
+                if filter.hide_redundant_generic
+                    && typed_pairs.contains(&Self::unordered_pair(rel.from_entity, rel.to_entity))
+                {
+                    report.hidden_redundant_generic += 1;
+                    return false;
+                }
+                true
+            })
             .filter_map(|rel| {
-                let from_idx = entity_indices.get(&rel.from_entity)?;
-                let to_idx = entity_indices.get(&rel.to_entity)?;
+                let (Some(from_idx), Some(to_idx)) = (
+                    entity_indices.get(&rel.from_entity),
+                    entity_indices.get(&rel.to_entity),
+                ) else {
+                    // Dangling endpoint — undrawable. Counted so referential
+                    // damage in the store surfaces instead of vanishing.
+                    report.dropped_dangling += 1;
+                    return None;
+                };
 
                 Some(GravitationalConnection {
                     id: rel.uuid.to_string(),
@@ -7222,7 +7350,9 @@ impl GraphMemory {
             stars,
             connections,
             total_entities: entities.len(),
+            // The TRUE total, not the rendered count — see the field docs.
             total_connections: relationships.len(),
+            filter: report,
             bounds: UniverseBounds {
                 min: Position3D {
                     x: min_x,
@@ -7342,8 +7472,71 @@ pub struct MemoryUniverse {
     pub stars: Vec<UniverseStar>,
     pub connections: Vec<GravitationalConnection>,
     pub total_entities: usize,
+    /// TRUE number of relationships in the graph, before any read filter.
+    ///
+    /// Deliberately not reduced by filtering: a viewer must be able to tell that
+    /// it is looking at a subset, and how big a subset. `connections.len()` is
+    /// what was rendered; this is what exists.
     pub total_connections: usize,
     pub bounds: UniverseBounds,
+    /// What the read filter removed, declared rather than silently applied.
+    pub filter: UniverseFilterReport,
+}
+
+/// The read-side filter applied to a universe projection.
+///
+/// `get_universe` renders the graph the ingest pipeline actually built, and on a
+/// dense corpus that is a near-clique of untyped co-occurrence edges. Filtering
+/// at READ is the honest place to fix that: the edges stay in the substrate
+/// where retrieval still uses them, and the viewer is told what was hidden
+/// instead of being shown a prettier graph than the one that exists.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct UniverseFilter {
+    /// Generic (`CoOccurs`/`RelatedTo`) edges below this effective strength are
+    /// not rendered. Typed edges are NEVER hidden by this — a typed relation is
+    /// an extraction result, and hiding it would misrepresent what the system
+    /// knows.
+    pub min_generic_strength: f32,
+    /// Hide a bare generic edge when a TYPED edge already joins the same pair.
+    /// The generic one adds no information a viewer can act on, and it is the
+    /// main source of doubled lines between the same two nodes.
+    pub hide_redundant_generic: bool,
+}
+
+impl Default for UniverseFilter {
+    /// The default hides only generic edges the system ALREADY considers dead:
+    /// `L1_PRUNE_THRESHOLD` is the strength at which L1 edges become eligible
+    /// for pruning, so anything below it is scheduled for deletion and is
+    /// nothing but noise on screen.
+    ///
+    /// This threshold is chosen because it is one the engine already acts on —
+    /// not tuned until the picture looked good. Raising it further is a product
+    /// decision that wants the tier census (`edge_tier_census`) as evidence
+    /// first; the handler exposes it as a query parameter so that decision can
+    /// be made from data rather than from a guess baked into a default.
+    fn default() -> Self {
+        Self {
+            min_generic_strength: crate::constants::L1_PRUNE_THRESHOLD,
+            hide_redundant_generic: true,
+        }
+    }
+}
+
+/// What a [`UniverseFilter`] actually removed, returned alongside the payload.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct UniverseFilterReport {
+    /// The strength floor that was applied to generic edges.
+    pub min_generic_strength: f32,
+    /// Whether redundant generic edges were hidden.
+    pub hide_redundant_generic: bool,
+    /// Generic edges hidden for falling below the strength floor.
+    pub hidden_weak_generic: usize,
+    /// Generic edges hidden because a typed edge already joined the pair.
+    pub hidden_redundant_generic: usize,
+    /// Edges dropped because an endpoint is missing from the entity set. Not a
+    /// filter decision — a dangling edge cannot be drawn — but reported so
+    /// referential damage in the store is visible rather than invisible.
+    pub dropped_dangling: usize,
 }
 
 /// Entity with hop distance from traversal origin
@@ -7370,6 +7563,41 @@ pub struct GraphStats {
     pub entity_count: usize,
     pub relationship_count: usize,
     pub episode_count: usize,
+}
+
+/// Per-tier edge population, from [`GraphMemory::edge_tier_census`].
+///
+/// The edge tiers carry real consequences — L3 gets a 4x retrieval trust
+/// multiplier over L1 (`EDGE_TIER_TRUST_*`) and a 2160-hour prune shield versus
+/// L1's 168 — but nothing reported how many edges were in each. "Is L3 empty, or
+/// is L1 overwhelmed?" was unanswerable, so every tier tuning decision was a
+/// guess. This is the measurement that makes those decisions evidence-based.
+///
+/// Mean effective (decay-aware) strength accompanies each count because a count
+/// alone cannot distinguish a healthy L3 from one full of edges that decayed to
+/// the floor but kept the tier — tier is a ratchet that decay never lowers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EdgeTierCensus {
+    /// Edges currently tagged `L1Working`.
+    pub l1_working: usize,
+    /// Edges currently tagged `L2Episodic`.
+    pub l2_episodic: usize,
+    /// Edges currently tagged `L3Semantic`.
+    pub l3_semantic: usize,
+    /// Mean `effective_strength()` of L1 edges; 0.0 when the tier is empty.
+    pub l1_mean_strength: f32,
+    /// Mean `effective_strength()` of L2 edges; 0.0 when the tier is empty.
+    pub l2_mean_strength: f32,
+    /// Mean `effective_strength()` of L3 edges; 0.0 when the tier is empty.
+    pub l3_mean_strength: f32,
+    /// Edges whose effective strength has fallen below their tier's prune
+    /// threshold but which have not yet been pruned. A large number here means
+    /// the tier labels the UI colours by are stale relative to real strength.
+    pub below_prune_threshold: usize,
+    /// Total edges scanned. Equals the sum of the three tier counts, and is
+    /// reported separately so a decode failure during the scan is visible rather
+    /// than silently shrinking the census.
+    pub total_scanned: usize,
 }
 
 /// Summary statistics from Forman-Ricci curvature computation
@@ -9119,6 +9347,183 @@ mod tests {
     // tests/brutal_stress_tests.rs::test_brutal_dense_graph now points back
     // to instead of asserting a specific pair count itself.
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Tier census + declared read filter
+    // ------------------------------------------------------------------
+
+    /// A relationship edge at an explicit strength, in the L1 birth tier.
+    fn universe_edge(
+        from: Uuid,
+        to: Uuid,
+        relation_type: RelationType,
+        strength: f32,
+    ) -> RelationshipEdge {
+        RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type,
+            strength,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L1Working,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+        }
+    }
+
+    /// A bare entity node for the universe fixtures.
+    fn universe_entity(name: &str) -> EntityNode {
+        EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+            selectivity: None,
+            fine_type: None,
+        }
+    }
+
+    /// Build a graph with two entities joined by a generic edge of the given
+    /// strength, plus a typed edge over the same pair when `also_typed`.
+    fn universe_fixture(
+        generic_strength: f32,
+        also_typed: bool,
+    ) -> (GraphMemory, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        let a = graph.add_entity(universe_entity("alpha")).unwrap();
+        let b = graph.add_entity(universe_entity("beta")).unwrap();
+
+        graph
+            .add_relationship(universe_edge(
+                a,
+                b,
+                RelationType::CoOccurs,
+                generic_strength,
+            ))
+            .unwrap();
+
+        if also_typed {
+            graph
+                .add_relationship(universe_edge(a, b, RelationType::Causes, 0.8))
+                .unwrap();
+        }
+
+        (graph, dir)
+    }
+
+    #[test]
+    fn tier_census_counts_edges_and_totals_agree() {
+        let (graph, _dir) = universe_fixture(0.9, true);
+        let census = graph.edge_tier_census().unwrap();
+
+        assert_eq!(census.total_scanned, 2, "both edges scanned");
+        assert_eq!(
+            census.l1_working + census.l2_episodic + census.l3_semantic,
+            census.total_scanned,
+            "tier counts must partition the scanned set — a mismatch means a \
+             decode failure was swallowed"
+        );
+        assert!(
+            census.l1_mean_strength > 0.0,
+            "a populated tier must report a mean strength"
+        );
+    }
+
+    #[test]
+    fn tier_census_reports_zero_means_for_empty_tiers() {
+        // Guards against dividing by an empty count.
+        let (graph, _dir) = universe_fixture(0.5, false);
+        let census = graph.edge_tier_census().unwrap();
+        assert_eq!(census.l3_semantic, 0);
+        assert_eq!(census.l3_mean_strength, 0.0);
+    }
+
+    #[test]
+    fn read_filter_hides_weak_generic_edges_and_declares_it() {
+        // Below L1_PRUNE_THRESHOLD: the engine already considers this edge dead.
+        let (graph, _dir) = universe_fixture(crate::constants::L1_PRUNE_THRESHOLD - 0.01, false);
+        let universe = graph.get_universe().unwrap();
+
+        assert!(
+            universe.connections.is_empty(),
+            "a generic edge below the prune threshold must not render"
+        );
+        assert_eq!(universe.filter.hidden_weak_generic, 1);
+        assert_eq!(
+            universe.total_connections, 1,
+            "total_connections reports what EXISTS, not what was drawn — a viewer \
+             must be able to tell it is seeing a subset"
+        );
+    }
+
+    #[test]
+    fn read_filter_never_hides_typed_edges() {
+        // A typed relation is an extraction result. Even at a strength far below
+        // the generic floor it must render, or the graph misrepresents what the
+        // system knows.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+        let a = graph.add_entity(universe_entity("cause")).unwrap();
+        let b = graph.add_entity(universe_entity("effect")).unwrap();
+        graph
+            .add_relationship(universe_edge(a, b, RelationType::Causes, 0.001))
+            .unwrap();
+
+        let universe = graph.get_universe().unwrap();
+        assert_eq!(universe.connections.len(), 1, "typed edge must survive");
+        assert_eq!(universe.filter.hidden_weak_generic, 0);
+    }
+
+    #[test]
+    fn read_filter_hides_generic_edge_redundant_with_a_typed_one() {
+        let (graph, _dir) = universe_fixture(0.9, true);
+        let universe = graph.get_universe().unwrap();
+
+        assert_eq!(
+            universe.connections.len(),
+            1,
+            "only the typed edge should be drawn for a pair that has both"
+        );
+        assert_eq!(universe.filter.hidden_redundant_generic, 1);
+        assert_eq!(universe.total_connections, 2);
+    }
+
+    #[test]
+    fn read_filter_can_be_disabled_to_show_the_raw_substrate() {
+        // The filter is a view, not a deletion: the edges are still there and a
+        // caller can ask for all of them.
+        let (graph, _dir) = universe_fixture(0.9, true);
+        let raw = graph
+            .get_universe_filtered(UniverseFilter {
+                min_generic_strength: 0.0,
+                hide_redundant_generic: false,
+            })
+            .unwrap();
+
+        assert_eq!(raw.connections.len(), 2, "both edges render unfiltered");
+        assert_eq!(raw.filter.hidden_redundant_generic, 0);
+        assert_eq!(raw.filter.hidden_weak_generic, 0);
+    }
 
     #[test]
     fn coactivation_strengthen_only_actually_increments_activation_and_strength() {

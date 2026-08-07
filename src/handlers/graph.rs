@@ -4,7 +4,7 @@
 //! entity management, and memory universe visualization.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::Json,
 };
 use serde::Deserialize;
@@ -14,10 +14,12 @@ use super::state::MultiUserMemoryManager;
 use super::types::MemoryEvent;
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::graph_memory::{
-    CurvatureStats, EntityNode, EpisodicNode, GraphStats, GraphTraversal, MemoryUniverse,
+    CurvatureStats, EdgeTierCensus, EntityNode, EpisodicNode, GraphStats, GraphTraversal,
+    MemoryUniverse, UniverseFilter,
 };
 use crate::memory::{Experience, MemoryId};
 use crate::validation;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 type AppState = Arc<MultiUserMemoryManager>;
@@ -34,6 +36,37 @@ pub async fn get_graph_stats(
         .map_err(AppError::Internal)?;
 
     Ok(Json(stats))
+}
+
+/// GET /api/graph/{user_id}/tier-census - Edge population per consolidation tier
+///
+/// Separate from `/stats` on purpose: `/stats` reads three atomic counters and
+/// is polled by the maintenance loop, while this performs a full O(E) scan of
+/// the relationships column family.
+///
+/// The edge tiers carry real weight — L3 gets a 4x retrieval trust multiplier
+/// over L1 and a 2160-hour prune shield versus 168 — but nothing reported how
+/// many edges sat in each, so "is L3 empty or is L1 overwhelmed?" could not be
+/// answered and every tier decision was a guess. Mean strength accompanies each
+/// count because tier is a ratchet that decay never lowers: a full L3 of edges
+/// that decayed to the floor looks identical to a healthy one by count alone.
+pub async fn get_edge_tier_census(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<EdgeTierCensus>, AppError> {
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
+
+    let graph = state.get_user_graph(&user_id).map_err(AppError::Internal)?;
+
+    let census = tokio::task::spawn_blocking(move || {
+        let graph_guard = graph.read();
+        graph_guard.edge_tier_census()
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    Ok(Json(census))
 }
 
 /// POST /api/graph/{user_id}/curvature - Compute Forman-Ricci curvature
@@ -211,14 +244,33 @@ pub async fn get_all_entities(
 pub async fn get_memory_universe(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<MemoryUniverse>, AppError> {
     validation::validate_user_id(&user_id).map_validation_err("user_id")?;
+
+    // Read filter, overridable per request. The default hides only generic edges
+    // already below the prune threshold; a caller exploring the raw substrate
+    // passes `?min_generic_strength=0&hide_redundant_generic=false` to see
+    // everything the ingest pipeline built. Whatever is applied is echoed back on
+    // `filter`, so a viewer is never shown a subset without being told.
+    let default_filter = UniverseFilter::default();
+    let filter = UniverseFilter {
+        min_generic_strength: params
+            .get("min_generic_strength")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(default_filter.min_generic_strength),
+        hide_redundant_generic: params
+            .get("hide_redundant_generic")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(default_filter.hide_redundant_generic),
+    };
 
     let graph = state.get_user_graph(&user_id).map_err(AppError::Internal)?;
 
     let universe = tokio::task::spawn_blocking(move || {
         let graph_guard = graph.read();
-        graph_guard.get_universe()
+        graph_guard.get_universe_filtered(filter)
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {e}")))?
