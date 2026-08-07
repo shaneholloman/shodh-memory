@@ -40,15 +40,22 @@ export function GraphStage({ reach }: { reach: Reachability }) {
 
   return (
     <section className="relative min-h-0 flex-1">
-      <div className="text-muted-foreground absolute left-4 top-3 z-10 text-[12px]">
-        How this connects
-      </div>
+      {/* "How this connects" names the graph of your own memory. With no canvas
+          mounted the only thing under it is the explainer diagram, which is a
+          different claim entirely — it shows how recall works in general, not
+          what connects in your data. A label describing absent content is worse
+          than no label, so it renders with the canvas. */}
+      {hasGraph ? (
+        <div className="text-muted-foreground absolute left-4 top-3 z-10 text-[12px]">
+          How this connects
+        </div>
+      ) : null}
 
       {/* Whatever the connection state, an empty stage is the moment someone is
           working out what this thing does — so the diagram shows in all three.
           A server problem is reported as a notice above it rather than
           replacing the only thing on screen that explains anything. */}
-      <div className="absolute inset-0 flex flex-col items-center justify-center gap-6">
+      <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 px-4">
         {reach.state !== "online" ? (
           <StageNotice
             title={
