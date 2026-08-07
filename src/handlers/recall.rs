@@ -1679,20 +1679,33 @@ pub async fn proactive_context(
             tokio::task::spawn_blocking(move || {
                 let memory_guard = memory_sys_for_reinforce.read();
 
-                // Reinforce helpful memories (importance boost)
+                // MomentumPolicy::Skip on both calls: Phase 3 above already drove
+                // each of these memories' momentum EMA with its own graded,
+                // confidence-weighted signal, and `helpful_ids` / `misleading_ids`
+                // are just the classification of that same evidence. Letting
+                // reinforce_recall apply momentum again would charge one
+                // observation twice — and the second charge is a blunt ±1.0 at
+                // confidence 1.0 that swamps the graded value and inflates
+                // signal_count, which raises effective_inertia and makes the
+                // memory harder to correct later. What this path still wants from
+                // reinforce_recall is everything else it does: importance,
+                // coactivation, and entity-edge Hebbian updates.
                 if !helpful_ids.is_empty() {
-                    if let Err(e) = memory_guard
-                        .reinforce_recall(&helpful_ids, crate::memory::RetrievalOutcome::Helpful)
-                    {
+                    if let Err(e) = memory_guard.reinforce_recall_with_momentum(
+                        &helpful_ids,
+                        crate::memory::RetrievalOutcome::Helpful,
+                        crate::memory::MomentumPolicy::Skip,
+                    ) {
                         tracing::warn!("Failed to reinforce helpful memories: {}", e);
                     }
                 }
 
                 // Weaken misleading memories (importance decay)
                 if !misleading_ids.is_empty() {
-                    if let Err(e) = memory_guard.reinforce_recall(
+                    if let Err(e) = memory_guard.reinforce_recall_with_momentum(
                         &misleading_ids,
                         crate::memory::RetrievalOutcome::Misleading,
+                        crate::memory::MomentumPolicy::Skip,
                     ) {
                         tracing::warn!("Failed to weaken misleading memories: {}", e);
                     }
