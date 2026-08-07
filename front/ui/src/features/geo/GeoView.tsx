@@ -29,6 +29,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
   if (reach.state !== "online") {
     return (
       <EmptyState
+        size="page"
         title="Not connected"
         body="The map draws from a recall result, which needs the memory server running."
       />
@@ -38,6 +39,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
   if (profile === null) {
     return (
       <EmptyState
+        size="page"
         title="No profile to search"
         body="Geo plots the results of a recall, and recall needs a profile that already exists."
       />
@@ -47,6 +49,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
   if (!query.trim()) {
     return (
       <EmptyState
+        size="page"
         title="Search to place results on the map"
         body="Geo shows where the current recall result happened. Run a search and any memory carrying coordinates appears here."
       />
@@ -56,6 +59,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
   if (error) {
     return (
       <EmptyState
+        size="page"
         title="Recall failed"
         body="The map plots a recall result, and that query did not complete."
       />
@@ -63,12 +67,13 @@ export function GeoView({ reach }: { reach: Reachability }) {
   }
 
   if (isFetching && !data) {
-    return <EmptyState title="Searching" body="Placing results as they arrive." />;
+    return <EmptyState size="page" title="Searching" body="Placing results as they arrive." />;
   }
 
   if (memories.length === 0) {
     return (
       <EmptyState
+        size="page"
         title="Nothing surfaced"
         body="No memory in this profile activated strongly enough for that cue, so there is nothing to place."
       />
@@ -81,6 +86,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
       // sentence says which data would behave differently, so it is actionable
       // rather than a shrug.
       <EmptyState
+        size="page"
         title="No coordinates in these results"
         body={`All ${memories.length} results came back without coordinates. A memory only carries them when whatever wrote it supplied them — imported corpora like GDELT do, session captures do not.`}
       />
@@ -88,7 +94,13 @@ export function GeoView({ reach }: { reach: Reachability }) {
   }
 
   return (
-    <section className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+    // `h-full`, not `flex-1`. GraphStage can use `flex-1` because RecallView
+    // wraps it in a flex row; this view is a direct child of `main`, which is
+    // not a flex container, so `flex-1` resolves to nothing and the section
+    // collapses to the height of its content — which is zero, since the map
+    // and every overlay inside it are absolutely positioned. That renders a
+    // blank destination with no error anywhere.
+    <section className="relative h-full min-h-0 min-w-0 overflow-hidden">
       <div aria-hidden="true" className="graticule pointer-events-none absolute inset-0" />
 
       <GeoMap memories={memories} types={types} />

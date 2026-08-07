@@ -101,9 +101,14 @@ export function GraphStage({ reach }: { reach: Reachability }) {
                 causal edges across a result set is a finding about the corpus,
                 not a broken canvas, and staying silent about it invites the
                 opposite reading. */}
+            {/* "lineage edges", not "causal edges". Every edge here comes from
+                the causal lineage graph, but only some classify as the bright
+                causal class (Caused, TriggeredBy) — InformedBy and ResolvedBy
+                draw cool. Calling all twelve "causal" while two thirds render
+                in the typed colour reads as a bug in the legend. */}
             {edgeCount > 0
-              ? `${edgeCount} causal ${edgeCount === 1 ? "edge" : "edges"} · scroll to zoom · drag to pan · click a node to inspect`
-              : "No causal edges connect these results · scroll to zoom · drag to pan · click a node to inspect"}
+              ? `${edgeCount} lineage ${edgeCount === 1 ? "edge" : "edges"} · scroll to zoom · drag to pan · click a node to inspect`
+              : "No lineage edges connect these results · scroll to zoom · drag to pan · click a node to inspect"}
           </span>
         </div>
       ) : null}
