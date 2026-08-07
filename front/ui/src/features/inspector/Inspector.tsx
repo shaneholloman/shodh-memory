@@ -4,6 +4,8 @@ import { useSession } from "@/stores/session";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { relName } from "@/features/recall/relation";
+import { recallKey } from "@/features/recall/useRecall";
 
 /**
  * The Inspector — the single object-detail surface.
@@ -55,7 +57,7 @@ export function Inspector() {
   // queryFn throws when nothing else has populated it — which is exactly the
   // first-paint case here, before any search has run. A cache read has no such
   // failure mode and cannot issue a request by accident.
-  const data = useQueryClient().getQueryData<RecallResponse>(["recall", profile, query]);
+  const data = useQueryClient().getQueryData<RecallResponse>(recallKey(profile, query));
 
   const memory = data?.memories.find((m) => m.id === selectedId);
 
@@ -145,8 +147,21 @@ export function Inspector() {
                         disabled={!other}
                         className="hover:bg-accent/60 focus-visible:ring-ring rounded px-2 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none disabled:opacity-50"
                       >
+                        {/* `relation` arrives as a Rust Debug rendering —
+                            `CausedBy`, or `Custom("depends on")` with the
+                            quotes on the wire (src/handlers/recall.rs:985).
+                            `relName` is the only thing standing between that
+                            and Rust syntax on screen.
+
+                            The confidence beside it is the server's own, and
+                            it is the point: an edge without a strength is an
+                            assertion, an edge with one is evidence. */}
                         <span className="text-primary mono text-[10px]">
-                          {outgoing ? "→" : "←"} {e.relation}
+                          {outgoing ? "→" : "←"} {relName(e.relation)}
+                          <span className="text-muted-foreground/70">
+                            {" "}
+                            {e.confidence.toFixed(2)}
+                          </span>
                         </span>
                         <span className="text-muted-foreground mt-0.5 line-clamp-2 block text-[11px] leading-relaxed">
                           {other?.experience.content ?? "Outside this result set"}
