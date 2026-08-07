@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { ScoreAttribution } from "@/lib/api";
+import { Badge } from "@/components/ui/badge";
 
 /**
  * Why this memory surfaced.
@@ -45,14 +46,29 @@ const FACTORS: { key: keyof ScoreAttribution; label: string; hint: string }[] = 
 const NEUTRAL_EPSILON = 0.005;
 const isNeutral = (v: number) => Math.abs(v - 1) < NEUTRAL_EPSILON;
 
+/**
+ * Lift/reduce is data, not chrome or an alarm — a multiplier below 1 is
+ * ordinary attenuation (recency decay, interference), not a fault. Coding it
+ * in `--primary`/`--destructive` would be exactly the collision DIRECTION.md
+ * warns about: those two are reserved for chrome-focus and real alarms, and
+ * routine dampened factors flashing destructive-red would train people to
+ * ignore red in the one panel where an actual anomaly also has to read as
+ * one. Direction is carried by an arrow glyph plus weight instead of hue.
+ */
 function Row({ label, hint, value }: { label: string; hint: string; value: number }) {
   const lifts = value > 1;
   return (
     <div className="flex items-baseline justify-between gap-3 py-1" title={hint}>
       <span className="text-muted-foreground truncate text-[11px]">{label}</span>
       <span
-        className={cn("mono shrink-0 text-[11px]", lifts ? "text-primary" : "text-destructive")}
+        className={cn(
+          "mono flex shrink-0 items-baseline gap-1 text-[11px]",
+          lifts ? "text-foreground" : "text-muted-foreground",
+        )}
       >
+        <span aria-hidden="true" className="text-[9px]">
+          {lifts ? "↑" : "↓"}
+        </span>
         ×{value.toFixed(2)}
       </span>
     </div>
@@ -75,12 +91,9 @@ export function ScoreBreakdown({ attr }: { attr: ScoreAttribution }) {
       {sources.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1">
           {sources.map((s) => (
-            <span
-              key={s}
-              className="border-border text-muted-foreground mono rounded border px-1.5 py-0.5 text-[10px]"
-            >
+            <Badge key={s} className="mono">
               {s}
-            </span>
+            </Badge>
           ))}
         </div>
       ) : null}
@@ -125,9 +138,13 @@ export function ScoreBreakdown({ attr }: { attr: ScoreAttribution }) {
         ) : null}
       </div>
 
+      {/* Weight carries the emphasis, not the accent — this is the query's
+          own retrieval math, not a focus target or a call to action. */}
       <div className="border-border mt-3 flex items-baseline justify-between gap-3 border-t pt-2">
-        <span className="text-[11px] font-medium">Final score</span>
-        <span className="mono text-primary text-[11px]">{attr.final_score.toFixed(4)}</span>
+        <span className="text-[11px] font-semibold">Final score</span>
+        <span className="mono text-foreground text-[11px] font-semibold">
+          {attr.final_score.toFixed(4)}
+        </span>
       </div>
     </section>
   );
