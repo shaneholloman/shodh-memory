@@ -34,13 +34,19 @@
 /*
   The token layer IS the design.
 
-  Watermelon's 260 components consume shadcn's semantic variable names
-  (--background, --primary, --border, ...). Defining those names with Linear's
-  values is what makes every component we pull from the registry land already
-  looking like Linear, instead of looking like default shadcn and needing to be
+  Watermelon's components consume shadcn's semantic variable names
+  (--background, --primary, --border, ...). Defining those names here is what
+  makes every component we pull from the registry land already looking like
+  this product, instead of looking like default shadcn and needing to be
   restyled one at a time. Change a value here, not in a component.
 
-  Linear's discipline, encoded:
+  This is measured, not assumed. Gridline's chrome — sidebar, navbar, shell,
+  nav items — uses 148 semantic utilities, 0 raw hex, and 0 hardcoded palette
+  classes. Every literal hue in that dashboard (emerald/violet/amber) sits in
+  its two *content* views, which are replaced wholesale. So the accent below
+  propagates through the ported chrome on its own.
+
+  The discipline, encoded:
     - Neutral near-black, never blue-black. Depth is four close greys.
     - Exactly one accent. It marks focus, the primary action, active nav —
       nothing else. A second accent makes both mean nothing.
@@ -56,8 +62,16 @@
   --popover: #141516;
   --popover-foreground: #f7f8f8;
 
-  --primary: #5e6ad2;
-  --primary-foreground: #ffffff;
+  /* The accent is taken from the shodh mark (src/assets/shodh-mark.png), a
+     low-poly elephant in reds and oranges, rather than picked. Its tones run
+     ~#e8342a to #f4622e. The brighter end is the only one that works as small
+     text: #f4622e on #08090a is ~5:1 (passes AA), while the mark's #e8342a is
+     ~3.9:1 and fails. */
+  --primary: #f4622e;
+  /* Near-black, NOT white. White on #f4622e is ~3.1:1 and fails AA — the
+     primary button would ship unreadable. Near-black on it is ~6:1. This pairs
+     with --primary and must be changed with it. */
+  --primary-foreground: #08090a;
 
   --secondary: #141516;
   --secondary-foreground: #f7f8f8;
@@ -71,42 +85,63 @@
   --accent: #1a1b1e;
   --accent-foreground: #f7f8f8;
 
-  --destructive: #eb5757;
+  /* Pink-red, not orange-red. With a warm accent, "alarm" has to be separable
+     from "chrome" by hue and not only by position — see the alarm/accent note
+     under the data hues below. */
+  --destructive: #f2555a;
   --destructive-foreground: #ffffff;
+
+  /* Amber, for "worth a look" as distinct from "wrong". Not part of shadcn's
+     set; the anomalies view needs a middle rung between accent and destructive
+     and inventing one here is better than reaching for a palette class. */
+  --warn: #e5b567;
 
   --border: #1c1d1f;
   --input: #26282c;
-  --ring: #5e6ad2;
+  --ring: #f4622e;
 
   --radius: 0.5rem;
 
   /* Data hues. Used by the knowledge graph and the readouts, never by chrome.
-     Chosen to stay legible on #08090a without competing with the accent. */
+     Chosen to stay legible on #08090a without competing with the accent.
+
+     `person` was #f2994a and `chart-5` #e0a355 — both orange, both now within
+     touching distance of the accent. A category hue that reads as "selected"
+     is worse than a duller category hue, so person moved to rose and the fifth
+     to teal. Nothing in the 10–40° band except the accent itself. */
   --chart-1: #a599ff; /* technology */
   --chart-2: #4ea7fc; /* org        */
   --chart-3: #4cb782; /* location   */
-  --chart-4: #f2994a; /* person     */
-  --chart-5: #e0a355;
+  --chart-4: #ec6f9e; /* person     */
+  --chart-5: #39b8b0;
 
   --sidebar: #0f1011;
   --sidebar-foreground: #f7f8f8;
-  --sidebar-primary: #5e6ad2;
-  --sidebar-primary-foreground: #ffffff;
+  --sidebar-primary: #f4622e;
+  --sidebar-primary-foreground: #08090a;
   --sidebar-accent: #1a1b1e;
   --sidebar-accent-foreground: #f7f8f8;
   --sidebar-border: #1c1d1f;
-  --sidebar-ring: #5e6ad2;
+  --sidebar-ring: #f4622e;
 }
 
 /* Graph-only tokens. The canvas is not a Tailwind surface — d3 reads these
    through getComputedStyle, so they live as plain custom properties and are
-   deliberately outside the shadcn set. */
+   deliberately outside the shadcn set.
+
+   The accent-vs-alarm collision is settled here, because this is the only
+   place both appear on one surface. `node-active` means "the current selection
+   reached this" — that is focus, so it takes the accent. Anomalous means "this
+   deviates from baseline" — that is an alarm, so it takes --destructive, which
+   is deliberately pink-red rather than orange-red. If those two ever converge,
+   the alarm stops reading as one, which is the failure mode worth guarding. */
 :root {
   --node-technology: #a599ff;
   --node-org: #4ea7fc;
   --node-location: #4cb782;
-  --node-person: #f2994a;
-  --node-active: #f2994a;
+  --node-person: #ec6f9e;
+  --node-active: #f4622e;
+  --node-anomalous: #f2555a;
   --edge-strong: #4a4d55;
   --edge-medium: #35373d;
   --edge-weak: #26282c;
@@ -130,6 +165,7 @@
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-warn: var(--warn);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
