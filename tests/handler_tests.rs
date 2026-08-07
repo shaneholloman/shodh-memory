@@ -410,6 +410,108 @@ async fn remember_basic() {
     );
 }
 
+/// END-TO-END NER EMISSION — `POST /api/remember` → `GET /api/memory/{id}`.
+///
+/// Pins the whole remember path in one assertion chain: GLiNER types the
+/// content, the `LOC` records survive into the stored `Experience`, and the
+/// gazetteer resolves them into `toponyms`. No layer below this had coverage of
+/// the production typer through the HTTP handler — which is why a report of
+/// `ner_entities: []` could not be answered by running the suite.
+///
+/// The GLiNER assets are a hard requirement rather than a skip condition: a
+/// test that returns early when the model is absent cannot fail, so it cannot
+/// answer the question either. CI provisions `SHODH_GLINER_MODEL_PATH` and
+/// already refuses to run without it.
+#[tokio::test]
+async fn remember_persists_ner_entities_end_to_end() {
+    use shodh_memory::embeddings::gliner::GlinerConfig;
+
+    let gliner = GlinerConfig::from_env();
+    assert!(
+        gliner.assets_present(),
+        "GLiNER assets missing at {:?} — this test pins the PRODUCTION remember path and must \
+         not silently pass on the rule-based fallback. Set SHODH_GLINER_MODEL_PATH.",
+        gliner.model_path
+    );
+
+    let h = Harness::new();
+    let content = "The annual conference was held in Baltimore before moving to Norfolk.";
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({ "user_id": "ner-emission-user", "content": content }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+
+    let memory_id = body
+        .get("id")
+        .or_else(|| body.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("remember response has no id: {body}"))
+        .to_string();
+
+    let (status, fetched) = json_of(
+        h.app(),
+        authed_get(&format!(
+            "/api/memory/{memory_id}?user_id=ner-emission-user"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "get_memory failed: {fetched}");
+
+    // `MemoryWithHierarchy` flattens the memory, so `experience` sits at the
+    // response root. `toponyms` is NOT under `experience`: it is `#[serde(skip)]`
+    // there and carried at the `MemoryFlat` tail, so it surfaces at the root too.
+    let ner_entities = fetched
+        .pointer("/experience/ner_entities")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("no experience.ner_entities in response: {fetched}"));
+
+    assert!(
+        !ner_entities.is_empty(),
+        "remember stored ZERO ner_entities for {content:?} while GLiNER was loaded — emission \
+         is broken. The gazetteer sees no LOC records and every downstream consumer falls back \
+         to the untyped keyword path. Full memory: {fetched}"
+    );
+
+    let locations: Vec<&str> = ner_entities
+        .iter()
+        .filter(|e| e.get("entity_type").and_then(|t| t.as_str()) == Some("LOC"))
+        .filter_map(|e| e.get("text").and_then(|t| t.as_str()))
+        .collect();
+    for expected in ["Baltimore", "Norfolk"] {
+        assert!(
+            locations.iter().any(|t| t.eq_ignore_ascii_case(expected)),
+            "expected a LOC record for {expected:?}; got LOC records {locations:?} out of \
+             {ner_entities:?}"
+        );
+    }
+
+    // The gazetteer is the first consumer that reads ONLY `LOC` records, which
+    // makes it the sharpest downstream detector of an emission break: zero LOC
+    // records and it resolves nothing, indistinguishable from a memory that
+    // names no places. Pin the resolution, not just the entity.
+    let toponyms = fetched
+        .pointer("/toponyms")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("no toponyms in response: {fetched}"));
+    let resolved: Vec<&str> = toponyms
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .collect();
+    for expected in ["Baltimore", "Norfolk"] {
+        assert!(
+            resolved.iter().any(|n| n.eq_ignore_ascii_case(expected)),
+            "NER emitted a LOC record for {expected:?} but the gazetteer resolved {resolved:?} — \
+             the toponym half of the remember path is broken"
+        );
+    }
+}
+
 #[tokio::test]
 async fn remember_with_tags_and_type() {
     let h = Harness::new();
