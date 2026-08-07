@@ -12,6 +12,7 @@ import { GraphView } from "@/features/graph/GraphView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
 import { ChatView } from "@/features/chat/ChatView";
+import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
 import { ProvidersView } from "@/features/providers/ProvidersView";
 import { Placeholder } from "@/components/layout/Placeholder";
 import type { Reachability } from "@/lib/api";
@@ -88,6 +89,13 @@ function Shell({ reach }: { reach: Reachability }) {
       </main>
 
       {showInspector ? <Inspector /> : null}
+
+      {/* Outside <Routes> deliberately: the conversation is available from
+          every destination, so it must not unmount when the route changes —
+          unmounting it mid-stream would tear down the panel showing the answer.
+          It portals to document.body and returns null on /chat, which is the
+          conversation at full width already. */}
+      <ConversationOverlay seat={seat} />
     </div>
   );
 }
