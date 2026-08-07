@@ -150,12 +150,19 @@ export function GraphCanvas({
 
   /** Distinct `memory_type` values, sorted, each mapped to a chart hue.
    *
-   *  There is no MemoryType enum on the Rust side — `memory_type` is a bare
-   *  `Option<String>` (src/handlers/types.rs:258) whose values are whatever the
-   *  writer supplied. A hardcoded type→colour table would therefore be an
-   *  invented ontology that silently mis-colours anything outside it. Sorting
-   *  the values actually present and assigning in order is deterministic (the
-   *  same corpus always yields the same legend) without asserting a closed set. */
+   *  The wire type is `Option<String>`, but the values are NOT free-form: recall
+   *  serialises `format!("{:?}", experience_type)` (src/handlers/recall.rs:822),
+   *  so they are the Debug renderings of a closed enum, Title-Cased —
+   *  `Observation`, `Decision`, `Learning`, `Error`, `Discovery`, `Pattern`,
+   *  `Context`, `Task`, `CodeEdit`, `FileAccess`, `Search`, `Command`,
+   *  `Conversation`, `Intention` (the set `/api/remember` validates against).
+   *
+   *  Hues are still assigned from the values actually PRESENT rather than from
+   *  that list. Fourteen categories against five chart hues would collide
+   *  arbitrarily, and a legend naming eleven types a corpus does not contain
+   *  explains nothing. Sorting what is present is deterministic — the same
+   *  result set always yields the same legend — and degrades safely if the enum
+   *  gains a variant. */
   const types = useMemo(() => {
     const seen = new Set<string>();
     for (const m of memories) if (m.experience.memory_type) seen.add(m.experience.memory_type);

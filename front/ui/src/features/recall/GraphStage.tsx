@@ -78,10 +78,11 @@ export function GraphStage({ reach }: { reach: Reachability }) {
         >
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
             {/* The legend is the memory types actually present, in the order
-                the canvas assigns hues in. `memory_type` is a free-form string
-                server-side (src/handlers/types.rs:258) with no enum behind it,
-                so a fixed legend would be an invented ontology — it would name
-                categories this corpus may not contain and omit ones it does. */}
+                the canvas assigns hues in. The server's set is closed — 14
+                Debug-rendered enum variants — but a fixed legend would name
+                eleven categories this result set does not contain, and 14
+                categories cannot map onto 5 chart hues without arbitrary
+                collisions. Listing what is present keeps the key honest. */}
             {types.map((t, i) => (
               <span
                 key={t}
