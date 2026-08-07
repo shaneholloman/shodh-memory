@@ -11,6 +11,8 @@ import { useSession } from "@/stores/session";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Composer } from "./Composer";
+import { EgressBadge } from "./EgressBadge";
+import { costIsReal, useBillingLookup } from "./useBilling";
 import { EvidencePanel } from "./EvidencePanel";
 import { MessageList } from "./MessageList";
 import { ModelPicker } from "./ModelPicker";
@@ -150,8 +152,15 @@ export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReach
     setActive(id);
   };
 
+  const lookupModel = useBillingLookup(seatUp);
+  const activeModelInfo = lookupModel(convo?.model ?? activeSummary?.model ?? null);
+
   const totals = convo?.totals ?? activeSummary?.usage ?? null;
-  const totalCost = totals ? formatCost(totals.cost_total) : null;
+  // Under a subscription, pi's cost numbers are list-price estimates of
+  // flat-rate usage — a dollar figure would imply a bill that does not exist.
+  // Tokens still show; only the currency is withheld.
+  const totalCost =
+    totals && costIsReal(activeModelInfo) ? formatCost(totals.cost_total) : null;
 
   const sessionsColumn = (
     <SessionList sessions={sessions} activeId={activeId} onOpen={openConversation} onNew={startNew} />
@@ -193,11 +202,17 @@ export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReach
           {totals && totals.total_tokens > 0 ? (
             <span
               className="text-muted-foreground mono hidden shrink-0 text-[10px] sm:inline"
-              title="Conversation totals, accumulated from per-message usage"
+              title={
+                activeModelInfo?.billing === "subscription"
+                  ? "Conversation totals. Usage counts against your plan; tokens are not billed individually."
+                  : "Conversation totals, accumulated from per-message usage"
+              }
             >
               {formatTokens(totals.total_tokens)} tok{totalCost ? ` · ${totalCost}` : ""}
             </span>
           ) : null}
+
+          <EgressBadge info={activeModelInfo} />
 
           {activeId ? (
             <ModelPicker

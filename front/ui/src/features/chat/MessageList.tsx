@@ -4,6 +4,7 @@ import type { ModelRef } from "@/lib/seat/types";
 import { formatCost, formatTokens } from "@/lib/format";
 import { type ChatTurn, useChat } from "@/stores/chat";
 import { Markdown } from "./Markdown";
+import { costIsReal, useBillingLookup } from "./useBilling";
 import {
   ErrorBlock,
   HarnessAppliedBlock,
@@ -30,8 +31,12 @@ function shortId(memoryId: string): string {
 }
 
 function UsageFooter({ turn }: { turn: ChatTurn }) {
+  // Per-turn, per-model: a conversation can mix a metered turn with a local
+  // one after a mid-conversation swap, and each row must say what ITS tokens
+  // meant — that is the whole point of storing the model ref on the usage.
+  const lookupModel = useBillingLookup(true);
   if (!turn.usage) return null;
-  const cost = formatCost(turn.usage.cost);
+  const cost = costIsReal(lookupModel(turn.usage.model)) ? formatCost(turn.usage.cost) : null;
   return (
     <p className="text-muted-foreground/70 mono text-[10px]">
       {turn.usage.model.name}
