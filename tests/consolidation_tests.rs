@@ -322,9 +322,23 @@ fn every_live_tier_maps_to_a_distinct_graph_multiplier() {
 // declarative corpus and a pattern-shaped one produced facts = 0.
 //
 // A passing test that exercises nothing is worse than an absent one, so it was
-// removed rather than left to look like coverage. Whatever gates fact extraction
-// in-process needs to be isolated first — it is upstream of the invalidation
-// work and predates it.
+// removed rather than left to look like coverage.
+//
+// The cause was then isolated, and it is NOT any of the obvious gates:
+//   * `fact_extraction_needed` starts `true`, so the heavy cycle does run it.
+//   * The incremental watermark is NOT the filter — instrumenting
+//     `memory/mod.rs` showed `all=2, new_since_watermark=2,
+//     watermark=1970-01-01`, i.e. both aged memories reach the consolidator.
+//   * Thresholds are not the filter either. Calling
+//     `SemanticConsolidator::with_thresholds(..)` directly on the same two
+//     memories yields `facts=0` at (min_support 2, min_age 7), (1, 7) AND
+//     (1, 0).
+//
+// So the candidate EXTRACTOR produces no candidates for plain declarative
+// sentences — consolidation never gets anything to cluster. An end-to-end fact
+// test therefore needs corpus text the extractor actually recognises, and
+// establishing what that is belongs to the fact-extraction layer, not to the
+// invalidation work.
 
 #[test]
 fn test_tier_full_cycle() {
