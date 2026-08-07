@@ -143,7 +143,11 @@ export type SeatEvent =
   | { type: "agent_end" }
   | { type: "error"; message: string };
 
-/** seat/src/models-registry.ts `ModelInfo` */
+/** seat/src/models-registry.ts `ModelInfo`. `billing` is what a token MEANS
+ *  under the model's effective credential — the seat computes it from pi's
+ *  auth resolution, the UI only ever displays it:
+ *  "none" local (nothing leaves the machine) · "subscription" flat-rate plan
+ *  (pi's cost numbers do not describe a bill) · "metered" API key (they do). */
 export interface SeatModelInfo {
   provider: string;
   id: string;
@@ -152,6 +156,7 @@ export interface SeatModelInfo {
   max_tokens: number;
   reasoning: boolean;
   local: boolean;
+  billing: "none" | "subscription" | "metered";
 }
 
 /** seat/src/models-registry.ts `ProviderInfo` */
@@ -163,9 +168,40 @@ export interface ProviderInfo {
   auth_type: "api_key" | "oauth" | null;
   stored: boolean;
   accepts_api_key: boolean;
+  oauth_available: boolean;
+  oauth_subscription: boolean;
+  oauth_label: string | null;
   model_count: number;
   local: boolean;
 }
+
+/** OAuth-bridge stream frames — seat/src/server.ts handleOAuthStart. */
+export type OAuthFlowEvent =
+  | {
+      kind: "notify";
+      event:
+        | { type: "info"; message: string; links?: { url: string; label?: string }[] }
+        | { type: "auth_url"; url: string; instructions?: string }
+        | {
+            type: "device_code";
+            userCode: string;
+            verificationUri: string;
+            intervalSeconds?: number;
+            expiresInSeconds?: number;
+          }
+        | { type: "progress"; message: string };
+    }
+  | {
+      kind: "prompt";
+      prompt_id: string;
+      type: "text" | "secret" | "select" | "manual_code";
+      message: string;
+      placeholder?: string;
+      options?: { id: string; label: string; description?: string }[];
+    }
+  | { kind: "prompt_cancelled"; prompt_id: string }
+  | { kind: "complete"; provider: ProviderInfo | null }
+  | { kind: "error"; message: string };
 
 /** seat/src/store.ts `UsageTotals` — accumulated per conversation. */
 export interface UsageTotals {

@@ -13,6 +13,7 @@ import type {
   ConversationSummary,
   LedgerEntryView,
   ModelRef,
+  OAuthFlowEvent,
   ProviderInfo,
   SeatEvent,
   SeatHealthResponse,
@@ -133,28 +134,26 @@ export function revertLedgerEvent(eventId: string) {
 }
 
 /**
- * POST a message and stream the SeatEvents back.
+ * SSE over fetch, by hand: frames separated by a blank line, `event:`/`data:`
+ * fields, comments (`: ping` heartbeats) and `retry:` ignored — the exact
+ * grammar seat/src/server.ts emits. ~30 lines beats a dependency, and
+ * `EventSource` cannot POST anyway.
  *
- * `EventSource` cannot POST, so this parses the SSE frames off a fetch body
- * by hand: frames separated by a blank line, `event:`/`data:` fields,
- * comment lines (`: ping` heartbeats) and `retry:` ignored — the exact
- * grammar seat/src/server.ts emits. ~30 lines beats a dependency.
- *
- * Returns when the stream closes. Throws NetworkError if the connection
- * fails before or during the stream; events already delivered stand.
+ * Resolves when the stream closes. Throws NetworkError if the connection
+ * fails before or during the stream; frames already delivered stand.
  */
-export async function streamMessage(
-  conversationId: string,
-  text: string,
-  onEvent: (event: SeatEvent) => void,
+async function streamSse(
+  path: string,
+  body: unknown,
+  onFrame: (eventName: string, data: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   let res: Response;
   try {
-    res = await fetch(`/seat/v1/conversations/${encodeURIComponent(conversationId)}/messages`, {
+    res = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
       signal,
     });
   } catch (cause) {
@@ -170,14 +169,13 @@ export async function streamMessage(
   let buffer = "";
 
   const dispatch = (frame: string): void => {
+    let eventName = "";
     let data = "";
     for (const line of frame.split("\n")) {
-      if (line.startsWith("data:")) data += line.slice(5).trimStart();
-      // `event:` is redundant — the payload carries its own `type` — and
-      // comments / `retry:` carry nothing.
+      if (line.startsWith("event:")) eventName = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trimStart();
     }
-    if (!data) return;
-    onEvent(JSON.parse(data) as SeatEvent);
+    if (data) onFrame(eventName, data);
   };
 
   for (;;) {
@@ -199,4 +197,68 @@ export async function streamMessage(
     }
   }
   if (buffer.trim()) dispatch(buffer);
+}
+
+/** POST a message and stream the SeatEvents back (payloads carry their own
+ *  `type`, so the frame name is redundant here). */
+export function streamMessage(
+  conversationId: string,
+  text: string,
+  onEvent: (event: SeatEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamSse(
+    `/seat/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+    { text },
+    (_eventName, data) => onEvent(JSON.parse(data) as SeatEvent),
+    signal,
+  );
+}
+
+/**
+ * Run a provider's browser-OAuth login through the seat bridge
+ * (seat/src/server.ts handleOAuthStart) and surface each interaction.
+ * The credential never reaches this client — only status frames do.
+ */
+export function startOAuthLogin(
+  providerId: string,
+  onEvent: (event: OAuthFlowEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamSse(
+    `/seat/v1/providers/${encodeURIComponent(providerId)}/oauth/start`,
+    {},
+    (eventName, data) => {
+      const payload = JSON.parse(data) as Record<string, unknown>;
+      switch (eventName) {
+        case "oauth_notify":
+          onEvent({ kind: "notify", event: payload as never });
+          break;
+        case "oauth_prompt":
+          onEvent({ kind: "prompt", ...(payload as object) } as OAuthFlowEvent);
+          break;
+        case "oauth_prompt_cancelled":
+          onEvent({ kind: "prompt_cancelled", prompt_id: String(payload.prompt_id) });
+          break;
+        case "oauth_complete":
+          onEvent({ kind: "complete", provider: (payload.provider ?? null) as never });
+          break;
+        case "oauth_error":
+          onEvent({ kind: "error", message: String(payload.message ?? "Login failed") });
+          break;
+        default:
+          break;
+      }
+    },
+    signal,
+  );
+}
+
+export async function sendOAuthInput(providerId: string, promptId: string, value: string): Promise<void> {
+  const res = await fetch(`/seat/v1/providers/${encodeURIComponent(providerId)}/oauth/input`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt_id: promptId, value }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ""));
 }

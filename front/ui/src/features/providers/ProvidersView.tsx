@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { OAuthFlow } from "./OAuthFlow";
 
 /**
  * Sign in, stated precisely: provider credentials for the model endpoints the
@@ -37,7 +38,11 @@ function StatusDot({ configured }: { configured: boolean }) {
 
 function ProviderRow({ provider }: { provider: ProviderInfo }) {
   const queryClient = useQueryClient();
-  const [editing, setEditing] = useState(false);
+  // Three auth shapes, three actions: an API-key form, a browser OAuth
+  // flow, or nothing at all for keyless local endpoints. Never one field.
+  const [mode, setMode] = useState<"idle" | "key" | "oauth">("idle");
+  const editing = mode === "key";
+  const setEditing = (open: boolean) => setMode(open ? "key" : "idle");
   const [draft, setDraft] = useState("");
 
   const patchCache = (updated: ProviderInfo) => {
@@ -78,11 +83,27 @@ function ProviderRow({ provider }: { provider: ProviderInfo }) {
         >
           {provider.configured ? (provider.stored ? "stored key" : (provider.source ?? "configured")) : "not configured"}
         </span>
+        {provider.oauth_available ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setMode(mode === "oauth" ? "idle" : "oauth")}
+            aria-expanded={mode === "oauth"}
+            aria-label={`Sign in to ${provider.name}${provider.oauth_label ? ` (${provider.oauth_label})` : ""}`}
+            title={
+              provider.oauth_subscription
+                ? `Flat-rate plan sign-in${provider.oauth_label ? `: ${provider.oauth_label}` : ""}`
+                : undefined
+            }
+          >
+            Sign in{provider.oauth_subscription ? " · plan" : ""}
+          </Button>
+        ) : null}
         {provider.accepts_api_key ? (
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => setEditing((v) => !v)}
+            onClick={() => setEditing(!editing)}
             aria-expanded={editing}
             aria-label={`${provider.stored ? "Replace" : "Set"} API key for ${provider.name}`}
           >
@@ -133,6 +154,16 @@ function ProviderRow({ provider }: { provider: ProviderInfo }) {
         <p className="text-destructive mt-1 pl-4 text-[11px]">
           {save.error instanceof Error ? save.error.message : "Could not store the key."}
         </p>
+      ) : null}
+
+      {mode === "oauth" ? (
+        <OAuthFlow
+          provider={provider}
+          onDone={(updated) => {
+            if (updated) patchCache(updated);
+            setMode("idle");
+          }}
+        />
       ) : null}
     </div>
   );
