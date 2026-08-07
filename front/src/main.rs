@@ -1,7 +1,8 @@
 //! shodh-front — the Associative Memory dashboard server.
 //!
-//! A thin front for the shodh backend: it serves the single-page UI + its
-//! bundled assets, and reverse-proxies every `/api/*` call to the backend
+//! A thin front for the shodh backend: it serves the single-page UI (the React
+//! app under `front/ui`, embedded as one self-contained file at compile time —
+//! see `build.rs`), and reverse-proxies every `/api/*` call to the backend
 //! (`SHODH_API_URL`), injecting the API key. Responses are STREAMED, so the
 //! Server-Sent-Events endpoint (`/api/events`, the live recall river) forwards
 //! without buffering.
@@ -28,10 +29,15 @@ use axum::{
 };
 use std::net::SocketAddr;
 
-/// The UI and its one asset are embedded in the binary — the front is
-/// self-contained and needs no working directory.
-const INDEX_HTML: &str = include_str!("../index.html");
-const D3_JS: &str = include_str!("../assets/d3.v7.min.js");
+/// The UI is embedded in the binary — the front is self-contained and needs no
+/// working directory.
+///
+/// This is the React app under `front/ui`, built by Vite into exactly ONE
+/// self-contained file: `vite-plugin-singlefile` inlines every script,
+/// stylesheet and asset into the HTML (see front/ui/vite.config.ts), so there
+/// is nothing beside it to serve. `dist/` is a build artefact and is not
+/// committed; `build.rs` fails with the remedy if it has not been produced.
+const INDEX_HTML: &str = include_str!("../ui/dist/index.html");
 
 #[derive(Clone)]
 struct Backend {
@@ -69,7 +75,6 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
-        .route("/assets/d3.v7.min.js", get(d3))
         .route("/api/{*path}", any(proxy))
         .route("/seat/{*path}", any(seat_proxy))
         .with_state(backend);
@@ -84,10 +89,6 @@ async fn main() {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
-}
-
-async fn d3() -> impl IntoResponse {
-    ([("content-type", "application/javascript; charset=utf-8")], D3_JS)
 }
 
 /// Reverse-proxy `/api/*` to the backend, streaming the response so SSE works.
