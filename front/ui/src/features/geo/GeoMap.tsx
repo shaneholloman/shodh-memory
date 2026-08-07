@@ -294,11 +294,62 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
 
   const downRef = useRef<[number, number] | null>(null);
 
+  /**
+   * Keyboard selection.
+   *
+   * Recall's canvas can be pointer-only because the result list beside it is a
+   * column of real buttons — every memory the graph draws is reachable by Tab,
+   * and selecting there lights the graph. Geo has no such list: the map is the
+   * only way to reach a point, so without this the destination is unusable
+   * without a mouse, which is the exact failure DIRECTION.md rules out for the
+   * rail and is no more acceptable here.
+   *
+   * Points are ordered west to east so the arrow keys track what the eye does
+   * across the map rather than replaying insertion order.
+   */
+  const ordered = useMemo(() => [...points].sort((a, b) => a.lon - b.lon), [points]);
+
+  const step = useCallback(
+    (delta: number) => {
+      if (ordered.length === 0) return;
+      const at = ordered.findIndex((p) => p.id === selectedId);
+      // Nothing selected yet: enter from the appropriate end rather than
+      // jumping to the middle.
+      const next =
+        at === -1
+          ? delta > 0
+            ? 0
+            : ordered.length - 1
+          : (at + delta + ordered.length) % ordered.length;
+      selectMemory(ordered[next].id);
+    },
+    [ordered, selectedId, selectMemory],
+  );
+
   return (
     <div ref={wrapRef} className="absolute inset-0">
       <canvas
         ref={canvasRef}
-        className="size-full"
+        className="focus-visible:ring-ring size-full focus-visible:ring-2 focus-visible:outline-none"
+        // `application`, not `img`: this reports its own keyboard contract, and
+        // the label states it because a canvas exposes nothing else to a
+        // screen reader.
+        role="application"
+        aria-label={`World map, ${points.length} located ${
+          points.length === 1 ? "memory" : "memories"
+        }. Use the left and right arrow keys to move between them.`}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+            e.preventDefault();
+            step(1);
+          } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+            e.preventDefault();
+            step(-1);
+          } else if (e.key === "Escape") {
+            selectMemory(null);
+          }
+        }}
         style={{ cursor: hover ? "pointer" : "grab" }}
         onPointerDown={(e) => {
           downRef.current = [e.nativeEvent.offsetX, e.nativeEvent.offsetY];
