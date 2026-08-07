@@ -42,10 +42,15 @@ function StageMessage({
 }
 
 export function GraphStage({ reach }: { reach: Reachability }) {
+  // No canvas is mounted yet, so there is never a graph to decorate. This flips
+  // to real state when the d3 port lands; it is a single flag so the legend and
+  // hints cannot get out of step with what is actually drawn.
+  const hasGraph = false;
+
   return (
     <section className="relative min-h-0 flex-1">
       <div className="text-muted-foreground absolute left-4 top-3 z-10 text-[12px]">
-        Knowledge graph
+        How this connects
       </div>
 
       {reach.state === "offline" ? (
@@ -65,33 +70,40 @@ export function GraphStage({ reach }: { reach: Reachability }) {
         />
       )}
 
-      {/* Legend and canvas hints share one row with a gap that cannot collide:
-          the previous layout overlapped them below ~1500px, truncating the
-          hint text to "ICK A CLUSTER TO DRILL IN" on a 1440 laptop. */}
-      <div
-        className={cn(
-          "absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center",
-          "justify-between gap-x-6 gap-y-2",
-        )}
-      >
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-          {NODE_LEGEND.map((n) => (
-            <span
-              key={n.label}
-              className="text-muted-foreground flex items-center gap-1.5 text-[11px]"
-            >
+      {/* The legend decodes the canvas, so it renders only when there is a
+          canvas to decode — a colour key over an empty stage explains nothing.
+          The interaction hints ("scroll to zoom") go the same way: they
+          describe affordances that do not exist until the graph is ported.
+
+          When it does render, legend and hints share one row with a gap that
+          cannot collide. The previous layout overlapped them below ~1500px,
+          truncating the hint to "ICK A CLUSTER TO DRILL IN" on a 1440 laptop. */}
+      {hasGraph ? (
+        <div
+          className={cn(
+            "absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center",
+            "justify-between gap-x-6 gap-y-2",
+          )}
+        >
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            {NODE_LEGEND.map((n) => (
               <span
-                className="size-2 rounded-full"
-                style={{ background: n.token }}
-              />
-              {n.label}
-            </span>
-          ))}
+                key={n.label}
+                className="text-muted-foreground flex items-center gap-1.5 text-[11px]"
+              >
+                <span
+                  className="size-2 rounded-full"
+                  style={{ background: n.token }}
+                />
+                {n.label}
+              </span>
+            ))}
+          </div>
+          <span className="text-muted-foreground/70 text-[11px]">
+            Scroll to zoom · Drag to pan · Click a cluster to drill in
+          </span>
         </div>
-        <span className="text-muted-foreground/70 text-[11px]">
-          Scroll to zoom · Drag to pan · Click a cluster to drill in
-        </span>
-      </div>
+      ) : null}
     </section>
   );
 }
