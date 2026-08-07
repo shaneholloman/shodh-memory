@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Search, TriangleAlert, ListChecks, ChevronDown, MessageSquare, KeyRound } from "lucide-react";
+import {
+  Search,
+  TriangleAlert,
+  ListChecks,
+  ChevronDown,
+  MessageSquare,
+  KeyRound,
+  Globe,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
@@ -53,6 +61,13 @@ export const DESTINATIONS = [
     label: "Recall",
     icon: Search,
     caption: "Search memory and see what connects",
+  },
+  {
+    id: "geo",
+    path: "/geo",
+    label: "Geo",
+    icon: Globe,
+    caption: "Where the current results happened",
   },
   {
     id: "anomalies",

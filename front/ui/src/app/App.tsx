@@ -7,6 +7,7 @@ import { Sidebar, DESTINATIONS } from "@/components/layout/Sidebar";
 import { TopBar, RAIL_OFFSET } from "@/components/layout/TopBar";
 import { SearchField } from "@/components/layout/SearchField";
 import { RecallView } from "@/features/recall/RecallView";
+import { GeoView } from "@/features/geo/GeoView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
 import { ChatView } from "@/features/chat/ChatView";
@@ -24,11 +25,11 @@ import type { Reachability } from "@/lib/api";
  * panels floated on top once it is ported. A flex row cannot do either.
  *
  * `HashRouter`, not `BrowserRouter`, and this is forced rather than chosen:
- * front/src/main.rs serves exactly three routes — `/`, the d3 asset, and the
- * `/api/{*path}` proxy — with no catch-all. A deep path like `/recall` would
- * 404 on refresh under history routing. The app also ships as one embedded
- * `index.html` inside the Rust binary, where a hash is the only routing that
- * survives being opened from anywhere.
+ * front/src/main.rs serves exactly three routes — `/`, the `/api/{*path}`
+ * proxy and the `/seat/{*path}` proxy — with no catch-all. A deep path like
+ * `/recall` would 404 on refresh under history routing. The app also ships as
+ * one embedded `index.html` inside the Rust binary, where a hash is the only
+ * routing that survives being opened from anywhere.
  *
  * Two things from Gridline are deliberately absent. Its theme switch and the
  * MutationObserver behind it: this product is dark-only, so the control would
@@ -42,9 +43,17 @@ import type { Reachability } from "@/lib/api";
 const INSPECTOR_OFFSET = "pr-[min(280px,36vw)]";
 
 /** The Inspector is the detail surface for recall results, so it accompanies
- *  that route only. On a destination with no selectable objects it could show
- *  nothing but an explanation of itself. */
-const ROUTES_WITH_INSPECTOR = ["/recall"];
+ *  the routes that render them. Recall lists that result set and Geo plots the
+ *  geotagged part of the same one — both select into this pane, and a click
+ *  that selected something with nowhere to show it would be a dead end. On a
+ *  destination with no selectable objects the Inspector could show nothing but
+ *  an explanation of itself, so it stays off those. */
+const ROUTES_WITH_INSPECTOR = ["/recall", "/geo"];
+
+/** Destinations that render a recall result and therefore need the cue that
+ *  produced it. Without the field, Geo would depend on the user having visited
+ *  Recall first and would look empty for no stated reason. */
+const ROUTES_WITH_SEARCH = ["/recall", "/geo"];
 
 function Shell({ reach }: { reach: Reachability }) {
   const { pathname } = useLocation();
@@ -57,7 +66,7 @@ function Shell({ reach }: { reach: Reachability }) {
       <Sidebar reach={reach} />
 
       <TopBar title={destination?.label ?? "shodh"} reach={reach}>
-        {pathname === "/recall" ? <SearchField reach={reach} /> : null}
+        {ROUTES_WITH_SEARCH.includes(pathname) ? <SearchField reach={reach} /> : null}
       </TopBar>
 
       <main className={cn("h-full pt-12", RAIL_OFFSET, showInspector && INSPECTOR_OFFSET)}>
@@ -66,6 +75,7 @@ function Shell({ reach }: { reach: Reachability }) {
           <Route path="/" element={<Navigate to="/chat" replace />} />
           <Route path="/chat" element={<ChatView reach={reach} seat={seat} />} />
           <Route path="/recall" element={<RecallView reach={reach} />} />
+          <Route path="/geo" element={<GeoView reach={reach} />} />
           <Route path="/anomalies" element={<Placeholder id="anomalies" reach={reach} />} />
           <Route path="/tasks" element={<TasksView reach={reach} />} />
           <Route path="/providers" element={<ProvidersView seat={seat} />} />
