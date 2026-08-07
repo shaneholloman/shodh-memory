@@ -30,7 +30,12 @@ export function GraphStage() {
   const hasGraph = false;
 
   return (
-    <section className="relative min-h-0 flex-1 overflow-hidden">
+    // `min-w-0`: a flex item's default min-width is its content's intrinsic
+    // size, which can silently refuse to shrink below that even when the
+    // sibling result column has already claimed the rest of `main`'s box at
+    // a narrow viewport. `overflow-hidden` alone doesn't fix that — it only
+    // hides what min-width still won't let the box shrink past.
+    <section className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
       {/* The floor. Same ruling the canvas will be plotted against, so the
           empty state and the populated one are the same surface. */}
       <div aria-hidden="true" className="graticule pointer-events-none absolute inset-0" />
@@ -46,7 +51,16 @@ export function GraphStage() {
         </div>
       ) : null}
 
-      <div className="absolute inset-0 flex flex-col items-center justify-center px-8">
+      {/* `hidden md:flex`, not always-mounted: below ~768px viewport width
+          the Inspector and result column's reserved widths (see
+          RecallView.tsx / Inspector.tsx) leave this stage under ~135px wide.
+          The diagram's own "Docked" explanation text has no minimum-width
+          floor, so at that width it wraps character-by-character and its
+          vertical overflow escapes past the 92px box it's docked to (the
+          ancestor `overflow-hidden` bounds the whole section, not that box).
+          RecallDiagram.tsx is explicitly not to be restructured, so the fix
+          is here: don't hand it a width it cannot render into. */}
+      <div className="absolute inset-0 hidden flex-col items-center justify-center px-8 md:flex">
         <RecallDiagram />
       </div>
 
