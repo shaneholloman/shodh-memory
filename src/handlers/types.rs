@@ -274,6 +274,21 @@ pub struct RecallExperience {
     /// an explicit null on every result would grow every response for nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geo_location: Option<[f64; 3]>,
+
+    /// Places the content MENTIONS, resolved to coordinates by the offline
+    /// gazetteer at remember time.
+    ///
+    /// Distinct from `geo_location` above in the way that matters: that field
+    /// says where the memory was recorded and drives the geohash radius index,
+    /// these say what places the memory talks about and are not spatially
+    /// indexed at all. A memory mentioning Baltimore must never answer "what
+    /// did I record near Baltimore".
+    ///
+    /// Omitted when empty, for the same reason `geo_location` is omitted when
+    /// absent: most memories name no resolvable place, and an empty array on
+    /// every result would grow every response for nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toponyms: Vec<crate::memory::types::Toponym>,
 }
 
 // =============================================================================

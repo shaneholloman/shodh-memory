@@ -75,6 +75,7 @@ export function GraphStage({ reach }: { reach: Reachability }) {
             "pointer-events-none absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center",
             "justify-between gap-x-6 gap-y-2",
           )}
+          style={{ paddingRight: "var(--overlay-dock-inset, 0px)" }}
         >
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
             {/* The legend is the memory types actually present, in the order

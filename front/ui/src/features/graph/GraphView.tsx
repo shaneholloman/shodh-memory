@@ -210,7 +210,8 @@ export function GraphView({ reach }: { reach: Reachability }) {
         }}
       />
 
-      <div className="pointer-events-none absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+      <div className="pointer-events-none absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center justify-between gap-x-6 gap-y-2"
+      style={{ paddingRight: "var(--overlay-dock-inset, 0px)" }}>
         {/* The legend teaches the graph's three encodings, which is the only
             thing that makes them readable: node HUE is entity type, edge HUE is
             consolidation tier, and the two never share a palette — categorical
