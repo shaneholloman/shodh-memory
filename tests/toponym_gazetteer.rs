@@ -24,6 +24,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use shodh_memory::gazetteer;
+use shodh_memory::memory::compression::CompressionPipeline;
 use shodh_memory::memory::storage::{deserialize_memory_for_migration, SearchCriteria};
 use shodh_memory::memory::types::{
     EntityRef, Experience, ExperienceType, MemoryRevision, MemoryTier, NerEntityRecord, Toponym,
@@ -436,6 +437,53 @@ fn current_records_round_trip_with_toponyms_intact() {
 
     assert_eq!(decoded.experience.toponyms, toponyms);
     assert_eq!(decoded.id, id);
+}
+
+#[test]
+fn toponyms_survive_compression_round_trip() {
+    // `Experience::toponyms` is `#[serde(skip)]`, and the LZ4 compressor
+    // encodes `experience` STANDALONE — so the compressed blob does not contain
+    // toponyms at all. Decompression must carry them across from the memory's
+    // outer experience, or LZ4 compression silently stops being lossless.
+    let compressor = CompressionPipeline::new();
+
+    let toponyms = gazetteer::resolve_ner_locations(&[loc("Baltimore"), loc("London")]);
+    assert_eq!(toponyms.len(), 2, "precondition: two places resolved");
+
+    let memory = shodh_memory::memory::Memory::new(
+        MemoryId(Uuid::new_v4()),
+        Experience {
+            content: "Coordination between the Baltimore and London teams".repeat(20),
+            experience_type: ExperienceType::Observation,
+            toponyms: toponyms.clone(),
+            ..Default::default()
+        },
+        // High importance selects the lossless LZ4 strategy — the one that
+        // encodes `experience` standalone and so loses skipped fields.
+        0.95,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    let compressed = compressor.compress(&memory).expect("compress");
+    assert_eq!(
+        compressed
+            .experience
+            .metadata
+            .get("compression_strategy")
+            .map(String::as_str),
+        Some("lz4"),
+        "precondition: this memory must take the LZ4 path"
+    );
+    let restored = compressor.decompress(&compressed).expect("decompress");
+
+    assert_eq!(
+        restored.experience.toponyms, toponyms,
+        "decompression must not drop resolved places"
+    );
+    assert_eq!(restored.experience.content, memory.experience.content);
 }
 
 #[test]
