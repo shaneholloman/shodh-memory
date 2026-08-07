@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Search, TriangleAlert, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Reachability } from "@/lib/api";
 import shodhMark from "@/assets/shodh-mark.png";
 
 /**
@@ -88,40 +87,13 @@ function RailLabel({
   );
 }
 
-function ConnectionRow({ reach, open }: { reach: Reachability; open: boolean }) {
-  const tone =
-    reach.state === "online"
-      ? "bg-[var(--live)]"
-      : reach.state === "unauthorized"
-        ? "bg-destructive"
-        : "bg-muted-foreground/40";
-
-  // Say what is wrong, in the words of the thing that is wrong. "Offline" alone
-  // sends people to check their network when the server simply is not running.
-  const label =
-    reach.state === "online"
-      ? "Memory server connected"
-      : reach.state === "unauthorized"
-        ? "Memory server rejected the key"
-        : "Memory server not running";
-
-  return (
-    <div className="text-muted-foreground flex h-8 items-center gap-3 px-[1.15rem] text-[11px]">
-      <span className={cn("size-1.5 shrink-0 rounded-full", tone)} />
-      <RailLabel open={open}>{label}</RailLabel>
-    </div>
-  );
-}
-
 export function Sidebar({
   active,
   onNavigate,
-  reach,
   identity,
 }: {
   active: DestinationId;
   onNavigate: (id: DestinationId) => void;
-  reach: Reachability;
   identity: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -231,9 +203,6 @@ export function Sidebar({
         </p>
       ) : null}
 
-      <div className="border-sidebar-border mt-auto shrink-0 border-t py-1">
-        <ConnectionRow reach={reach} open={open} />
-      </div>
     </aside>
   );
 }
