@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Search, TriangleAlert, ListChecks, ChevronDown } from "lucide-react";
+import { Search, TriangleAlert, ListChecks, ChevronDown, MessageSquare, KeyRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
@@ -41,6 +41,13 @@ import shodhMark from "@/assets/shodh-mark.png";
 
 export const DESTINATIONS = [
   {
+    id: "chat",
+    path: "/chat",
+    label: "Conversations",
+    icon: MessageSquare,
+    caption: "Converse with memory on the table",
+  },
+  {
     id: "recall",
     path: "/recall",
     label: "Recall",
@@ -60,6 +67,13 @@ export const DESTINATIONS = [
     label: "Tasks",
     icon: ListChecks,
     caption: "Open work captured from sessions",
+  },
+  {
+    id: "providers",
+    path: "/providers",
+    label: "Providers",
+    icon: KeyRound,
+    caption: "Model endpoints and credentials",
   },
 ] as const;
 

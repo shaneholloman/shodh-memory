@@ -2,12 +2,15 @@ import { HashRouter, Routes, Route, Navigate, useLocation } from "react-router-d
 import { cn } from "@/lib/utils";
 import { Providers } from "./providers";
 import { useReachability } from "./useReachability";
+import { useSeatHealth } from "./useSeatHealth";
 import { Sidebar, DESTINATIONS } from "@/components/layout/Sidebar";
 import { TopBar, RAIL_OFFSET } from "@/components/layout/TopBar";
 import { SearchField } from "@/components/layout/SearchField";
 import { RecallView } from "@/features/recall/RecallView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
+import { ChatView } from "@/features/chat/ChatView";
+import { ProvidersView } from "@/features/providers/ProvidersView";
 import { Placeholder } from "@/components/layout/Placeholder";
 import type { Reachability } from "@/lib/api";
 
@@ -45,6 +48,7 @@ const ROUTES_WITH_INSPECTOR = ["/recall"];
 
 function Shell({ reach }: { reach: Reachability }) {
   const { pathname } = useLocation();
+  const seat = useSeatHealth();
   const destination = DESTINATIONS.find((d) => d.path === pathname);
   const showInspector = ROUTES_WITH_INSPECTOR.includes(pathname) && reach.state === "online";
 
@@ -58,13 +62,16 @@ function Shell({ reach }: { reach: Reachability }) {
 
       <main className={cn("h-full pt-12", RAIL_OFFSET, showInspector && INSPECTOR_OFFSET)}>
         <Routes>
-          <Route path="/" element={<Navigate to="/recall" replace />} />
+          {/* The seat is the product's primary surface, so it is home. */}
+          <Route path="/" element={<Navigate to="/chat" replace />} />
+          <Route path="/chat" element={<ChatView reach={reach} seat={seat} />} />
           <Route path="/recall" element={<RecallView reach={reach} />} />
           <Route path="/anomalies" element={<Placeholder id="anomalies" reach={reach} />} />
           <Route path="/tasks" element={<TasksView reach={reach} />} />
+          <Route path="/providers" element={<ProvidersView seat={seat} />} />
           {/* A hash the app does not know is a typo or a stale link, not an
               error worth a page — send it home rather than showing a dead end. */}
-          <Route path="*" element={<Navigate to="/recall" replace />} />
+          <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
       </main>
 
