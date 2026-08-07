@@ -8,6 +8,7 @@ import { TopBar, RAIL_OFFSET } from "@/components/layout/TopBar";
 import { SearchField } from "@/components/layout/SearchField";
 import { RecallView } from "@/features/recall/RecallView";
 import { GeoView } from "@/features/geo/GeoView";
+import { GraphView } from "@/features/graph/GraphView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
 import { ChatView } from "@/features/chat/ChatView";
@@ -48,7 +49,7 @@ const INSPECTOR_OFFSET = "pr-[min(280px,36vw)]";
  *  that selected something with nowhere to show it would be a dead end. On a
  *  destination with no selectable objects the Inspector could show nothing but
  *  an explanation of itself, so it stays off those. */
-const ROUTES_WITH_INSPECTOR = ["/recall", "/geo"];
+const ROUTES_WITH_INSPECTOR = ["/recall", "/geo", "/graph"];
 
 /** Destinations that render a recall result and therefore need the cue that
  *  produced it. Without the field, Geo would depend on the user having visited
@@ -76,6 +77,7 @@ function Shell({ reach }: { reach: Reachability }) {
           <Route path="/chat" element={<ChatView reach={reach} seat={seat} />} />
           <Route path="/recall" element={<RecallView reach={reach} />} />
           <Route path="/geo" element={<GeoView reach={reach} />} />
+          <Route path="/graph" element={<GraphView reach={reach} />} />
           <Route path="/anomalies" element={<Placeholder id="anomalies" reach={reach} />} />
           <Route path="/tasks" element={<TasksView reach={reach} />} />
           <Route path="/providers" element={<ProvidersView seat={seat} />} />

@@ -8,6 +8,7 @@ import {
   MessageSquare,
   KeyRound,
   Globe,
+  Share2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
@@ -61,6 +62,13 @@ export const DESTINATIONS = [
     label: "Recall",
     icon: Search,
     caption: "Search memory and see what connects",
+  },
+  {
+    id: "graph",
+    path: "/graph",
+    label: "Graph",
+    icon: Share2,
+    caption: "The entities this corpus knows and how they relate",
   },
   {
     id: "geo",
