@@ -212,8 +212,77 @@ jobs:
       - name: Build Release
         run: cargo build --release
 
+      # `cargo test --lib` constructs real memory systems, and library init
+      # acquires its models on demand: MiniLM (~90MB, HuggingFace) because vector
+      # search is meaningless without it, and the GLiNER typer (142MB) because
+      # only CI ever provisions it otherwise. Unprovisioned, this step therefore
+      # pulled ~230MB per OS per run and was one HuggingFace hiccup away from red
+      # — which is exactly how it failed on PR #443 (MiniLM tokenizer.json), a
+      # flake that then passed on a bare re-run with no code change.
+      #
+      # Pre-supplying both assets makes the step hermetic for those two fetches:
+      # SHODH_MODEL_PATH / SHODH_GLINER_MODEL_PATH are read as explicit local
+      # paths first, so nothing is downloaded and the tests run on the REAL
+      # embedder and the REAL typer, never the silent fallbacks. Cache keys are
+      # shared with the Tier-1 job deliberately.
+      #
+      # SHODH_OFFLINE is NOT set here: the ONNX Runtime dylib is still fetched by
+      # the library (a GitHub release download that is green on both OSes today),
+      # and offline mode would block it. SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS is
+      # likewise never set — degrading the embedder to make CI pass would make
+      # every vector assertion below it meaningless.
+      - name: Cache GLiNER typer assets
+        if: matrix.os != 'windows-latest'
+        id: build-gliner-cache
+        uses: actions/cache@v4
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: matrix.os != 'windows-latest' && steps.build-gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Cache MiniLM embedder weights
+        if: matrix.os != 'windows-latest'
+        id: build-minilm-cache
+        uses: actions/cache@v4
+        with:
+          path: models/minilm-l6
+          key: minilm-l6-c9745ed1-v1
+
+      - name: Fetch MiniLM embedder weights
+        if: matrix.os != 'windows-latest' && steps.build-minilm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p models/minilm-l6
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/model_quantized.onnx "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/tokenizer.json "$BASE/tokenizer.json"
+          ls -la models/minilm-l6
+
+      - name: Verify model assets (hard gate — refuse to run on missing/degraded assets)
+        if: matrix.os != 'windows-latest'
+        run: |
+          SHODH_MODEL_PATH="${{ github.workspace }}/models/minilm-l6"
+          SHODH_GLINER_MODEL_PATH="${{ github.workspace }}/models/gliner-bi-edge"
+          test -s "$SHODH_MODEL_PATH/model_quantized.onnx" || { echo "::error::MiniLM weights missing"; exit 1; }
+          test -s "$SHODH_MODEL_PATH/tokenizer.json" || { echo "::error::MiniLM tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/model.onnx" || { echo "::error::GLiNER model missing — refusing to run on fallback NER"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+
       - name: Run unit tests
         if: matrix.os != 'windows-latest'
+        env:
+          SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: cargo test --lib --no-fail-fast
 
       - name: Display build info (Unix)
