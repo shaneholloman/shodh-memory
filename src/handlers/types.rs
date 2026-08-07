@@ -257,6 +257,23 @@ pub struct RecallExperience {
     pub content: String,
     pub memory_type: Option<String>,
     pub tags: Vec<String>,
+    /// GPS coordinates `[latitude, longitude, altitude]` in WGS84, when the
+    /// memory carries them.
+    ///
+    /// Recall could already *filter and rank* by location — `geo_lat`/`geo_lon`/
+    /// `geo_radius_meters` compose with every mode, and Layer 0.45 prefetches
+    /// geo candidates into the fused pool — but the coordinates were never
+    /// echoed back. A caller could ask "what do I know within 5km of here" and
+    /// get answers it had no way to place on a map, or even to sort by
+    /// distance. `/api/search/robotics` and `GET /api/memory/{id}` return the
+    /// whole `Memory` and so always exposed this; recall was the gap.
+    ///
+    /// Skipped when absent, matching `score_attribution` on `RecallMemory`.
+    /// The overwhelming majority of memories have no coordinates — nothing in
+    /// the Rust path derives them, they are caller-supplied only — so emitting
+    /// an explicit null on every result would grow every response for nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geo_location: Option<[f64; 3]>,
 }
 
 // =============================================================================
