@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
-import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // The shodh-front Rust binary embeds the built UI with include_str!, so the
 // build MUST produce exactly one self-contained file at dist/index.html —
@@ -19,7 +19,7 @@ const API_KEY = process.env.SHODH_API_KEY ?? "";
 export default defineConfig({
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {
-    alias: { "@": path.resolve(import.meta.dirname, "./src") },
+    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
   server: {
     port: 8788,
@@ -27,14 +27,9 @@ export default defineConfig({
       "/api": {
         target: BACKEND,
         changeOrigin: true,
-        // Server-Sent Events (/api/events — the live recall river) must not be
-        // buffered, and the dev proxy has to inject the key the Rust front
-        // injects in production.
-        configure: (proxy) => {
-          proxy.on("proxyReq", (proxyReq) => {
-            if (API_KEY) proxyReq.setHeader("X-API-Key", API_KEY);
-          });
-        },
+        // The dev proxy injects the same header the Rust front injects in
+        // production, so the browser never holds the key in either mode.
+        headers: API_KEY ? { "X-API-Key": API_KEY } : undefined,
       },
     },
   },
@@ -45,6 +40,5 @@ export default defineConfig({
     // nothing is emitted as a separate file the Rust binary would not embed.
     assetsInlineLimit: 100_000_000,
     cssCodeSplit: false,
-    rollupOptions: { output: { inlineDynamicImports: true } },
   },
 });
