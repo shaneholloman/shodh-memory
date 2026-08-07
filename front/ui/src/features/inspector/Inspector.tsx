@@ -4,6 +4,9 @@ import { useSession } from "@/stores/session";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { relName } from "@/features/recall/relation";
+import { recallKey } from "@/features/recall/useRecall";
+import { EntityDetail } from "./EntityDetail";
 
 /**
  * The Inspector — the single object-detail surface.
@@ -46,6 +49,7 @@ export function Inspector() {
   const profile = useSession((s) => s.profile);
   const query = useSession((s) => s.activeQuery);
   const selectedId = useSession((s) => s.selectedMemoryId);
+  const selectedEntityId = useSession((s) => s.selectedEntityId);
   const select = useSession((s) => s.select);
 
   // Same key as ResultPane, read straight out of the cache.
@@ -55,7 +59,7 @@ export function Inspector() {
   // queryFn throws when nothing else has populated it — which is exactly the
   // first-paint case here, before any search has run. A cache read has no such
   // failure mode and cannot issue a request by accident.
-  const data = useQueryClient().getQueryData<RecallResponse>(["recall", profile, query]);
+  const data = useQueryClient().getQueryData<RecallResponse>(recallKey(profile, query));
 
   const memory = data?.memories.find((m) => m.id === selectedId);
 
@@ -78,12 +82,25 @@ export function Inspector() {
       <header className="border-border shrink-0 border-b px-4 py-3">
         <h2 className="text-[12px] font-medium tracking-tight">Detail</h2>
         <p className="text-muted-foreground mt-0.5 text-[11px] leading-relaxed">
-          Every belief traces back to the sessions it came from.
+          {/* The two kinds of object this pane holds answer different
+              questions, so the subtitle names the one on screen rather than
+              making one claim that is only true half the time. */}
+          {selectedEntityId
+            ? "What the corpus knows about this, and how it is connected."
+            : "Every belief traces back to the sessions it came from."}
         </p>
       </header>
 
       <ScrollArea className="min-h-0 flex-1">
-        {!memory ? (
+        {/* One Inspector, two kinds of object — WORKFLOWS.md's rule is that
+            there is a single detail surface, not that everything in the product
+            is a memory. An entity is reached from the knowledge graph and has
+            no content, tier or score attribution; rendering it through the
+            memory branch would mean inventing all three. Selection is mutually
+            exclusive in the store, so exactly one of these can be live. */}
+        {selectedEntityId ? (
+          <EntityDetail />
+        ) : !memory ? (
           <Empty
             body={
               data
@@ -145,8 +162,21 @@ export function Inspector() {
                         disabled={!other}
                         className="hover:bg-accent/60 focus-visible:ring-ring rounded px-2 py-1.5 text-left transition-colors focus-visible:ring-2 focus-visible:outline-none disabled:opacity-50"
                       >
+                        {/* `relation` arrives as a Rust Debug rendering —
+                            `CausedBy`, or `Custom("depends on")` with the
+                            quotes on the wire (src/handlers/recall.rs:985).
+                            `relName` is the only thing standing between that
+                            and Rust syntax on screen.
+
+                            The confidence beside it is the server's own, and
+                            it is the point: an edge without a strength is an
+                            assertion, an edge with one is evidence. */}
                         <span className="text-primary mono text-[10px]">
-                          {outgoing ? "→" : "←"} {e.relation}
+                          {outgoing ? "→" : "←"} {relName(e.relation)}
+                          <span className="text-muted-foreground/70">
+                            {" "}
+                            {e.confidence.toFixed(2)}
+                          </span>
                         </span>
                         <span className="text-muted-foreground mt-0.5 line-clamp-2 block text-[11px] leading-relaxed">
                           {other?.experience.content ?? "Outside this result set"}

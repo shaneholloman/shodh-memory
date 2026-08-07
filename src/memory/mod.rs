@@ -122,8 +122,8 @@ pub use crate::memory::feedback::{
     apply_context_pattern_signals, calculate_entity_flow, calculate_entity_overlap,
     detect_negative_keywords, extract_entities_simple, process_implicit_feedback,
     process_implicit_feedback_with_semantics, signal_from_entity_flow, ContextFingerprint,
-    FeedbackMomentum, FeedbackStore, FeedbackStoreStats, PendingFeedback, PreviousContext,
-    SignalRecord, SignalTrigger, SurfacedMemoryInfo, Trend,
+    FeedbackMomentum, FeedbackStore, FeedbackStoreStats, MomentumPolicy, PendingFeedback,
+    PreviousContext, SignalRecord, SignalTrigger, SurfacedMemoryInfo, Trend,
 };
 pub use crate::memory::files::{FileMemoryStats, FileMemoryStore, IndexingResult};
 pub use crate::memory::graph_retrieval::{
@@ -7720,10 +7720,35 @@ impl MemorySystem {
             .unwrap_or(1.0)
     }
 
+    /// Reinforce memories, applying the outcome to the feedback-momentum EMA.
+    ///
+    /// This is the entry point for callers that own the momentum write:
+    /// `POST /api/reinforce`, the seat harness, and the eval harnesses. Callers
+    /// that have already applied their own momentum signal for these memories
+    /// must use [`reinforce_recall_with_momentum`](Self::reinforce_recall_with_momentum)
+    /// with [`MomentumPolicy::Skip`] instead.
+    ///
+    /// This is the ONLY implementation of memory reinforcement.
+    /// [`reinforce_recall_tracked`](Self::reinforce_recall_tracked) and the
+    /// `_with_momentum` variants are adapters over it. `RetrievalEngine` used to
+    /// carry a second, divergent implementation; it was deleted rather than
+    /// bypassed, because a `pub` method that silently does two thirds of the job
+    /// is a footgun whether or not anything in-tree still calls it.
     pub fn reinforce_recall(
         &self,
         memory_ids: &[MemoryId],
         outcome: RetrievalOutcome,
+    ) -> Result<ReinforcementStats> {
+        self.reinforce_recall_with_momentum(memory_ids, outcome, MomentumPolicy::Apply)
+    }
+
+    /// [`reinforce_recall`](Self::reinforce_recall) with explicit control over
+    /// the momentum write. See [`MomentumPolicy`] for when each applies.
+    pub fn reinforce_recall_with_momentum(
+        &self,
+        memory_ids: &[MemoryId],
+        outcome: RetrievalOutcome,
+        momentum_policy: MomentumPolicy,
     ) -> Result<ReinforcementStats> {
         if memory_ids.is_empty() {
             return Ok(ReinforcementStats::default());
@@ -7939,43 +7964,60 @@ impl MemorySystem {
         }
 
         // Connect feedback to MOMENTUM — the load-bearing learning signal.
-        // Previously reinforce_recall only bumped importance + graph edges; it
-        // never touched the feedback-momentum EMA, so the momentum store and the
-        // reinforcement path were disconnected. That is why raising
-        // FEEDBACK_MOMENTUM_SCALE did nothing on the learning curve (the harness
-        // drives reinforce_recall, not the momentum store). Push a +1 (Helpful) /
-        // −1 (Misleading) signal per reinforced memory into the EMA. The EMA
-        // accumulates it gradually (inertia-damped, robust to a single bad
-        // signal), so repeated use BUILDS momentum that becomes load-bearing in
-        // recall (Layer 5 feedback_multiplier) — momentum, not forcing.
-        if let Some(fs) = &self.feedback_store {
-            let value: f32 = match outcome {
-                RetrievalOutcome::Helpful => 1.0,
-                RetrievalOutcome::Misleading => -1.0,
-                RetrievalOutcome::Neutral => 0.0,
-            };
-            if value != 0.0 {
-                let now = chrono::Utc::now();
-                let mut guard = fs.write();
-                for id in memory_ids {
-                    let mtype = self
-                        .long_term_memory
-                        .get(id)
-                        .map(|m| m.experience.experience_type)
-                        .unwrap_or(ExperienceType::Observation);
-                    {
-                        let momentum = guard.get_or_create_momentum(id.clone(), mtype);
-                        momentum.update(SignalRecord {
-                            timestamp: now,
-                            value,
-                            confidence: 1.0,
-                            trigger: SignalTrigger::TemporalCredit {
-                                turns_aggregated: 1,
-                                raw_total: value,
-                            },
-                        });
+        // reinforce_recall on its own only bumps importance + graph edges; without
+        // this block the momentum store and the reinforcement path are
+        // disconnected, which is why raising FEEDBACK_MOMENTUM_SCALE did nothing
+        // on the learning curve (the harnesses drive reinforce_recall, not the
+        // momentum store). Push a +1 (Helpful) / −1 (Misleading) signal per
+        // reinforced memory into the EMA. The EMA accumulates it gradually
+        // (inertia-damped, robust to a single bad signal), so repeated use BUILDS
+        // momentum that becomes load-bearing in recall (Layer 5
+        // feedback_multiplier) — momentum, not forcing.
+        //
+        // GATED on `momentum_policy`. `proactive_context` applies its own graded,
+        // confidence-weighted signal per memory and only then classifies them
+        // into helpful/misleading buckets to call this method. Applying here too
+        // would charge one piece of evidence twice, and the second charge is the
+        // blunt one: ±1.0 at confidence 1.0 swamps the graded value, and the extra
+        // `signal_count` inflates `history_factor` → `effective_inertia`, making
+        // the memory harder to correct later on evidence it never actually saw.
+        // So that path passes MomentumPolicy::Skip.
+        //
+        // Neutral deliberately writes nothing: it means "recorded access", and no
+        // evidence of usefulness either way should move an EMA whose whole range
+        // is about usefulness.
+        if momentum_policy == MomentumPolicy::Apply {
+            if let Some(fs) = &self.feedback_store {
+                let (value, label): (f32, &str) = match outcome {
+                    RetrievalOutcome::Helpful => (1.0, "helpful"),
+                    RetrievalOutcome::Misleading => (-1.0, "misleading"),
+                    RetrievalOutcome::Neutral => (0.0, "neutral"),
+                };
+                if value != 0.0 {
+                    let now = chrono::Utc::now();
+                    let mut guard = fs.write();
+                    for id in memory_ids {
+                        let mtype = self
+                            .long_term_memory
+                            .get(id)
+                            .map(|m| m.experience.experience_type)
+                            .unwrap_or(ExperienceType::Observation);
+                        {
+                            let momentum = guard.get_or_create_momentum(id.clone(), mtype);
+                            momentum.update(SignalRecord {
+                                timestamp: now,
+                                value,
+                                confidence: 1.0,
+                                trigger: SignalTrigger::ExplicitOutcome {
+                                    outcome: label.to_string(),
+                                },
+                            });
+                        }
                     }
-                    guard.mark_dirty(id);
+                    // Write through rather than only queueing: `flush` is driven
+                    // from the proactive_context side, which an API-only
+                    // deployment never reaches.
+                    guard.persist_momentum(memory_ids);
                 }
             }
         }
@@ -8001,13 +8043,36 @@ impl MemorySystem {
         Ok(stats)
     }
 
-    /// Reinforce using a tracked recall (convenience wrapper)
+    /// Reinforce using a tracked recall.
+    ///
+    /// A thin adapter over [`reinforce_recall`](Self::reinforce_recall): it
+    /// unwraps the tracked retrieval's ids and applies the identical
+    /// reinforcement. There is exactly one implementation of reinforcement on
+    /// `MemorySystem`, and this is not a second one.
+    ///
+    /// It used to be. Until this change it delegated to
+    /// `RetrievalEngine::reinforce_recall`, a parallel implementation that
+    /// applied no momentum, no graph coactivation, no entity-edge Hebbian
+    /// updates and no prediction-error weighting, and that wrote straight to
+    /// storage past the working/session caches. Same name, same arguments,
+    /// materially different behaviour.
     pub fn reinforce_recall_tracked(
         &self,
         tracked: &TrackedRetrieval,
         outcome: RetrievalOutcome,
     ) -> Result<ReinforcementStats> {
-        self.retriever.reinforce_tracked(tracked, outcome)
+        self.reinforce_recall_tracked_with_momentum(tracked, outcome, MomentumPolicy::Apply)
+    }
+
+    /// [`reinforce_recall_tracked`](Self::reinforce_recall_tracked) with
+    /// explicit control over the momentum write. See [`MomentumPolicy`].
+    pub fn reinforce_recall_tracked_with_momentum(
+        &self,
+        tracked: &TrackedRetrieval,
+        outcome: RetrievalOutcome,
+        momentum_policy: MomentumPolicy,
+    ) -> Result<ReinforcementStats> {
+        self.reinforce_recall_with_momentum(&tracked.memory_ids(), outcome, momentum_policy)
     }
 
     /// Perform graph maintenance (decay old edges, prune weak ones)

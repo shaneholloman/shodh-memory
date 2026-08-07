@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 // which is the worst possible way for a bug to present.
 const BACKEND = process.env.SHODH_API_URL ?? "http://127.0.0.1:3030";
 const API_KEY = process.env.SHODH_API_KEY ?? "";
+const SEAT = process.env.SHODH_SEAT_URL ?? "http://127.0.0.1:3141";
+const SEAT_TOKEN = process.env.SHODH_SEAT_TOKEN ?? "";
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), viteSingleFile()],
@@ -30,6 +32,14 @@ export default defineConfig({
         // The dev proxy injects the same header the Rust front injects in
         // production, so the browser never holds the key in either mode.
         headers: API_KEY ? { "X-API-Key": API_KEY } : undefined,
+      },
+      // Same contract as the Rust front's /seat/* route: strip the prefix,
+      // inject the seat bearer token, stream (SSE) without buffering.
+      "/seat": {
+        target: SEAT,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/seat/, ""),
+        headers: SEAT_TOKEN ? { Authorization: `Bearer ${SEAT_TOKEN}` } : undefined,
       },
     },
   },

@@ -92,6 +92,9 @@ yarn.lock
 # of what this project claims. Without it CI cannot `npm ci`, and two builds of
 # the same commit can embed different dependency trees.
 !front/ui/package-lock.json
+# ...and the seat harness's, for the same reason: it is an application whose
+# dependency tree (pi versions above all) must be reproducible.
+!seat/package-lock.json
 
 # Coverage
 coverage/

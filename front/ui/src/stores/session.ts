@@ -17,35 +17,78 @@ import { create } from "zustand";
  * `null` until one arrives.
  */
 interface SessionState {
-  /** Always a value the server listed in `GET /api/users`. Never invented. */
+  /** A value the server listed in `GET /api/users` — or, exactly once removed
+   *  from that guarantee, a profile someone deliberately named on the seat's
+   *  new-conversation screen (which the backend provisions on first write). */
   profile: string | null;
+  /** True when `profile` was set by a deliberate act (switcher, seat creation)
+   *  rather than adopted from the server list. A pinned profile survives
+   *  reconciliation while the server has not yet listed it — the seat creates
+   *  the store on the first turn, and wiping the selection in that window
+   *  would tear down the conversation that is about to populate it. */
+  profilePinned: boolean;
   /** Id of the memory currently open in the Inspector. */
   selectedMemoryId: string | null;
+  /**
+   * Id of the ENTITY currently open in the Inspector — a `UniverseStar.id` from
+   * the knowledge graph, which is a different kind of object from a memory and
+   * cannot share the field.
+   *
+   * Two ids rather than one tagged union because the two are genuinely
+   * different objects reached from different destinations, and every existing
+   * caller of `select`/`selectedMemoryId` would otherwise have to learn about a
+   * kind it never encounters. They are mutually exclusive: selecting either
+   * clears the other, so the Inspector still shows exactly one thing and the
+   * "one selected object at a time" rule in WORKFLOWS.md holds.
+   */
+  selectedEntityId: string | null;
   /** The query the results on screen came from, for the Inspector's header. */
   activeQuery: string;
 
   setProfile: (profile: string | null) => void;
   select: (memoryId: string | null) => void;
+  selectEntity: (entityId: string | null) => void;
   setActiveQuery: (query: string) => void;
-  /** Adopt the server's list: keep the current profile if it is still offered,
-   *  otherwise fall back to the first. Prevents a stale selection surviving a
-   *  backend restart that dropped it. */
+  /** Adopt the server's list: keep the current profile if it is still offered
+   *  (or pinned, see above), otherwise fall back to the first. Prevents a
+   *  stale auto-adopted selection surviving a backend restart that dropped it. */
   reconcileProfiles: (profiles: string[]) => void;
 }
 
 export const useSession = create<SessionState>((set) => ({
   profile: null,
+  profilePinned: false,
   selectedMemoryId: null,
+  selectedEntityId: null,
   activeQuery: "",
 
-  setProfile: (profile) => set({ profile, selectedMemoryId: null }),
-  select: (selectedMemoryId) => set({ selectedMemoryId }),
+  setProfile: (profile) =>
+    set({
+      profile,
+      profilePinned: profile !== null,
+      selectedMemoryId: null,
+      selectedEntityId: null,
+    }),
+  select: (selectedMemoryId) => set({ selectedMemoryId, selectedEntityId: null }),
+  selectEntity: (selectedEntityId) => set({ selectedEntityId, selectedMemoryId: null }),
   setActiveQuery: (activeQuery) => set({ activeQuery }),
 
   reconcileProfiles: (profiles) =>
     set((s) => {
-      if (profiles.length === 0) return { profile: null, selectedMemoryId: null };
-      if (s.profile && profiles.includes(s.profile)) return s;
-      return { profile: profiles[0], selectedMemoryId: null };
+      if (s.profile && (profiles.includes(s.profile) || s.profilePinned)) return s;
+      // Both selections clear on a profile change: they name objects in the
+      // previous profile's corpus, and an id from one store means nothing in
+      // another.
+      if (profiles.length === 0) {
+        return s.profile === null
+          ? s
+          : { profile: null, selectedMemoryId: null, selectedEntityId: null };
+      }
+      return {
+        profile: profiles[0],
+        profilePinned: false,
+        selectedMemoryId: null,
+        selectedEntityId: null,
+      };
     }),
 }));

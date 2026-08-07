@@ -8,6 +8,9 @@
 
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
+    // The vendored world basemap (src/assets/world-countries-110m.json) is
+    // imported as a module so Vite inlines it into the single-file bundle.
+    "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
