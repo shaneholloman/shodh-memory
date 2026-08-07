@@ -86,6 +86,13 @@ bun.lock
 package-lock.json
 yarn.lock
 
+# ...except the dashboard's. front/ui is an APPLICATION whose build output is
+# compiled into the shodh-front binary, not a library, so its lockfile is the
+# only thing that makes that build reproducible — and reproducibility is part
+# of what this project claims. Without it CI cannot `npm ci`, and two builds of
+# the same commit can embed different dependency trees.
+!front/ui/package-lock.json
+
 # Coverage
 coverage/
 .coverage
