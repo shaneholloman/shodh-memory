@@ -36,6 +36,19 @@ import { resolvePackageVersion } from "./version";
 import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 import { DrainController } from "./drain";
+import {
+  shodhDataRoot,
+  loadOrCreatePersistedApiKey,
+  publishSharedApiKey,
+  apiKeyFilePath,
+} from "./api-key-store";
+import {
+  registerShim,
+  unregisterShim,
+  recordSpawnedServer,
+  clearSpawnedServer,
+  backendPidToReap,
+} from "./backend-lifecycle";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -87,10 +100,16 @@ const SANDBOX_MODE = process.env.SMITHERY_SANDBOX === "true";
 //   1. SHODH_API_KEY (explicit, preferred)
 //   2. SHODH_DEV_API_KEY (matches what the server accepts in dev mode)
 //   3. First key from SHODH_API_KEYS (matches server production config)
-//   4. Auto-generate for local servers (passed to server as SHODH_DEV_API_KEY)
+//   4. Shared persisted key at <data-root>/.api-key, auto-generated on first
+//      use for local servers (passed to the server as SHODH_DEV_API_KEY).
+//      Persisting it means concurrent shims and Claude Code hooks all use the
+//      SAME key — previously each shim generated its own in-memory key and
+//      whichever shim lost the spawn race got 401s for the whole session.
 //   5. Error for remote servers
 let API_KEY = "";
 let apiKeySource = "";
+// Path of the persisted shared key file, when one is in use (for diagnostics).
+let apiKeyFile: string | null = null;
 if (process.env.SHODH_API_KEY) {
   API_KEY = process.env.SHODH_API_KEY;
   apiKeySource = "SHODH_API_KEY";
@@ -106,10 +125,30 @@ if (process.env.SHODH_API_KEY) {
 }
 if (!API_KEY) {
   if (isLocalServer()) {
-    // Auto-generate a random key for local development — zero config
-    API_KEY = crypto.randomBytes(32).toString("hex");
-    apiKeySource = "auto-generated";
-    console.error("[shodh-memory] No API key set — auto-generated for local server.");
+    // Load (or generate once and persist) the shared local key — zero config.
+    try {
+      const persisted = loadOrCreatePersistedApiKey(shodhDataRoot(), () =>
+        crypto.randomBytes(32).toString("hex")
+      );
+      API_KEY = persisted.key;
+      apiKeyFile = persisted.file;
+      apiKeySource = persisted.created ? "auto-generated (persisted)" : "persisted key file";
+      if (persisted.created) {
+        console.error(`[shodh-memory] No API key set — generated one and saved it to ${persisted.file}`);
+        console.error("[shodh-memory] Hooks and other local MCP clients will share this key automatically.");
+      } else {
+        console.error(`[shodh-memory] API key loaded from ${persisted.file}.`);
+      }
+    } catch (err) {
+      // Persistence failed (e.g. read-only data dir) — fall back to an
+      // in-memory key so this shim still works, but say so loudly because
+      // hooks and sibling shims will NOT share it.
+      API_KEY = crypto.randomBytes(32).toString("hex");
+      apiKeySource = "auto-generated";
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[shodh-memory] WARNING: could not persist auto-generated API key (${msg}).`);
+      console.error("[shodh-memory] Hooks and other MCP clients will not share this key; set SHODH_API_KEY to fix.");
+    }
   } else {
     console.error("ERROR: SHODH_API_KEY is required for remote servers.");
     console.error("");
@@ -121,10 +160,38 @@ if (!API_KEY) {
     process.exit(1);
   }
 }
-// Log which source was used (without revealing the key itself)
+// Share an environment-supplied key with the hooks. An MCP `env` block reaches
+// this shim but NOT Claude Code's hooks, so without this a user who configures
+// SHODH_API_KEY in mcp.json gets a working shim and hooks that 401 on every
+// capture.
+//
+// Two conditions, both needed. isLocalServer() checks the backend URL, which
+// alone is not enough: a loopback tunnel or local proxy in front of a remote
+// backend still looks local. So the key's own provenance is checked too, and
+// SHODH_API_KEYS is excluded — it is the production-shaped variable (the server
+// reads it as its full key list), and a production key must not be written to
+// disk to satisfy a local convenience.
+const KEY_SOURCE_IS_LOCAL_SHAPED =
+  apiKeySource === "SHODH_API_KEY" || apiKeySource === "SHODH_DEV_API_KEY";
+if (API_KEY && apiKeyFile === null && KEY_SOURCE_IS_LOCAL_SHAPED && isLocalServer()) {
+  try {
+    const published = publishSharedApiKey(shodhDataRoot(), API_KEY);
+    apiKeyFile = apiKeyFilePath(shodhDataRoot());
+    if (published) {
+      console.error(`[shodh-memory] Shared this key with Claude Code hooks via ${apiKeyFile}.`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[shodh-memory] WARNING: could not share the API key with hooks (${msg}).`);
+    console.error("[shodh-memory] Hook-based memory capture will fail unless SHODH_API_KEY is also set in your shell.");
+  }
+}
+
+// Log which source was used (without revealing the key itself).
+// Persisted/auto-generated/sandbox sources already logged their own message above.
 if (apiKeySource === "SHODH_DEV_API_KEY") {
   console.error("[shodh-memory] WARNING: API key loaded from SHODH_DEV_API_KEY — this is a development key. Use SHODH_API_KEY for production.");
-} else if (apiKeySource && apiKeySource !== "auto-generated" && apiKeySource !== "sandbox") {
+} else if (apiKeySource === "SHODH_API_KEY" || apiKeySource === "SHODH_API_KEYS") {
   console.error(`[shodh-memory] API key loaded from ${apiKeySource}.`);
 }
 const IPC_CLIENT = IPC_ENDPOINT
@@ -1707,14 +1774,20 @@ const handleCallTool = async (request: CallToolRequest) => {
   // Auto-capture context from tool arguments (non-blocking)
   autoStreamContext(name, args as Record<string, unknown>);
 
-  // Check server availability first
-  const serverUp = await isServerAvailable();
+  // Check server availability first. If the health check fails, try to bring
+  // the backend back (it may have crashed or been killed since we started)
+  // instead of failing every subsequent tool call for the rest of the session.
+  let serverUp = await isServerAvailable();
+  if (!serverUp) {
+    console.error("[shodh-memory] Backend health check failed — attempting to restart it...");
+    serverUp = await recoverBackend();
+  }
   if (!serverUp) {
     return {
       content: [
         {
           type: "text",
-          text: `Memory server unavailable at ${BACKEND_LOCATION}. Please ensure shodh-memory-server is running.\n\nTo start: shodh-memory-server`,
+          text: `Memory server unavailable at ${BACKEND_LOCATION}, and automatic restart did not bring it back. Please ensure shodh-memory-server is running.\n\nTo start: shodh-memory-server`,
         },
       ],
       isError: true,
@@ -4897,12 +4970,38 @@ async function waitForServer(maxAttempts: number = 30): Promise<boolean> {
   return false;
 }
 
-async function validateApiKey(): Promise<boolean> {
+// Outcome of an authenticated probe. "rejected" means the server answered and
+// refused the key; "inconclusive" means we never got an authoritative answer
+// (timeout, connection reset, 5xx). Collapsing the two would let a slow-starting
+// backend be reported as a bad key, sending users to delete a key file that was
+// never the problem.
+type KeyProbe = "accepted" | "rejected" | "inconclusive";
+
+/** Probe an authenticated endpoint — /health is public, so it proves nothing about auth. */
+async function probeApiKey(): Promise<KeyProbe> {
   try {
     await backendRequest("/api/users", "GET", undefined, 3000);
-    return true;
-  } catch {
-    return false;
+    return "accepted";
+  } catch (err) {
+    const status = /API error (\d+)/.exec(err instanceof Error ? err.message : String(err));
+    if (status) {
+      const code = parseInt(status[1], 10);
+      // Any answered status other than 401/403 means the key got past auth.
+      return code === 401 || code === 403 ? "rejected" : "accepted";
+    }
+    return "inconclusive";
+  }
+}
+
+/** Report a rejected key with the fix that matches how this shim got its key. */
+function reportKeyRejected(): void {
+  console.error("[shodh-memory] ERROR: the server rejected our API key (401/403).");
+  console.error("[shodh-memory] All memory operations will fail until this is fixed.");
+  if (apiKeyFile) {
+    console.error(`[shodh-memory] Fix: stop the server, delete ${apiKeyFile}, and reconnect,`);
+    console.error("[shodh-memory] or set SHODH_API_KEY to the key the server was started with.");
+  } else {
+    console.error("[shodh-memory] Fix: set SHODH_API_KEY to the key the server was started with.");
   }
 }
 
@@ -4910,14 +5009,13 @@ async function ensureServerRunning(): Promise<void> {
   // Check if already running
   if (await isServerRunning()) {
     console.error("[shodh-memory] Backend server already running at", BACKEND_LOCATION);
-    // If we auto-generated a key, verify it works against the running server
+    // If our key wasn't explicitly configured, verify it works against the
+    // running server — /health is unauthenticated, so reachability alone
+    // proves nothing about auth.
     if (!process.env.SHODH_API_KEY && isLocalServer()) {
-      const keyWorks = await validateApiKey();
-      if (!keyWorks) {
-        console.error("[shodh-memory] WARNING: Auto-generated key rejected by running server.");
+      if (await probeApiKey() === "rejected") {
         console.error("[shodh-memory] The server was started with a different API key.");
-        console.error("[shodh-memory] Set SHODH_API_KEY to match the server's key, or restart");
-        console.error("[shodh-memory] the server without SHODH_DEV_API_KEY to use auto-generated keys.");
+        reportKeyRejected();
       }
     }
     return;
@@ -4997,14 +5095,110 @@ async function ensureServerRunning(): Promise<void> {
 
   serverProcess.unref();
 
+  // Record the spawned backend's pid so whichever shim exits LAST can reap it.
+  // Recorded before the health wait: even a slow-starting backend must be
+  // reapable, and recordSpawnedServer never clobbers a live sibling's record.
+  if (serverProcess.pid) {
+    try {
+      recordSpawnedServer(shodhDataRoot(), serverProcess.pid);
+    } catch (err) {
+      console.error("[shodh-memory] Warning: could not record backend pidfile:", err instanceof Error ? err.message : err);
+    }
+  }
+
   // Wait for server to become available
   console.error("[shodh-memory] Waiting for server to start...");
   const started = await waitForServer();
 
   if (started) {
     console.error("[shodh-memory] Backend server started successfully");
+    // Validate auth against the freshly spawned server. /health is public, so
+    // a healthy server can still reject our key (e.g. a concurrent shim's
+    // spawn won the port with a different key, or a stale persisted key).
+    if (await probeApiKey() === "rejected") {
+      reportKeyRejected();
+    }
   } else {
     console.error("[shodh-memory] Warning: Server may not have started properly");
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Backend recovery — re-run ensureServerRunning when a health check fails
+// -----------------------------------------------------------------------------
+// Concurrent tool calls share one in-flight recovery attempt, and a failed
+// attempt is not retried for a cooldown window so a dead backend doesn't cost
+// every tool call a full spawn-and-wait cycle.
+let recoveryInFlight: Promise<void> | null = null;
+let lastFailedRecoveryAt = 0;
+const RECOVERY_COOLDOWN_MS = 30_000;
+
+async function recoverBackend(): Promise<boolean> {
+  if (Date.now() - lastFailedRecoveryAt < RECOVERY_COOLDOWN_MS) return false;
+  if (!recoveryInFlight) {
+    recoveryInFlight = ensureServerRunning()
+      .catch((err) => {
+        console.error("[shodh-memory] Backend restart attempt failed:", err instanceof Error ? err.message : err);
+      })
+      .finally(() => {
+        recoveryInFlight = null;
+      });
+  }
+  await recoveryInFlight;
+  const up = await isServerAvailable();
+  if (!up) {
+    lastFailedRecoveryAt = Date.now();
+  }
+  return up;
+}
+
+// True once this shim registered itself in the shared shim pidfile directory.
+let shimRegistered = false;
+// Guard so the exit path releases the shared backend exactly once
+// (process.on("exit") and signal handlers can both invoke cleanup).
+let backendReleased = false;
+
+// Kill an auto-spawned backend by pid. On POSIX the backend was spawned
+// detached (its own process group, pgid == pid), so kill the group first.
+function killBackendPid(pid: number): void {
+  if (process.platform !== "win32") {
+    try {
+      process.kill(-pid, "SIGTERM");
+      return;
+    } catch (e) {
+      console.error("[Cleanup] Process group kill failed, falling back to direct kill:", e);
+    }
+  }
+  try { process.kill(pid, "SIGTERM"); } catch (_) { /* already gone */ }
+}
+
+// Release this shim's reference to the shared backend. The backend is only
+// killed when (a) it was auto-spawned by a shim (pidfile exists) and (b) no
+// other live shim remains — a shim exiting mid-session must never take the
+// backend away from siblings that are still using it.
+function releaseSharedBackend(): void {
+  if (backendReleased) return;
+  backendReleased = true;
+
+  try {
+    if (shimRegistered) {
+      unregisterShim(shodhDataRoot());
+      shimRegistered = false;
+    }
+    const pidToReap = backendPidToReap(shodhDataRoot());
+    if (pidToReap !== null) {
+      console.error(`[shodh-memory] Last shim exiting — stopping auto-spawned backend (pid ${pidToReap})`);
+      killBackendPid(pidToReap);
+      clearSpawnedServer(shodhDataRoot());
+    }
+  } catch (err) {
+    // Pidfile bookkeeping failed (e.g. data dir vanished). Fall back to the
+    // legacy behaviour for our own child only, so we never leak a process we
+    // spawned ourselves.
+    console.error("[Cleanup] Backend refcount failed, falling back to own-child kill:", err instanceof Error ? err.message : err);
+    if (serverProcess && !serverProcess.killed && serverProcess.pid) {
+      killBackendPid(serverProcess.pid);
+    }
   }
 }
 
@@ -5023,21 +5217,8 @@ function cleanupServer() {
     streamSocket = null;
   }
 
-  // 3. Kill child process
-  if (serverProcess && !serverProcess.killed) {
-    // For detached processes, we need to kill the process group on Unix
-    if (process.platform !== "win32" && serverProcess.pid) {
-      try {
-        // Kill the process group (negative PID)
-        process.kill(-serverProcess.pid, "SIGTERM");
-      } catch (e) {
-        console.error("[Cleanup] Process group kill failed, falling back to direct kill:", e);
-        try { serverProcess.kill("SIGTERM"); } catch (_) { /* ignore */ }
-      }
-    } else {
-      try { serverProcess.kill(); } catch (_) { /* ignore */ }
-    }
-  }
+  // 3. Release the shared backend (kills it only if we are the last live shim)
+  releaseSharedBackend();
 }
 
 // Cleanup on exit
@@ -5112,6 +5293,15 @@ export function createSandboxServer() {
 // Start server
 async function main() {
   if (SANDBOX_MODE) return;
+
+  // Register this shim as a live user of the shared backend BEFORE any spawn,
+  // so a sibling shim exiting right now sees us and leaves the backend alive.
+  try {
+    registerShim(shodhDataRoot());
+    shimRegistered = true;
+  } catch (err) {
+    console.error("[shodh-memory] Warning: could not register shim pidfile:", err instanceof Error ? err.message : err);
+  }
 
   // Ensure backend is running
   await ensureServerRunning();
