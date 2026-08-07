@@ -38,6 +38,9 @@ export interface SeatConfig {
 	ollamaBaseUrl: string;
 	/** OpenAI-compatible base URL for LM Studio. */
 	lmStudioBaseUrl: string;
+	/** OpenAI-compatible base URL for vLLM (`vllm serve` mounts OpenAI routes
+	 *  under /v1 and defaults to port 8000). */
+	vllmBaseUrl: string;
 	/** Context window advertised for locally served models (they do not report one). */
 	localContextWindow: number;
 	/** Max output tokens for locally served models. */
@@ -125,6 +128,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SeatConfig {
 		dataDir: env.SEAT_DATA_DIR ?? defaultDataDir(env),
 		ollamaBaseUrl: (env.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434/v1").replace(/\/+$/, ""),
 		lmStudioBaseUrl: (env.LMSTUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1").replace(/\/+$/, ""),
+		vllmBaseUrl: (env.VLLM_BASE_URL ?? "http://127.0.0.1:8000/v1").replace(/\/+$/, ""),
 		localContextWindow: parseIntEnv(env.SEAT_LOCAL_CONTEXT_WINDOW, 32768, "SEAT_LOCAL_CONTEXT_WINDOW"),
 		localMaxTokens: parseIntEnv(env.SEAT_LOCAL_MAX_TOKENS, 8192, "SEAT_LOCAL_MAX_TOKENS"),
 		mcpConfigPath: env.SEAT_MCP_SERVERS,
