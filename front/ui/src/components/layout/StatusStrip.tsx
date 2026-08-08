@@ -25,7 +25,7 @@ export function StatusStrip({ reach }: { reach: Reachability }) {
         ? {
             tone: "text-warn",
             state: "No profiles",
-            remedy: "Connected, but this instance holds no memory yet",
+            remedy: "connected, nothing stored yet",
           }
         : {
             tone: "text-[var(--live)]",
@@ -39,12 +39,17 @@ export function StatusStrip({ reach }: { reach: Reachability }) {
         ? {
             tone: "text-destructive",
             state: "Key rejected",
-            remedy: `Server answered ${reach.status} — set SHODH_API_KEY to the key it was started with`,
+            // The remedy names the variable and the value it needs, which is
+            // the whole of the fix. What the server answered is the evidence
+            // for the diagnosis and stays with it; anything past that is
+            // reassurance, and a broken state is not where reassurance earns
+            // room in a 26px strip.
+            remedy: `${reach.status} — set SHODH_API_KEY to the server's key`,
           }
         : {
             tone: "text-warn",
             state: "Not running",
-            remedy: "Start the shodh backend — nothing is lost while it is down",
+            remedy: "start the shodh backend",
           };
 
   return (

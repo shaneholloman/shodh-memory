@@ -27,7 +27,7 @@ import type { CorpusMemory } from "@/lib/api/corpus";
 // SHARED SHAPE
 // =============================================================================
 
-/** One flagged memory, with the sentence that justifies flagging it. */
+/** One flagged memory, with the evidence that justifies flagging it. */
 export interface Finding {
   memoryId: string;
   /** The memory's own text (a 500-char preview — `content_truncated` on the
@@ -42,27 +42,62 @@ export interface Finding {
    * never drawn and never printed: the magnitudes it ranks are unbounded (one
    * memory in this corpus sits 126 robust scales out, another 14), so any bar
    * scaled to the largest would render every other genuine finding as a stub
-   * and understate it. What each row states in words — the distance, the two
-   * quantities, the term count — is the honest presentation of its own
-   * magnitude, and position in the list is the comparison.
+   * and understate it. What each row states — the distance, the two quantities,
+   * the term count — is the honest presentation of its own magnitude, and
+   * position in the list is the comparison.
    */
   deviation: number;
-  /** The measure, stated in words, with the values it compared. */
-  measure: string;
+  /**
+   * THE ROW'S OWN MAGNITUDE, AND NOTHING THAT IS TRUE OF EVERY ROW.
+   *
+   * This used to be one sentence per finding, and on a real corpus four
+   * consecutive rows read "260 km / 259 km / 31 km / 18 km from the middle of
+   * the cluster the other 35 placed memories form, which normally sit 2.4 km
+   * out" — twelve identical words, three times over, for four numbers. The
+   * shared half of every comparison belongs to the SECTION, which states it
+   * once in `facts`; the row states only what distinguishes it.
+   *
+   * `value` is the measured quantity and is set in the mono face. `against` is
+   * the short phrase naming what it is a quantity OF — never a restatement of
+   * the section's baseline, and never omitted, because a bare "260 km" on a row
+   * is the cryptic token this split exists to avoid.
+   */
+  value: string;
+  against: string;
 }
 
 /**
- * What a lens has to say.
+ * What a lens says about itself, in the two registers the screen distinguishes.
+ *
+ * `facts` are short tokens rendered permanently under the section title — the
+ * numbers that define where this lens drew its line on THIS corpus. They are
+ * the section's half of every finding's comparison, stated once.
+ *
+ * `caveat` is a limitation that changes how the visible numbers should be read
+ * — a spread that fell back to a weaker estimator, memories excluded from the
+ * judgement entirely. It is ALWAYS rendered, never folded into an info panel:
+ * the published finding on info tips is that most people never open them, and a
+ * caveat nobody reads is worse than one that was never written, because the
+ * screen then looks like it made a stronger claim than it did.
+ *
+ * `detail` is elaboration for the section's info panel — true, useful, and
+ * never load-bearing. Nothing that qualifies a number on screen may go here.
  *
  * `insufficient` is a first-class outcome rather than an empty list, because
  * "no anomalies" and "not enough data to have an opinion" are different claims
  * and collapsing them into one blank panel would make the weaker one look like
- * the stronger one. The reason string names the shortfall in numbers.
+ * the stronger one. The reason names the shortfall in numbers.
  */
+interface LensBasis {
+  facts: string[];
+  caveat?: string;
+  detail?: string;
+}
+
 export type LensResult =
-  | { state: "findings"; findings: Finding[]; basis: string }
-  | { state: "clear"; basis: string }
-  | { state: "insufficient"; reason: string };
+  | ({ state: "findings"; findings: Finding[] } & LensBasis)
+  | ({ state: "clear" } & LensBasis)
+  | ({ state: "insufficient"; reason: string } & LensBasis);
 
 // =============================================================================
 // ROBUST STATISTICS
@@ -170,10 +205,13 @@ export function offPatternLocations(memories: CorpusMemory[]): LensResult {
   if (located.length < MIN_LOCATED) {
     return {
       state: "insufficient",
+      facts: [`${located.length} of ${memories.length} placed`, `${MIN_LOCATED} needed`],
       reason:
         located.length === 0
-          ? `Nothing here carries coordinates. A memory only has a position when whatever wrote it supplied one, and none of these ${memories.length} did — so there is no cluster to be outside of.`
-          : `A baseline needs at least ${MIN_LOCATED} placed memories to be worth trusting; this profile has ${located.length}. With fewer, every point is as much "the cluster" as any other.`,
+          ? "Nothing here carries coordinates, so there is no cluster to be outside of."
+          : "With fewer, every point is as much the cluster as any other.",
+      detail:
+        "A memory only carries a position when whatever wrote it supplied one. Imported corpora usually do; session captures usually do not.",
     };
   }
 
@@ -190,7 +228,9 @@ export function offPatternLocations(memories: CorpusMemory[]): LensResult {
   if (spread === null) {
     return {
       state: "clear",
-      basis: `All ${located.length} placed memories sit the same distance from the middle of the group, so there is no spread for anything to stand outside of.`,
+      facts: [`${located.length} placed`, "no spread"],
+      caveat:
+        "Every placed memory sits the same distance from the centre, so there is nothing for one to stand outside of.",
     };
   }
 
@@ -203,28 +243,35 @@ export function offPatternLocations(memories: CorpusMemory[]): LensResult {
       memoryId: memory.id,
       content: memory.content,
       deviation: (km - typical) / spread.scale,
-      measure: `${formatKm(km)} from the middle of the cluster the other ${others} placed memories form, which normally sit ${formatKm(typical)} out.`,
+      // Only the distance. "…from the middle of the cluster the other 35
+      // placed memories form, which normally sit 2.4 km out" is true of every
+      // row in this section and is stated once, above, in `facts`.
+      value: formatKm(km),
+      against: "from cluster centre",
     }))
     .sort((a, b) => b.deviation - a.deviation);
 
-  // The spread clause has to describe the estimator that actually produced the
-  // number. Saying "half of them fall within" of a MEAN deviation would be a
-  // false statement about the arithmetic, on a screen whose entire claim is
-  // that the arithmetic is stated.
-  const spreadClause = spread.robust
-    ? `and half of them fall within ${formatKm(spread.scale)} of that`
-    : `and more than half of them share one exact position — so the usual half-of-them spread came out at zero and the average distance from the centre, ${formatKm(spread.scale)}, stands in for it, which is a looser reading`;
+  // The spread token has to describe the estimator that actually produced the
+  // number. Saying "half within" of a MEAN deviation would be a false statement
+  // about the arithmetic, on a screen whose entire claim is that the arithmetic
+  // is stated — so the non-robust case does not get the token at all. It gets a
+  // caveat, on screen, in the state's own words.
+  const facts = [
+    `${located.length} placed`,
+    `typical ${formatKm(typical)} out`,
+    spread.robust ? `half within ${formatKm(spread.scale)}` : `spread ${formatKm(spread.scale)}`,
+    `flagged above ${formatKm(cutoff)}`,
+  ];
 
-  const basis =
-    `Centre and spread come from the ${located.length} placed memories themselves: the middle one sits ${formatKm(typical)} from the group's centre, ${spreadClause}. ` +
-    `Anything more than ${formatKm(cutoff)} out is listed.`;
+  const caveat = spread.robust
+    ? undefined
+    : `More than half of these share one exact position, so the median spread came out at zero and the average distance stands in for it — a looser line than the other measures draw.`;
+
+  const detail = `Centre is the median latitude and longitude of the ${located.length} placed memories, and distance is great-circle from there. The cutoff is ${MODIFIED_Z_CUTOFF} robust scales past the typical distance — Iglewicz & Hoaglin's published modified-z cutoff, not a number tuned to this corpus. The remaining ${others} placed memories are the baseline every row is measured against.`;
 
   return findings.length > 0
-    ? { state: "findings", findings, basis }
-    : {
-        state: "clear",
-        basis: `${basis} Nothing is.`,
-      };
+    ? { state: "findings", findings, facts, caveat, detail }
+    : { state: "clear", facts, caveat, detail };
 }
 
 // =============================================================================
@@ -383,7 +430,11 @@ export function quantityOutliers(memories: CorpusMemory[]): LensResult {
         memoryId: memory.id,
         content: memory.content,
         deviation: Math.log10(factor),
-        measure: `Two ${unit} figures in one memory that do not agree: ${formatValue(low.value)} and ${formatValue(high.value)} — a factor of ${factor.toFixed(1)}.`,
+        // Both numbers and the factor between them, which is the whole finding.
+        // What is NOT said is which one is wrong: the arithmetic cannot know,
+        // and a row that picked a side would be asserting past its evidence.
+        value: `${formatValue(low.value)} vs ${formatValue(high.value)} ${unit}`,
+        against: `${factor.toFixed(1)}× apart in one memory`,
       });
     }
   }
@@ -422,37 +473,58 @@ export function quantityOutliers(memories: CorpusMemory[]): LensResult {
         memoryId: entry.memory.id,
         content: entry.memory.content,
         deviation: z,
-        measure: `${formatValue(entry.value)} ${unit}, against a typical ${formatValue(centre)} ${unit} across the ${entries.length} memories that state one.`,
+        // The baseline stays on the row here, unlike the location lens: this
+        // section mixes units, so "typical 38 t" is true of the tonnes rows and
+        // false of the hours rows and cannot be hoisted into one section line.
+        value: `${formatValue(entry.value)} ${unit}`,
+        against: `typical ${formatValue(centre)} ${unit} across ${entries.length} memories`,
       });
     }
   }
 
   const parsedCount = perMemory.filter((p) => p.quantities.length > 0).length;
 
+  const unitMethod =
+    "Only a number written next to a known unit is read, and values are only ever compared within one unit. Percentages are left out on purpose: a percentage of one thing tells you nothing about a percentage of another.";
+
   if (parsedCount === 0) {
     return {
       state: "insufficient",
-      reason: `None of these ${memories.length} memories states a number with a unit attached. Counts on their own — containers, transactions, people — are not compared, because two counts of different things share nothing but a number.`,
+      facts: [`0 of ${memories.length} state a unit`],
+      reason: "Nothing here writes a number next to a unit this measure recognises.",
+      detail: `${unitMethod} Bare counts — containers, transactions, people — are not compared either, because two counts of different things share nothing but a number.`,
     };
   }
 
   const shortSummary = shortUnits
     .sort((a, b) => b.count - a.count)
     .slice(0, 4)
-    .map((u) => `${u.unit} (${u.count})`)
+    .map((u) => `${u.unit} ${u.count}`)
     .join(", ");
 
-  const basis =
-    `Read from the text of ${parsedCount} of the ${memories.length} memories: only a number written next to a known unit counts, values are only ever compared with the same unit, and percentages are left out because a percentage of one thing tells you nothing about a percentage of another. ` +
-    (comparedUnits.length > 0
-      ? `${comparedUnits.join(", ")} appear in enough memories (${MIN_UNIT_SAMPLES} or more) to have a normal range worth comparing against.`
-      : `No unit yet appears in the ${MIN_UNIT_SAMPLES} separate memories needed to establish a normal range${shortSummary ? ` — the most common so far are ${shortSummary}` : ""}. Until one does, only disagreements inside a single memory can be found.`);
+  const facts = [
+    `${parsedCount} of ${memories.length} state a unit`,
+    comparedUnits.length > 0
+      ? `range compared: ${comparedUnits.join(", ")}`
+      : `no unit reaches ${MIN_UNIT_SAMPLES} memories`,
+  ];
+
+  // A scope limit, not a footnote: with no unit populous enough to have a
+  // normal range, this section CANNOT have found a corpus-wide outlier, and a
+  // reader who does not know that would read an empty section as "checked, and
+  // nothing was out of range".
+  const caveat =
+    comparedUnits.length > 0
+      ? undefined
+      : "No unit yet appears in enough separate memories to establish a normal range, so only disagreements inside a single memory can be found.";
+
+  const detail = `${unitMethod} A unit needs ${MIN_UNIT_SAMPLES} separate memories before a normal range is claimed for it${shortSummary ? `; the most common so far are ${shortSummary}` : ""}.`;
 
   findings.sort((a, b) => b.deviation - a.deviation);
 
   return findings.length > 0
-    ? { state: "findings", findings, basis }
-    : { state: "clear", basis: `${basis} Nothing stands out.` };
+    ? { state: "findings", findings, facts, caveat, detail }
+    : { state: "clear", facts, caveat, detail };
 }
 
 // =============================================================================
@@ -495,7 +567,10 @@ export function isolatedMemories(memories: CorpusMemory[]): LensResult {
   if (memories.length < MIN_CORPUS_FOR_ISOLATION) {
     return {
       state: "insufficient",
-      reason: `"Connected to nothing else" needs something else to be connected to. This profile holds ${memories.length} ${memories.length === 1 ? "memory" : "memories"}; below ${MIN_CORPUS_FOR_ISOLATION} the answer says more about the corpus than about any memory in it.`,
+      facts: [`${memories.length} stored`, `${MIN_CORPUS_FOR_ISOLATION} needed`],
+      reason: "Below this, the answer says more about the corpus than about any memory in it.",
+      detail:
+        '"Connected to nothing else" needs something else to be connected to. Two memories count as connected when the extraction pulled the same term out of both.',
     };
   }
 
@@ -527,26 +602,31 @@ export function isolatedMemories(memories: CorpusMemory[]): LensResult {
       // none of which any other memory names, is further out than one naming
       // two. Ordering only — never shown as a number.
       deviation: own.size,
-      measure: `All ${own.size} of the terms taken from this memory — ${[...own].slice(0, 4).join(", ")}${own.size > 4 ? ", …" : ""} — appear nowhere else in the ${memories.length} memories here.`,
+      value: `${own.size} ${own.size === 1 ? "term" : "terms"}`,
+      // The terms themselves, not a count of them: this is the one lens whose
+      // evidence is words rather than a quantity, and "12 terms, none shared"
+      // with nothing to check is an assertion. Four is what fits on a row.
+      against: `none shared — ${[...own].slice(0, 4).join(", ")}${own.size > 4 ? ", …" : ""}`,
     });
   }
 
   findings.sort((a, b) => b.deviation - a.deviation);
 
   const judged = memories.length - unextracted.length;
+  const facts = [`${judged} of ${memories.length} have terms to compare`];
+
+  // Which memories were judged at all is a limit on the finding, not a
+  // footnote about it: a reader who thinks all 74 were checked reads an empty
+  // section as a stronger result than it is.
   const caveat =
     unextracted.length > 0
-      ? ` ${unextracted.length} of the ${memories.length} yielded no terms at all, so nothing can be said about what they connect to — they are left out rather than counted as isolated.`
-      : "";
+      ? `${unextracted.length} of the ${memories.length} yielded no terms at all, so nothing can be said about what they connect to — they are left out rather than counted as isolated.`
+      : undefined;
 
-  const basis = `Two memories count as connected when the extraction pulled the same term out of both. ${judged} of the ${memories.length} memories here have terms to compare; these share none of theirs with any other.${caveat}`;
+  const detail =
+    "Two memories count as connected when the extraction pulled the same term out of both — including broad terms, so a memory reaches this list only by sharing nothing at all. The measure under-reports rather than over-reports, which is the safe direction on a screen like this one.";
 
-  if (findings.length === 0) {
-    return {
-      state: "clear",
-      basis: `Two memories count as connected when the extraction pulled the same term out of both. Every one of the ${judged} memories with terms shares at least one with another.${caveat}`,
-    };
-  }
-
-  return { state: "findings", findings, basis };
+  return findings.length > 0
+    ? { state: "findings", findings, facts, caveat, detail }
+    : { state: "clear", facts, caveat, detail };
 }

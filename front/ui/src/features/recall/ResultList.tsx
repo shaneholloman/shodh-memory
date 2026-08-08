@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
 import type { RecallLineageEdge, RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
+import { Meta, Stat } from "@/components/ui/meta";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { whyItSurfaced } from "./why";
@@ -80,14 +81,23 @@ function ResultRow({
           omitted independently: a memory the graph reached with no lineage to
           the rest of the set says only the first, one in a set with no
           attribution says only the second. */}
+      {/* Two tokens, not two clauses. "Connects to 6 others here" said in five
+          words what "connects to 6 here" says in four and a mono numeral — and
+          this line repeats on all twenty-five rows, so a word saved is
+          twenty-five words off the column. The leg phrase is not shortened
+          further: "No text matched — the graph reached it" is the product's
+          differentiator stated where it happens, and it is the one thing on a
+          result row that a reader has never seen before. */}
       {why ? (
-        <p className="text-muted-foreground/70 mt-1.5 text-[11px] leading-relaxed">
+        <Meta className="mt-1 text-muted-foreground/70">
           {why.legs}
-          {why.legs !== null && why.links > 0 ? " · " : null}
-          {why.links > 0
-            ? `Connects to ${why.links} other${why.links === 1 ? "" : "s"} here`
-            : null}
-        </p>
+          {why.links > 0 ? (
+            <>
+              <span>connects to</span>
+              <Stat value={why.links} label="here" />
+            </>
+          ) : null}
+        </Meta>
       ) : null}
 
       <div className="mt-2 flex items-center gap-2">

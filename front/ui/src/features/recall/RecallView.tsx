@@ -1,8 +1,11 @@
 import { useMemo } from "react";
+import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ApiError, NetworkError, type Reachability } from "@/lib/api";
 import { corpusToRecallMemory, useCorpus, type CorpusMemory } from "@/lib/api/corpus";
 import { EmptyState } from "@/components/ui/empty-state";
+import { InfoHint } from "@/components/ui/info-hint";
+import { Meta, Stat } from "@/components/ui/meta";
 import { useSession } from "@/stores/session";
 import { ResultList, ResultListSkeleton } from "./ResultList";
 import { GraphStage } from "./GraphStage";
@@ -24,6 +27,15 @@ import { corpusCues } from "./cues";
  * are an answer, and the head says how much was searched, how long it took, and
  * the one thing about this product that a competing screenful of results cannot
  * claim: none of it was written.
+ *
+ * BOTH HEADS ARE COUNTS AND CHIPS, NOT SENTENCES. This column is 340px wide, so
+ * every clause in it wrapped to two or three lines and pushed the first result
+ * down the screen — the heading was costing more vertical space than the row it
+ * was introducing. Facts became tokens; the two statements that are genuinely
+ * claims rather than measurements ("nothing here was written by a model", "this
+ * time is server-side only") became a chip and an icon, so they are still on
+ * screen and still checkable but are no longer paragraphs a returning reader
+ * scrolls past every time.
  */
 
 /** How many of the newest memories the pre-query listing shows. Enough to make
@@ -46,17 +58,32 @@ function CorpusHead({ memories, total }: { memories: CorpusMemory[] | undefined;
   const cues = useMemo(() => corpusCues(memories), [memories]);
 
   return (
-    <div className="border-border shrink-0 border-b px-4 py-2.5">
-      <p className="text-muted-foreground text-[11px] leading-relaxed">
-        {total} {total === 1 ? "memory" : "memories"} here, newest first. Search to rank
-        them by relevance.
-      </p>
+    <div className="border-border shrink-0 border-b px-4 py-2">
+      {/* Two facts, not a sentence. "Search to rank them by relevance" was
+          telling a reader looking at a search field what a search field does;
+          the cue row below is a better version of the same instruction, because
+          pressing one carries it out. */}
+      <Meta>
+        <Stat value={total} label={total === 1 ? "memory" : "memories"} />
+        <span>newest first</span>
+      </Meta>
 
       {cues.length > 0 ? (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          {/* Named, because four bare words under a sentence read as tags on the
-              screen rather than as things to press. */}
-          <span className="text-muted-foreground/60 mr-0.5 text-[11px]">Mentioned most</span>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {/* A search glyph rather than the words "Mentioned most". Four bare
+              words under a line of text read as tags rather than as things to
+              press, which is why the heading existed — but a magnifier in front
+              of a row of pills says "these run a search" without spending a
+              line on it, and the count inside each pill still says why these
+              four. What the heading carried for a screen reader has not been
+              dropped: it was never associated with the buttons anyway, and each
+              button's own `aria-label` states its name, its count and what
+              pressing it does. */}
+          <Search
+            aria-hidden="true"
+            className="text-muted-foreground/50 mr-0.5 size-3 shrink-0"
+            strokeWidth={2}
+          />
           {cues.map((cue) => (
             <button
               key={cue.text}
@@ -120,23 +147,51 @@ function AnswerHead({
   retrievalUs: number | undefined;
 }) {
   return (
-    <div className="border-border shrink-0 border-b px-4 py-2.5">
-      <p className="text-muted-foreground text-[11px]">
+    // `items-start` in a column, not a wrapping row: this head lives in a
+    // 340px column and the chip never fits beside the counts, so a row that
+    // "wraps" only ever produces one arrangement — and `ml-auto` pushed the
+    // wrapped chip to the right margin, where it read as floating rather than
+    // as the head's second line.
+    <div className="border-border flex shrink-0 flex-col items-start gap-1 border-b px-4 py-2">
+      <Meta>
         {/* "Top", not a bare count: `shown` is capped by the request limit
             (lib/api/recall.ts sends 25), so "25 of 74" would read as "25
             matched" when it means "the 25 best of what matched". "Top 5 of 74"
             stays exact when fewer come back. */}
-        Top {shown} of {total} {total === 1 ? "memory" : "memories"}
+        <>
+          <span>Top</span>
+          <Stat value={`${shown} of ${total}`} label={total === 1 ? "memory" : "memories"} />
+        </>
         {retrievalUs !== undefined ? (
-          <span title="Time the server spent retrieving and ranking. Excludes the network round trip.">
-            {" · retrieved in "}
-            <span className="mono">{Math.round(retrievalUs / 1000)} ms</span>
-          </span>
+          <>
+            <Stat value={`${Math.round(retrievalUs / 1000)} ms`} label="retrieval" />
+            {/* The measurement is server-side retrieval only and is labelled as
+                such; what "server-side" excludes is the elaboration, not the
+                claim, so it is the one thing here that goes behind the icon. */}
+            <InfoHint label="retrieval time">
+              Time the server spent retrieving and ranking, as it reported it. It excludes the
+              network round trip and everything the browser then does, so it is not the time you
+              waited.
+            </InfoHint>
+          </>
         ) : null}
-      </p>
-      <p className="text-muted-foreground/60 mt-1 text-[11px] leading-relaxed">
-        Nothing here was written by a model — these are stored memories, ranked.
-      </p>
+      </Meta>
+
+      {/* The product's actual edge, and the one thing on this screen that
+          cannot be checked by looking at it — so it stays visible, as a chip,
+          rather than becoming a sentence that is read once and skipped
+          thereafter. The chip states the claim; the panel behind it states the
+          limit of the claim, which matters: a local encoder embeds the query on
+          every search, so "no model runs" would be false. Generation is what is
+          absent, and generation is what the chip says. */}
+      <span className="border-border text-muted-foreground/80 flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px]">
+        Retrieved, not generated
+        <InfoHint label="how these results were produced" align="right">
+          Every row is a stored memory rendered verbatim and ranked — nothing here was written by a
+          model, and the Inspector traces each one back to what recorded it. Retrieval does embed
+          your query with a local encoder; it is generation that is absent, not models.
+        </InfoHint>
+      </span>
     </div>
   );
 }
@@ -172,7 +227,8 @@ function ResultPane({ reach }: { reach: Reachability }) {
     return (
       <EmptyState
         title="No profile to search"
-        body="This instance holds no memory yet. Recall needs a profile that already exists — searching would otherwise create an empty one."
+        body="This instance holds no memory yet."
+        more="Recall needs a profile that already exists. Searching against an invented name would silently provision an empty store rather than fail, so the field stays closed until the server lists one."
       />
     );
   }
@@ -186,7 +242,7 @@ function ResultPane({ reach }: { reach: Reachability }) {
       return (
         <EmptyState
           title="Nothing remembered yet"
-          body="Once this profile holds memory, the newest entries appear here before any search."
+          body="The newest entries appear here as soon as this profile holds any."
         />
       );
     }
@@ -219,9 +275,13 @@ function ResultPane({ reach }: { reach: Reachability }) {
 
   if (data && data.memories.length === 0) {
     return (
+      // A zero-result is not an empty screen: it is a finding about the cue,
+      // and the useful half of it is the next move, so that is what the body
+      // is. Why nothing activated is the mechanism, and goes behind the icon.
       <EmptyState
         title="Nothing surfaced"
-        body="No memory in this profile activated strongly enough for that cue. A shorter, more general cue usually reaches further."
+        body="Try a shorter, more general cue."
+        more="No memory in this profile activated strongly enough for that cue. Recall reaches through meaning, wording and the graph at once, so a broader cue usually reaches further than a more precise one."
       />
     );
   }

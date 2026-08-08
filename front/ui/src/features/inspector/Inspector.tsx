@@ -8,6 +8,7 @@ import {
 import { useSession } from "@/stores/session";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { Badge } from "@/components/ui/badge";
+import { InfoHint } from "@/components/ui/info-hint";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { relName } from "@/features/recall/relation";
 import { memoryTier, MEMORY_TIER_LABEL, MEMORY_TIER_MEANING } from "@/features/recall/tier";
@@ -122,16 +123,17 @@ export function Inspector() {
       // viewport at all.
       className="border-border bg-card absolute top-12 right-0 bottom-0 z-20 flex w-[min(280px,36vw)] flex-col border-l"
     >
-      <header className="border-border shrink-0 border-b px-4 py-3">
+      {/* The two kinds of object this pane holds answer different questions, so
+          the header names the one on screen — but it names it, it no longer
+          describes it. "Every belief traces back to the sessions it came from"
+          was a claim about the product printed above a panel that then goes on
+          to demonstrate it, on every selection, forever. One word does the
+          orientation; the panel itself does the rest. */}
+      <header className="border-border flex shrink-0 items-baseline gap-2 border-b px-4 py-2.5">
         <h2 className="text-[12px] font-medium tracking-tight">Detail</h2>
-        <p className="text-muted-foreground mt-0.5 text-[11px] leading-relaxed">
-          {/* The two kinds of object this pane holds answer different
-              questions, so the subtitle names the one on screen rather than
-              making one claim that is only true half the time. */}
-          {selectedEntityId
-            ? "What the corpus knows about this, and how it is connected."
-            : "Every belief traces back to the sessions it came from."}
-        </p>
+        <span className="text-muted-foreground/60 text-[11px]">
+          {selectedEntityId ? "entity" : memory ? "memory" : null}
+        </span>
       </header>
 
       <ScrollArea className="min-h-0 flex-1">
@@ -147,7 +149,7 @@ export function Inspector() {
           <Empty
             body={
               data || corpus
-                ? "Select a memory to see what it is, when it was recorded, and what it connects to."
+                ? "Select a memory or an entity."
                 : "This profile's memory is still loading."
             }
           />
@@ -163,9 +165,17 @@ export function Inspector() {
                   whose whole job is trust has to be labelled as cut, not left
                   to look like the whole record. */}
               {listed?.content_truncated ? (
-                <p className="text-muted-foreground/60 mt-1.5 text-[11px]">
-                  Cut short — this memory is {listed.content_length} characters long.
-                  The listing carries a preview; a search result carries the whole text.
+                <p className="text-muted-foreground/60 mt-1.5 flex items-center gap-1.5 text-[11px]">
+                  {/* The label stays on screen — text that silently stops
+                      mid-sentence in a pane whose whole job is trust has to be
+                      marked as cut. Why it is cut, and how to get the rest, is
+                      mechanism and goes behind the icon. */}
+                  Preview · <span className="mono">{listed.content_length}</span> characters in full
+                  <InfoHint label="why this is a preview">
+                    The corpus listing caps content at 500 characters so one request can carry the
+                    whole profile. A search result carries the whole text — the same memory reached
+                    from a query shows in full here.
+                  </InfoHint>
                 </p>
               ) : null}
 
