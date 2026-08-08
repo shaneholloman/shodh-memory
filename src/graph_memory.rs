@@ -4296,14 +4296,22 @@ impl GraphMemory {
                     },
                 );
             }
-        } else if edge.provenance.len() > provenance_max_sources() {
-            let cap = provenance_max_sources();
-            edge.provenance.sort_by(|a, b| {
-                b.mention_count
-                    .cmp(&a.mention_count)
-                    .then_with(|| b.last_observed.cmp(&a.last_observed))
-            });
-            edge.provenance.truncate(cap);
+        } else {
+            // A caller-seeded trail goes through `merge_provenance` too, rather
+            // than being capped in place. `merge_provenance` is the ONLY writer
+            // that maintains the trail's defining invariant — one record per
+            // distinct `source_episode_id` — and promotion now reads
+            // `provenance.len()` as a count of DISTINCT attesting episodes
+            // (see `RelationshipEdge::distinct_attesting_episodes`). The in-place
+            // sort+truncate that used to live here deduplicated nothing, so a
+            // caller that seeded the same episode twice (e.g. a `SemanticFact`
+            // whose `source_memories` repeats a memory id) would have inflated
+            // its own corroboration count. It also applies the same
+            // keep-the-strongest cap, so nothing is lost by routing through it.
+            let seeded = std::mem::take(&mut edge.provenance);
+            for record in seeded {
+                merge_provenance(&mut edge.provenance, record);
+            }
         }
 
         // Reachability: an edge can be BORN corroborated. The SemanticFact path
@@ -10908,6 +10916,43 @@ mod tests {
             edge.strengthen_at(past_window),
             Some(("L1Working".to_string(), "L2Episodic".to_string())),
             "the clock arm must still work on its own"
+        );
+    }
+
+    #[test]
+    fn a_caller_seeded_trail_is_deduplicated_by_episode() {
+        // `provenance.len()` is only a count of DISTINCT attesting episodes
+        // because `merge_provenance` is the sole writer. The `SemanticFact`
+        // ingest path seeds a whole trail at once from `fact.source_memories`,
+        // and nothing guarantees that list has no repeats — an edge could
+        // otherwise claim four attestations from one memory cited four times
+        // and promote straight past L2 on evidence it does not have.
+        let now = Utc::now();
+        let repeated = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        let mut trail: Vec<ProvenanceRecord> = Vec::new();
+        for record in [
+            attestation(repeated, now),
+            attestation(repeated, now),
+            attestation(repeated, now),
+            attestation(other, now),
+        ] {
+            merge_provenance(&mut trail, record);
+        }
+
+        assert_eq!(
+            trail.len(),
+            2,
+            "one memory cited three times is one attesting episode"
+        );
+        let repeated_record = trail
+            .iter()
+            .find(|p| p.source_episode_id == repeated)
+            .expect("repeated episode present");
+        assert_eq!(
+            repeated_record.mention_count, 3,
+            "the repeats must land on mention_count, which promotion ignores"
         );
     }
 
