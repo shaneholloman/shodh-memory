@@ -93,8 +93,8 @@ struct CorpusItem {
 /// DIFFERENT episodes, and that distribution must come from real data rather
 /// than from a shape chosen by whoever wrote the test.
 fn load_corpus() -> Vec<CorpusItem> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/recall/corpora/locomo-gate.jsonl");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/recall/corpora/locomo-gate.jsonl");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read corpus {}: {e}", path.display()));
 
@@ -104,7 +104,10 @@ fn load_corpus() -> Vec<CorpusItem> {
             let v: serde_json::Value = serde_json::from_str(line).expect("corpus line is JSON");
             CorpusItem {
                 id: v["id"].as_str().expect("corpus item id").to_string(),
-                content: v["content"].as_str().expect("corpus item content").to_string(),
+                content: v["content"]
+                    .as_str()
+                    .expect("corpus item content")
+                    .to_string(),
             }
         })
         .collect()
@@ -256,9 +259,18 @@ fn batch_ingest_consolidates_by_evidence_not_by_clock() {
             .count()
     };
     let total = edges.len();
-    let pct = |n: usize| if total == 0 { 0.0 } else { 100.0 * n as f64 / total as f64 };
+    let pct = |n: usize| {
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * n as f64 / total as f64
+        }
+    };
 
-    println!("\n=== batch-ingested store: {} episodes, {total} edges ===", corpus.len());
+    println!(
+        "\n=== batch-ingested store: {} episodes, {total} edges ===",
+        corpus.len()
+    );
     println!("ingest wall-clock: {ingest_secs}s");
     println!(
         "AFTER (episode-aware gate):  L1 {} ({:.1}%)  L2 {} ({:.1}%)  L3 {} ({:.1}%)",
