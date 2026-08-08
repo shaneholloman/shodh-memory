@@ -51,10 +51,10 @@ import shodhMark from "@/assets/shodh-mark.png";
 /**
  * The destinations, and the one line each of them is.
  *
- * A caption is not a tooltip and not a tagline. It is the sentence someone
- * needs in order to know what they are looking at the moment they arrive, so it
- * says what the DATA on that screen is, in the words a person would use. Three
- * rules it is held to, all of them learned from copy that failed them:
+ * A caption is not a tooltip and not a tagline. It is what someone needs in
+ * order to know what they are looking at the moment they arrive, so it says
+ * what the DATA on that screen is, in the words a person would use. Four rules
+ * it is held to, all of them learned from copy that failed them:
  *
  *  - No subsystem words. "corpus", "session store", "spreading activation" name
  *    parts of this program, not things a reader has.
@@ -63,6 +63,20 @@ import shodhMark from "@/assets/shodh-mark.png";
  *    reads as the wrong screen rather than as a fuller one.
  *  - It labels; it does not sell. No adjective that the screen cannot be
  *    checked against.
+ *  - A NOUN PHRASE, NOT A SENTENCE, AND UNDER SIX WORDS. These were clauses —
+ *    "Search this memory, and see what connects to what" — sitting permanently
+ *    beside a one-word title in a 48px bar, on every screen, on every visit.
+ *    The caption has to survive being read at a glance by someone who has read
+ *    it forty times before, and a clause does not: it gets skipped, which makes
+ *    it cost its space and pay nothing. Naming the data in three words is read
+ *    every time.
+ *
+ * Deliberately NOT moved behind an info affordance, and this is the one place
+ * in the density pass where that was the wrong tool. The documented failure
+ * this caption was added to fix is people arriving somewhere and not knowing
+ * what the data means — and by definition those people do not know there is
+ * anything to ask about, so an icon pays out to nobody. It gets shorter; it
+ * does not get hidden.
  *
  * Read in two places — the rail (`Placeholder`, for destinations with nothing
  * behind them yet) and the header, next to the title (TopBar.tsx). Both read it
@@ -74,49 +88,49 @@ export const DESTINATIONS = [
     path: "/chat",
     label: "Conversations",
     icon: MessageSquare,
-    caption: "Ask a model that can read this memory",
+    caption: "A model that can read this memory",
   },
   {
     id: "recall",
     path: "/recall",
     label: "Recall",
     icon: Search,
-    caption: "Search this memory, and see what connects to what",
+    caption: "Search memory and its connections",
   },
   {
     id: "graph",
     path: "/graph",
     label: "Graph",
     icon: Share2,
-    caption: "The things this memory knows about, and how they relate",
+    caption: "Entities, and how they relate",
   },
   {
     id: "geo",
     path: "/geo",
     label: "Geo",
     icon: Globe,
-    caption: "Where this memory happened, on a map",
+    caption: "Where memory happened",
   },
   {
     id: "anomalies",
     path: "/anomalies",
     label: "Anomalies",
     icon: TriangleAlert,
-    caption: "What stands out against this profile's own normal",
+    caption: "What deviates from this profile's normal",
   },
   {
     id: "tasks",
     path: "/tasks",
     label: "Tasks",
     icon: ListChecks,
-    caption: "Open work picked up from what was recorded",
+    caption: "Open work found in memory",
   },
   {
     id: "providers",
     path: "/providers",
     label: "Providers",
     icon: KeyRound,
-    caption: "Where models run, and the keys they need",
+    caption: "Where models run, and their keys",
   },
 ] as const;
 
