@@ -1,4 +1,6 @@
+import { useMemo } from "react";
 import { ApiError, NetworkError, type Reachability } from "@/lib/api";
+import { corpusToRecallMemory, useCorpus } from "@/lib/api/corpus";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ResultList, ResultListSkeleton } from "./ResultList";
 import { GraphStage } from "./GraphStage";
@@ -18,6 +20,19 @@ function ResultPane({ reach }: { reach: Reachability }) {
   // The query itself lives in `useRecall` — the graph stage renders the same
   // result set and must not issue a second retrieval to get it.
   const { data, error, isFetching, profile, query } = useRecall(reach);
+  const corpus = useCorpus(reach);
+
+  // The pre-query listing: newest first. The corpus endpoint already returns
+  // newest-first, but sorting here keeps the promise in the heading true even
+  // if that ordering ever changes server-side.
+  const recent = useMemo(
+    () =>
+      [...(corpus.data?.memories ?? [])]
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, 50)
+        .map(corpusToRecallMemory),
+    [corpus.data],
+  );
 
   if (reach.state !== "online") {
     return (
@@ -38,11 +53,25 @@ function ResultPane({ reach }: { reach: Reachability }) {
   }
 
   if (!query.trim()) {
+    // No query yet: open onto the corpus, newest first, instead of onto an
+    // instruction. The list IS the invitation — it shows what there is to
+    // search, and selecting a row inspects it like any result.
+    if (corpus.isFetching && !corpus.data) return <ResultListSkeleton />;
+    if (recent.length === 0) {
+      return (
+        <EmptyState
+          title="Nothing remembered yet"
+          body="Once this profile holds memory, the newest entries appear here before any search."
+        />
+      );
+    }
     return (
-      <EmptyState
-        title="Search memory"
-        body="A few words are enough. Recall starts from meaning, not from matching the words that were stored."
-      />
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="text-muted-foreground border-border shrink-0 border-b px-4 py-2 text-[11px]">
+          Newest memories — search above to rank by relevance
+        </div>
+        <ResultList memories={recent} />
+      </div>
     );
   }
 
