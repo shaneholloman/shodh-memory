@@ -97,15 +97,20 @@ fn load_corpus() -> Vec<CorpusItem> {
 /// reads. A census taken through the fallback would be a census of the fallback.
 fn build_ner() -> shodh_memory::embeddings::ner::NeuralNer {
     use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
-    NeuralNer::new(NerConfig::from_env()).unwrap_or_else(|e| {
-        panic!(
-            "this measurement requires the real NER weights, and refuses to \
-             silently substitute the rule-based fallback (different entity \
-             population => different episode-repeat distribution => a census of \
-             the fallback rather than of the corpus). Point \
-             SHODH_GLINER_MODEL_PATH at the model directory. Loader said: {e}"
-        )
-    })
+    let ner = NeuralNer::new(NerConfig::from_env()).expect("construct NER");
+    // `NeuralNer::new` NEVER returns Err for a missing model — it logs a warning
+    // and degrades to the rule-based fallback. A census taken through the
+    // fallback is a census of the fallback: a different entity population gives
+    // a different cross-episode repeat distribution, which is the only input
+    // this measurement reads. Fail loudly instead.
+    assert!(
+        !ner.is_fallback_mode(),
+        "this measurement requires the real GLiNER weights and refuses to \
+         silently substitute the rule-based fallback. Set SHODH_GLINER_MODEL_PATH \
+         to a directory containing model.onnx, tokenizer.json and \
+         label_embeddings.bin"
+    );
+    ner
 }
 
 /// Ingest a corpus the way `MemorySystem::connect_entities_in_graph` does:
