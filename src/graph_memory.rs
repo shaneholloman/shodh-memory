@@ -553,26 +553,6 @@ impl EdgeTier {
         }
     }
 
-    /// Minimum elapsed time, in seconds, between the moment an edge entered this
-    /// tier and the moment it may leave it for the next one.
-    ///
-    /// Strength alone is not evidence of consolidation. From the birth weight of
-    /// 0.4 a single `strengthen` call clears `L1_PROMOTION_THRESHOLD` and three
-    /// clear `L2_PROMOTION_THRESHOLD`, while three independent strengthen paths
-    /// touch the same entity edges within one request — so without a clock, one
-    /// conversational turn promoted an edge from "working" all the way to
-    /// "near-permanent semantic".
-    ///
-    /// The separations deliberately **mirror the memory-tier clock** rather than
-    /// inventing a second set of numbers: 30 minutes for the first step
-    /// ([`TIER_PROMOTION_WORKING_AGE_SECS`](crate::constants::TIER_PROMOTION_WORKING_AGE_SECS))
-    /// and 24 hours for the second
-    /// ([`TIER_PROMOTION_SESSION_AGE_SECS`](crate::constants::TIER_PROMOTION_SESSION_AGE_SECS)).
-    /// Those are the synaptic-consolidation window (McGaugh 2000) and the
-    /// sleep-dependent hippocampal→cortical transfer window (Rasch & Born 2013)
-    /// respectively — the same biology the edge tiers cite, so the two
-    /// consolidation clocks now at least tick in the same units.
-    ///
     /// How fast an edge in this tier experiences time on the Wixted hybrid decay
     /// curve, relative to the L2/episodic reference.
     ///
@@ -588,12 +568,69 @@ impl EdgeTier {
         }
     }
 
-    /// `None` for L3: there is no next tier.
+    /// Minimum elapsed time, in seconds, between the moment an edge entered this
+    /// tier and the moment it may leave it for the next one. `None` for L3:
+    /// there is no next tier.
+    ///
+    /// Strength alone is not evidence of consolidation. From the birth weight of
+    /// 0.4 a single `strengthen` call clears `L1_PROMOTION_THRESHOLD` and three
+    /// clear `L2_PROMOTION_THRESHOLD`, while three independent strengthen paths
+    /// touch the same entity edges within one request — so without a gate, one
+    /// conversational turn promoted an edge from "working" all the way to
+    /// "near-permanent semantic".
+    ///
+    /// The separations deliberately **mirror the memory-tier clock** rather than
+    /// inventing a second set of numbers: 30 minutes for the first step
+    /// ([`TIER_PROMOTION_WORKING_AGE_SECS`](crate::constants::TIER_PROMOTION_WORKING_AGE_SECS))
+    /// and 24 hours for the second
+    /// ([`TIER_PROMOTION_SESSION_AGE_SECS`](crate::constants::TIER_PROMOTION_SESSION_AGE_SECS)).
+    /// Those are the synaptic-consolidation window (McGaugh 2000) and the
+    /// sleep-dependent hippocampal→cortical transfer window (Rasch & Born 2013)
+    /// respectively — the same biology the edge tiers cite, so the two
+    /// consolidation clocks at least tick in the same units.
+    ///
+    /// This is now **one of two** ways to satisfy the sustained-evidence gate;
+    /// see [`promotion_min_episodes`](Self::promotion_min_episodes) for why the
+    /// clock alone was not merely conservative but wrong.
     pub fn promotion_min_separation_secs(&self) -> Option<i64> {
         use crate::constants::*;
         match self {
             Self::L1Working => Some(TIER_PROMOTION_WORKING_AGE_SECS),
             Self::L2Episodic => Some(TIER_PROMOTION_SESSION_AGE_SECS),
+            Self::L3Semantic => None,
+        }
+    }
+
+    /// Minimum number of **distinct attesting episodes** an edge must carry to
+    /// leave this tier. `None` for L3: there is no next tier.
+    ///
+    /// The clock was a *proxy* for independent evidence, and it was the wrong
+    /// one. Elapsed minutes are a property of the ingest schedule, not of the
+    /// evidence: a corpus imported in one pass — which is how every import,
+    /// every eval run and every seeded deployment works — creates all of its
+    /// edges within minutes, so under a clock-only gate not one of them could
+    /// ever promote. They stayed at L1 with `EDGE_TIER_TRUST_L1` (0.20, a 4×
+    /// retrieval-trust penalty against L3) and then aged out on the L1 prune
+    /// schedule. That is not a consolidation policy; it is scheduled data loss
+    /// that happens to spare interactively-built graphs.
+    ///
+    /// Distinct episodes measure the thing the clock was standing in for. The
+    /// anti-burst intent is fully preserved, because the counter is
+    /// deduplicated by `source_episode_id` in `merge_provenance`: one
+    /// conversation mentioning two entities forty times is ONE episode however
+    /// many times it is re-read, and however many of the three in-request
+    /// strengthen paths touch the edge. Only a genuinely different source
+    /// memory advances it.
+    ///
+    /// See [`TIER_PROMOTION_L2_MIN_EPISODES`](crate::constants::TIER_PROMOTION_L2_MIN_EPISODES)
+    /// and [`TIER_PROMOTION_L3_MIN_EPISODES`](crate::constants::TIER_PROMOTION_L3_MIN_EPISODES)
+    /// for the values and for why cumulative counts give "evidence acquired
+    /// since entering this tier" without persisting a per-tier counter.
+    pub fn promotion_min_episodes(&self) -> Option<usize> {
+        use crate::constants::*;
+        match self {
+            Self::L1Working => Some(TIER_PROMOTION_L2_MIN_EPISODES),
+            Self::L2Episodic => Some(TIER_PROMOTION_L3_MIN_EPISODES),
             Self::L3Semantic => None,
         }
     }
@@ -886,21 +923,49 @@ fn provenance_max_sources() -> usize {
 }
 
 /// Default minimum number of distinct attesting episodes for corroboration to
-/// shield an edge from strength-based pruning (used when `SHODH_PROVENANCE_AWARE_PRUNE=1`).
-const PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT: usize = 3;
+/// shield an edge from strength-based pruning.
+///
+/// **Deliberately equal to [`TIER_PROMOTION_L2_MIN_EPISODES`](crate::constants::TIER_PROMOTION_L2_MIN_EPISODES),
+/// and derived from it so the two cannot drift.** The invariant is: *the
+/// evidence that earns promotion also earns survival.*
+///
+/// It has to be, because promotion and pruning read the same evidence but push
+/// in opposite directions. L2's prune threshold (0.2) is double L1's (0.1),
+/// while the executed decay rate is near-identical across the two tiers over the
+/// first three days (L1 λ = 0.029/hour ≈ 0.696/day; L2's hybrid consolidation
+/// leg λ = `DECAY_LAMBDA_CONSOLIDATION` = 0.693/day). So promotion, taken alone,
+/// makes an edge prunable EARLIER — for a batch-ingested edge at birth weight,
+/// ~41.5 idle hours at L2 against ~58.8 at L1. Protecting at a HIGHER episode
+/// count than promotion requires would leave exactly the newly-promoted band
+/// (2 episodes here) promoted-but-unprotected, i.e. it would consolidate an
+/// edge and shorten its life in the same step.
+const PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT: usize =
+    crate::constants::TIER_PROMOTION_L2_MIN_EPISODES;
 
 /// Resolve the provenance-aware-pruning corroboration threshold from the env.
 ///
-/// `SHODH_PROVENANCE_AWARE_PRUNE` gates the whole feature and is cached (read
-/// once per process; eval/production set it before start):
-/// - unset / `0` / `false` / empty → `None` (feature OFF — only LTP protects,
-///   exactly the pre-existing behavior),
+/// `SHODH_PROVENANCE_AWARE_PRUNE` gates the feature and is cached (read once per
+/// process; eval/production set it before start):
+/// - unset → `Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT)` (feature ON),
+/// - `0` / `false` / empty → `None` (kill switch: only LTP protects, the
+///   pre-existing behavior),
 /// - `1` / `true` → `Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT)`,
 /// - an explicit integer `N ≥ 1` → `Some(N)` (lets an A/B sweep the threshold).
 ///
+/// **The unset default flipped from OFF to ON**, because the edge-tier fix made
+/// it load-bearing rather than experimental. Promotion is now driven by distinct
+/// attesting episodes so that a batch-ingested corpus can consolidate at all;
+/// but promotion moves an edge onto a tier whose prune threshold is twice as
+/// high at essentially the same decay rate, so consolidating an edge without
+/// also honouring its corroboration on the prune side would shorten the life of
+/// the very edges the fix is meant to rescue. The two halves are one policy:
+/// evidence that promotes must also protect.
+///
 /// When `Some(min)`, an edge attested by at least `min` distinct episodes is
-/// protected from STRENGTH-based pruning only — age-based reaping still applies,
-/// so there are no immortal edges.
+/// protected from STRENGTH-based pruning only — age-based reaping
+/// (`exceeded_max_age`) still applies, so there are no immortal edges, and
+/// single-attestation edges are not protected at all and still die on their
+/// tier's schedule.
 fn provenance_prune_min() -> Option<usize> {
     static FLAG: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| match std::env::var("SHODH_PROVENANCE_AWARE_PRUNE") {
@@ -914,7 +979,7 @@ fn provenance_prune_min() -> Option<usize> {
                 v.parse::<usize>().ok().filter(|&n| n > 0)
             }
         }
-        Err(_) => None,
+        Err(_) => Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT),
     })
 }
 
@@ -1191,25 +1256,78 @@ impl RelationshipEdge {
         self.try_promote_at(now)
     }
 
+    /// Number of DISTINCT source episodes that have attested this edge.
+    ///
+    /// This is `provenance.len()` and is only a distinct count because
+    /// [`merge_provenance`] is the sole writer of the trail and deduplicates by
+    /// `source_episode_id` — a repeat observation from an episode already in the
+    /// trail raises that record's `mention_count` instead of appending. Anything
+    /// that appends to `provenance` without going through `merge_provenance`
+    /// breaks the invariant this method's callers rely on.
+    ///
+    /// Saturates at `SHODH_PROVENANCE_MAX_SOURCES` (default 8), the trail cap,
+    /// and is monotonically non-decreasing below it: `merge_provenance` only
+    /// truncates when the length *exceeds* the cap, so an edge cannot lose
+    /// corroboration it has already earned and tiers cannot flap.
+    pub fn distinct_attesting_episodes(&self) -> usize {
+        self.provenance.len()
+    }
+
+    /// Re-evaluate this edge's tier without strengthening it.
+    ///
+    /// [`try_promote_at`](Self::try_promote_at) used to be reachable from
+    /// exactly one place — `strengthen_scaled_at` — which made promotion
+    /// conditional on being *re-strengthened later*. That is precisely what a
+    /// batch-ingested edge, or an edge that receives all of its evidence in one
+    /// burst and is then left alone, never gets: its provenance trail can grow
+    /// to full corroboration and its strength can sit far above the threshold,
+    /// and nothing would ever look. Worse, on the ingest path the strengthen
+    /// call happened BEFORE the incoming attestation was merged, so the gate was
+    /// always evaluated one episode stale.
+    ///
+    /// The two callers are the two branches of
+    /// [`GraphMemory::add_relationship`], each immediately after the provenance
+    /// trail reaches its final state for that write. Promotion is deliberately
+    /// NOT driven from the decay/maintenance sweep: that would restore
+    /// "strengthen once, wait out the clock, promote" — burst promotion on a
+    /// timer — for edges with no corroborating episode at all.
+    pub fn reconsider_promotion_at(&mut self, now: DateTime<Utc>) -> Option<(String, String)> {
+        self.try_promote_at(now)
+    }
+
     /// The one place an edge changes tier upward.
     ///
     /// Two conditions, both required:
     ///
     /// 1. **Strength** ≥ the current tier's promotion threshold — the original
     ///    criterion, unchanged.
-    /// 2. **Sustained evidence**: at least
-    ///    [`EdgeTier::promotion_min_separation_secs`] has elapsed since this edge
-    ///    entered its current tier. The anchor is `promoted_at`, falling back to
-    ///    `created_at` for an edge that has never been promoted — which covers
-    ///    both legacy records (field absent, decodes to `None`) and the two
-    ///    production paths that mint directly into L2 (lineage bridges, fact
-    ///    edges) without ever passing through here.
+    /// 2. **Independent evidence**, satisfied by EITHER of:
+    ///    - at least [`EdgeTier::promotion_min_episodes`] distinct source
+    ///      episodes have attested the edge, or
+    ///    - at least [`EdgeTier::promotion_min_separation_secs`] has elapsed
+    ///      since this edge entered its current tier. The anchor is
+    ///      `promoted_at`, falling back to `created_at` for an edge that has
+    ///      never been promoted — which covers both legacy records (field
+    ///      absent, decodes to `None`) and the two production paths that mint
+    ///      directly into L2 (lineage bridges, fact edges) without ever passing
+    ///      through here.
     ///
-    /// Consequence, and the point of the change: a burst of strengthen calls
-    /// inside a single request can advance an edge **at most one tier**, no
-    /// matter how many paths touch it. Reaching L3 now takes ≥30 minutes to L2
-    /// and ≥24 hours more to L3, which is what "consolidated" is supposed to
-    /// mean. Promotion remains monotonic and at most one step per call.
+    /// The disjunction is the fix, and the two arms are not redundant. The
+    /// episode arm is what a batch-ingested graph can actually reach: a clock is
+    /// a property of the ingest schedule, not of the evidence, so a clock-only
+    /// gate froze every imported corpus at L1 permanently (see
+    /// [`EdgeTier::promotion_min_episodes`]). The clock arm is what edges with
+    /// no provenance trail can reach — memory↔memory `CoRetrieved` edges carry
+    /// `source_episode_id: None` and so never accumulate episodes; removing the
+    /// clock would make those, and every legacy record already on disk,
+    /// permanently unpromotable.
+    ///
+    /// The anti-burst property survives both arms. A burst of strengthen calls
+    /// inside one request moves neither: the clock does not advance, and the
+    /// episode count cannot move because all three in-request strengthen paths
+    /// derive from the SAME observation and `merge_provenance` deduplicates by
+    /// episode. Promotion remains monotonic and at most one step per call, so
+    /// reaching L3 always takes at least two separate calls.
     ///
     /// Returns `Some((old_tier_name, new_tier_name))` on promotion. This enables
     /// the memory-edge coupling: edge promotions can signal the memory layer to
@@ -1223,13 +1341,20 @@ impl RelationshipEdge {
         }
         let next_tier = self.tier.next_tier()?;
 
-        // Sustained-evidence gate. `promoted_at.unwrap_or(created_at)` is the
-        // moment this edge entered its current tier.
-        if let Some(min_secs) = self.tier.promotion_min_separation_secs() {
-            let entered_tier_at = self.promoted_at.unwrap_or(self.created_at);
-            if (now - entered_tier_at).num_seconds() < min_secs {
-                return None;
-            }
+        // Independent-evidence gate: corroboration OR elapsed time.
+        // `promoted_at.unwrap_or(created_at)` is the moment this edge entered
+        // its current tier.
+        let entered_tier_at = self.promoted_at.unwrap_or(self.created_at);
+        let separated_by_clock = self
+            .tier
+            .promotion_min_separation_secs()
+            .is_some_and(|min_secs| (now - entered_tier_at).num_seconds() >= min_secs);
+        let corroborated = self
+            .tier
+            .promotion_min_episodes()
+            .is_some_and(|min_episodes| self.distinct_attesting_episodes() >= min_episodes);
+        if !separated_by_clock && !corroborated {
+            return None;
         }
 
         let old_tier = self.tier;
@@ -4091,19 +4216,19 @@ impl GraphMemory {
                 }
             }
 
-            // Strengthen existing edge instead of creating duplicate
-            let _ = existing.strengthen();
-            existing.last_activated = now;
-
-            // Update context if new context is more informative
-            if edge.context.len() > existing.context.len() {
-                existing.context = edge.context;
-            }
-
             // Provenance capture (Increment 1, bug fix): the prior implementation
             // strengthened the synapse but DISCARDED the new attestation's source
             // episode. Merge the incoming attestation into the trail so every
             // source episode that wires this edge is recorded — not just the last.
+            //
+            // ORDERING IS LOAD-BEARING: this merge runs BEFORE `strengthen()`.
+            // Promotion is gated on the number of distinct attesting episodes
+            // (`EdgeTier::promotion_min_episodes`), and `strengthen()` ends by
+            // calling `try_promote_at`. Merging afterwards evaluated the gate
+            // against a trail that was always one attestation stale, so the
+            // episode that *earned* a promotion could never be the one that
+            // triggered it — on a batch ingest, where an edge's last attestation
+            // is usually its last write ever, that lost the promotion outright.
             if edge.provenance.is_empty() {
                 // Synthesize one attestation from the incoming edge's source
                 // episode. With no source episode there is nothing to attest, so
@@ -4126,6 +4251,16 @@ impl GraphMemory {
                 for record in edge.provenance.drain(..) {
                     merge_provenance(&mut existing.provenance, record);
                 }
+            }
+
+            // Strengthen existing edge instead of creating duplicate. This also
+            // runs the promotion gate, now against the up-to-date trail.
+            let _ = existing.strengthen_at(now);
+            existing.last_activated = now;
+
+            // Update context if new context is more informative
+            if edge.context.len() > existing.context.len() {
+                existing.context = edge.context;
             }
 
             // Persist the strengthened edge
@@ -4159,15 +4294,42 @@ impl GraphMemory {
                     },
                 );
             }
-        } else if edge.provenance.len() > provenance_max_sources() {
-            let cap = provenance_max_sources();
-            edge.provenance.sort_by(|a, b| {
-                b.mention_count
-                    .cmp(&a.mention_count)
-                    .then_with(|| b.last_observed.cmp(&a.last_observed))
-            });
-            edge.provenance.truncate(cap);
+        } else {
+            // A caller-seeded trail goes through `merge_provenance` too, rather
+            // than being capped in place. `merge_provenance` is the ONLY writer
+            // that maintains the trail's defining invariant — one record per
+            // distinct `source_episode_id` — and promotion now reads
+            // `provenance.len()` as a count of DISTINCT attesting episodes
+            // (see `RelationshipEdge::distinct_attesting_episodes`). The in-place
+            // sort+truncate that used to live here deduplicated nothing, so a
+            // caller that seeded the same episode twice (e.g. a `SemanticFact`
+            // whose `source_memories` repeats a memory id) would have inflated
+            // its own corroboration count. It also applies the same
+            // keep-the-strongest cap, so nothing is lost by routing through it.
+            let seeded = std::mem::take(&mut edge.provenance);
+            for record in seeded {
+                merge_provenance(&mut edge.provenance, record);
+            }
         }
+
+        // Reachability: an edge can be BORN corroborated. The SemanticFact path
+        // (`MemorySystem::connect_facts_to_graph`) seeds the trail from
+        // `fact.source_memories` — every memory that attested the fact — and
+        // mints straight into L2 without ever calling `strengthen`. Under the
+        // old code `try_promote_at` was reachable only from `strengthen_scaled_at`,
+        // so such an edge could carry full corroboration from birth and still
+        // never be considered for its tier unless something happened to
+        // re-strengthen it later.
+        //
+        // This cannot manufacture a tier on its own: birth strength is
+        // `EdgeTier::{L1,L2}::initial_weight()` scaled by semantic similarity
+        // (≤ 0.4 and ≤ 0.5 respectively), both strictly below the corresponding
+        // promotion thresholds (0.5 and 0.7), so the strength condition in
+        // `try_promote_at` rejects every currently-minted edge. It is here so
+        // that the invariant "promotion is evaluated wherever the evidence
+        // changes" holds at the choke point rather than by coincidence.
+        let born_at = edge.created_at;
+        let _ = edge.reconsider_promotion_at(born_at);
 
         // Store relationship
         let key = edge.uuid.as_bytes();
@@ -10465,6 +10627,360 @@ mod tests {
         }
         assert_eq!(promotions, 1, "the importance path shares the same clock");
         assert_eq!(edge.tier, EdgeTier::L2Episodic);
+    }
+
+    // =====================================================================
+    // Episode-based promotion: the evidence arm of the gate.
+    //
+    // The wall-clock arm alone made elapsed minutes a PRECONDITION for
+    // consolidation, which a batch ingest can never satisfy — every import,
+    // eval run and seeded deployment creates all of its edges within one
+    // pass, so the entire graph froze at L1 (trust 0.20) and then aged out
+    // on the L1 prune schedule. These tests pin both directions: a burst
+    // inside ONE episode must not promote, and genuine evidence across
+    // DISTINCT episodes must promote with no waiting.
+    // =====================================================================
+
+    /// Build an attestation for `episode`, observed at `at`.
+    fn attestation(episode: Uuid, at: DateTime<Utc>) -> ProvenanceRecord {
+        ProvenanceRecord {
+            source_episode_id: episode,
+            mention_count: 1,
+            first_observed: at,
+            last_observed: at,
+            confidence: None,
+            evidence_span: None,
+            typed_by: None,
+        }
+    }
+
+    #[test]
+    fn a_burst_inside_one_episode_never_promotes() {
+        // The anti-burst intent, restated in the units that actually carry it.
+        // One conversation mentioning two entities forty times is ONE source
+        // episode. It may hammer the edge through every strengthen path there
+        // is; with no elapsed time and no second episode, neither arm of the
+        // gate opens.
+        use crate::constants::*;
+        let now = Utc::now();
+        let episode = Uuid::new_v4();
+
+        let mut edge = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        edge.created_at = now;
+        edge.last_activated = now;
+
+        // Forty mentions, all from the same episode, merged the way the ingest
+        // path merges them.
+        for _ in 0..40 {
+            merge_provenance(&mut edge.provenance, attestation(episode, now));
+            let promotion = edge.strengthen_at(now);
+            assert!(
+                promotion.is_none(),
+                "a burst inside one episode must not promote, got {promotion:?}"
+            );
+        }
+
+        assert_eq!(
+            edge.distinct_attesting_episodes(),
+            1,
+            "forty mentions of one episode are one episode"
+        );
+        assert_eq!(edge.provenance[0].mention_count, 40);
+        assert_eq!(
+            edge.tier,
+            EdgeTier::L1Working,
+            "the edge must still be L1 after a forty-mention burst"
+        );
+        // It is the EVIDENCE, not the strength, that is holding it back — the
+        // same property the clock-only gate asserted.
+        assert!(
+            edge.strength >= L2_PROMOTION_THRESHOLD,
+            "strength {} should already clear even the L3 bar",
+            edge.strength
+        );
+    }
+
+    #[test]
+    fn distinct_episodes_promote_with_no_wall_clock_wait() {
+        // The batch-ingest case: every attestation arrives within the same
+        // millisecond, from DIFFERENT source memories. This is real
+        // corroboration and must consolidate, which under a clock-only gate it
+        // never could.
+        use crate::constants::*;
+        let now = Utc::now();
+        let mut edge = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        edge.created_at = now;
+        edge.last_activated = now;
+
+        // Episode 1: single observation. Not corroborated yet.
+        merge_provenance(&mut edge.provenance, attestation(Uuid::new_v4(), now));
+        assert!(edge.strengthen_at(now).is_none());
+        assert_eq!(edge.tier, EdgeTier::L1Working);
+
+        // Episode 2, same instant: L1 → L2, with zero elapsed time.
+        merge_provenance(&mut edge.provenance, attestation(Uuid::new_v4(), now));
+        let promotion = edge.strengthen_at(now);
+        assert_eq!(
+            promotion,
+            Some(("L1Working".to_string(), "L2Episodic".to_string())),
+            "two distinct attesting episodes must promote regardless of the clock"
+        );
+        assert_eq!(edge.tier, EdgeTier::L2Episodic);
+        assert_eq!(edge.promoted_at, Some(now));
+
+        // Episode 3, still the same instant: short of TIER_PROMOTION_L3_MIN_EPISODES.
+        merge_provenance(&mut edge.provenance, attestation(Uuid::new_v4(), now));
+        assert!(
+            edge.strengthen_at(now).is_none(),
+            "3 episodes is short of the {TIER_PROMOTION_L3_MIN_EPISODES} required for L3"
+        );
+        assert_eq!(edge.tier, EdgeTier::L2Episodic);
+
+        // Episode 4: L2 → L3. Two attestations BEYOND the two that earned L2 —
+        // the cumulative thresholds encode "evidence since entering this tier"
+        // without persisting a per-tier counter.
+        merge_provenance(&mut edge.provenance, attestation(Uuid::new_v4(), now));
+        assert_eq!(
+            edge.strengthen_at(now),
+            Some(("L2Episodic".to_string(), "L3Semantic".to_string()))
+        );
+        assert_eq!(edge.tier, EdgeTier::L3Semantic);
+
+        // L3 is still terminal.
+        assert!(edge.strengthen_at(now).is_none());
+    }
+
+    #[test]
+    fn corroboration_still_advances_at_most_one_tier_per_call() {
+        // The episode arm must not become a bypass for the one-step invariant:
+        // an edge that arrives fully corroborated may not skip L2.
+        use crate::constants::*;
+        let now = Utc::now();
+        let mut edge = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        edge.created_at = now;
+        for _ in 0..TIER_PROMOTION_L3_MIN_EPISODES + 4 {
+            merge_provenance(&mut edge.provenance, attestation(Uuid::new_v4(), now));
+        }
+
+        let first = edge.strengthen_at(now);
+        assert_eq!(
+            first,
+            Some(("L1Working".to_string(), "L2Episodic".to_string())),
+            "however corroborated, the first step is L1 → L2"
+        );
+        assert_eq!(edge.tier, EdgeTier::L2Episodic);
+    }
+
+    #[test]
+    fn a_batch_ingested_edge_is_neither_frozen_at_l1_nor_pruned_out() {
+        // The two halves of the defect, end to end on one edge: under a
+        // clock-only gate a corroborated batch-ingested edge stayed at L1 with
+        // EDGE_TIER_TRUST_L1 = 0.20 and then fell below L1_PRUNE_THRESHOLD on
+        // the L1 decay schedule — roughly 79 idle hours — deleting an imported
+        // corpus on a timer. Corroboration now lifts it to L2, whose schedule it
+        // survives.
+        use crate::constants::*;
+        let ingest = Utc::now();
+        let mut edge = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        edge.created_at = ingest;
+        edge.last_activated = ingest;
+
+        // Two source memories in the same import pass attest the same pair.
+        for _ in 0..2 {
+            merge_provenance(&mut edge.provenance, attestation(Uuid::new_v4(), ingest));
+            edge.strengthen_at(ingest);
+        }
+        assert_eq!(
+            edge.tier,
+            EdgeTier::L2Episodic,
+            "a corroborated batch-ingested edge must not be frozen at L1"
+        );
+        assert!(
+            EDGE_TIER_TRUST_L2 > EDGE_TIER_TRUST_L1,
+            "and must therefore no longer carry the L1 retrieval-trust penalty"
+        );
+
+        // Leaving L1 also unlocks the LTP machinery, which is an L2+ mechanism:
+        // `record_activation_timestamp` returns early for L1, so an edge frozen
+        // at L1 can never accumulate the activation history that Burst/Weekly
+        // LTP are detected from, and can therefore never earn LTP's decay
+        // protection or its prune shield, no matter how well attested it is.
+        assert!(
+            edge.activation_timestamps.is_some(),
+            "promotion must seed the activation history that LTP is detected from"
+        );
+
+        // Survives the L1 death horizon: an L1 edge from this ingest is prunable
+        // by ~59 idle hours (0.55 · e^{-0.029·59} < L1_PRUNE_THRESHOLD).
+        let mut frozen = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        frozen.created_at = ingest;
+        frozen.last_activated = ingest;
+        frozen.strengthen_at(ingest);
+        assert_eq!(frozen.tier, EdgeTier::L1Working);
+        assert!(
+            frozen.decay_at(ingest + Duration::hours(59)),
+            "a single-attestation L1 edge at strength {} must still be prunable \
+             after 59 idle hours — singletons keep dying on the L1 schedule, \
+             which is the intended L1 semantics and is NOT what the fix changes",
+            frozen.strength
+        );
+
+        // The corroborated edge survives the same horizon — but NOT by
+        // arithmetic: its effective strength at 59h is ~0.12 against an L2
+        // prune threshold of 0.2, so on strength alone it would die EARLIER
+        // than the L1 singleton (~41.5h vs ~58.8h), because L2's threshold is
+        // double L1's at essentially the same executed decay rate. What saves
+        // it is `corroboration_protected()`: the same distinct-episode evidence
+        // that earned the promotion also shields it from strength-based
+        // pruning. Promotion and protection are one policy; splitting them
+        // would consolidate an edge and shorten its life in the same step.
+        let idle = ingest + Duration::hours(59);
+        assert!(
+            !edge.decay_at(idle),
+            "the corroborated edge must survive that horizon"
+        );
+        assert!(
+            edge.effective_strength() < edge.tier.prune_threshold(),
+            "and it must be surviving on corroboration, not on strength: \
+             effective {} vs threshold {}",
+            edge.effective_strength(),
+            edge.tier.prune_threshold()
+        );
+        // `decay_at`'s return value is only one of three prune doors. This is
+        // the one the lazy on-read path in `get_edges_for_entity` consults —
+        // the path that actually deletes edges out from under a live reader.
+        assert!(
+            edge.is_prune_protected(),
+            "the lazy on-read prune path must see the corroboration too"
+        );
+    }
+
+    #[test]
+    fn the_evidence_that_promotes_also_protects() {
+        // The load-bearing coupling, pinned so the two thresholds cannot drift
+        // apart. If the prune-protection minimum ever exceeds the L1→L2
+        // promotion minimum, edges in between are promoted onto a tier with
+        // DOUBLE the prune threshold while still unprotected — the fix would
+        // then shorten the life of exactly the batch-ingested edges it exists
+        // to rescue (~41.5 idle hours at L2 vs ~58.8 at L1, at birth weight).
+        use crate::constants::*;
+        assert!(
+            PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT <= TIER_PROMOTION_L2_MIN_EPISODES,
+            "prune protection ({PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT}) must not \
+             require more evidence than promotion ({TIER_PROMOTION_L2_MIN_EPISODES})"
+        );
+
+        // And the feature must be ON by default, or the coupling is inert.
+        assert_eq!(
+            provenance_prune_min(),
+            Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT),
+            "provenance-aware pruning must default to ON; if this fails because \
+             SHODH_PROVENANCE_AWARE_PRUNE is set in the environment, that is the \
+             kill switch working as designed"
+        );
+
+        // A single attestation is still unprotected: the fix rescues corroborated
+        // knowledge, not everything.
+        assert!(!corroboration_meets(
+            1,
+            Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT)
+        ));
+        assert!(corroboration_meets(
+            TIER_PROMOTION_L2_MIN_EPISODES,
+            Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT)
+        ));
+    }
+
+    #[test]
+    fn an_edge_with_no_provenance_still_obeys_the_clock() {
+        // Every RelationshipEdge already on disk predates the provenance trail,
+        // and memory↔memory CoRetrieved edges carry source_episode_id: None and
+        // so never accumulate episodes at all. Dropping the clock arm would make
+        // both permanently unpromotable. The disjunction is not belt-and-braces.
+        use crate::constants::*;
+        let birth = Utc::now();
+        let mut edge = create_test_edge(L1_INITIAL_WEIGHT, 0);
+        edge.created_at = birth;
+        assert_eq!(edge.distinct_attesting_episodes(), 0);
+
+        assert!(
+            edge.strengthen_at(birth).is_none(),
+            "no episodes and no elapsed time: neither arm is satisfied"
+        );
+        assert_eq!(edge.tier, EdgeTier::L1Working);
+
+        let past_window = birth + Duration::seconds(TIER_PROMOTION_WORKING_AGE_SECS + 1);
+        assert_eq!(
+            edge.strengthen_at(past_window),
+            Some(("L1Working".to_string(), "L2Episodic".to_string())),
+            "the clock arm must still work on its own"
+        );
+    }
+
+    #[test]
+    fn a_caller_seeded_trail_is_deduplicated_by_episode() {
+        // `provenance.len()` is only a count of DISTINCT attesting episodes
+        // because `merge_provenance` is the sole writer. The `SemanticFact`
+        // ingest path seeds a whole trail at once from `fact.source_memories`,
+        // and nothing guarantees that list has no repeats — an edge could
+        // otherwise claim four attestations from one memory cited four times
+        // and promote straight past L2 on evidence it does not have.
+        let now = Utc::now();
+        let repeated = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        let mut trail: Vec<ProvenanceRecord> = Vec::new();
+        for record in [
+            attestation(repeated, now),
+            attestation(repeated, now),
+            attestation(repeated, now),
+            attestation(other, now),
+        ] {
+            merge_provenance(&mut trail, record);
+        }
+
+        assert_eq!(
+            trail.len(),
+            2,
+            "one memory cited three times is one attesting episode"
+        );
+        let repeated_record = trail
+            .iter()
+            .find(|p| p.source_episode_id == repeated)
+            .expect("repeated episode present");
+        assert_eq!(
+            repeated_record.mention_count, 3,
+            "the repeats must land on mention_count, which promotion ignores"
+        );
+    }
+
+    #[test]
+    fn promotion_min_episodes_encodes_evidence_since_entering_the_tier() {
+        // The cumulative thresholds are what let the gate mean "independent
+        // evidence acquired since this edge entered its tier" without a
+        // persisted per-tier counter: L3's requirement must exceed L2's, or an
+        // edge could reach L3 on exactly the evidence that earned it L2.
+        use crate::constants::*;
+        let l1 = EdgeTier::L1Working.promotion_min_episodes().unwrap();
+        let l2 = EdgeTier::L2Episodic.promotion_min_episodes().unwrap();
+        assert!(
+            l2 > l1,
+            "L3 must require strictly more distinct episodes than L2: {l2} vs {l1}"
+        );
+        assert!(l1 >= 2, "corroboration means more than one observation");
+        assert_eq!(l1, TIER_PROMOTION_L2_MIN_EPISODES);
+        assert_eq!(l2, TIER_PROMOTION_L3_MIN_EPISODES);
+        assert_eq!(EdgeTier::L3Semantic.promotion_min_episodes(), None);
+
+        // The episode route to L3 is only reachable if the provenance trail can
+        // hold that many distinct sources. If SHODH_PROVENANCE_MAX_SOURCES is
+        // set below it the route silently closes (the clock route remains), so
+        // the DEFAULT cap must not close it.
+        assert!(
+            PROVENANCE_MAX_SOURCES_DEFAULT >= TIER_PROMOTION_L3_MIN_EPISODES,
+            "the default provenance cap ({PROVENANCE_MAX_SOURCES_DEFAULT}) must be able \
+             to hold {TIER_PROMOTION_L3_MIN_EPISODES} distinct episodes"
+        );
     }
 
     #[test]
