@@ -14,7 +14,7 @@ import { TasksView } from "@/features/tasks/TasksView";
 import { ChatView } from "@/features/chat/ChatView";
 import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
 import { ProvidersView } from "@/features/providers/ProvidersView";
-import { Placeholder } from "@/components/layout/Placeholder";
+import { AnomaliesView } from "@/features/anomalies/AnomaliesView";
 import type { Reachability } from "@/lib/api";
 
 /**
@@ -79,7 +79,7 @@ function Shell({ reach }: { reach: Reachability }) {
           <Route path="/recall" element={<RecallView reach={reach} />} />
           <Route path="/geo" element={<GeoView reach={reach} />} />
           <Route path="/graph" element={<GraphView reach={reach} />} />
-          <Route path="/anomalies" element={<Placeholder id="anomalies" reach={reach} />} />
+          <Route path="/anomalies" element={<AnomaliesView reach={reach} />} />
           <Route path="/tasks" element={<TasksView reach={reach} />} />
           <Route path="/providers" element={<ProvidersView seat={seat} />} />
           {/* A hash the app does not know is a typo or a stale link, not an
