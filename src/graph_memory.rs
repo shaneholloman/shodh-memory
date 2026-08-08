@@ -3298,9 +3298,9 @@ impl GraphMemory {
                 if let Ok(Some(mut node)) = self.get_entity(&canonical) {
                     node.kb_id.clone_from(&canon_kb_id);
                     if let Ok(encoded) = crate::serialization::encode(&node) {
-                        let _ =
-                            self.db
-                                .put_cf(self.entities_cf(), canonical.as_bytes(), encoded);
+                        let _ = self
+                            .db
+                            .put_cf(self.entities_cf(), canonical.as_bytes(), encoded);
                     }
                 }
             }
@@ -10282,9 +10282,9 @@ mod tests {
         };
 
         for (name, label) in [
-            ("ACM", EntityLabel::Organization),      // ambiguous: two real orgs
-            ("IBM", EntityLabel::Person),            // right surface, wrong type
-            ("IBM", EntityLabel::Concept),           // generic label never links
+            ("ACM", EntityLabel::Organization), // ambiguous: two real orgs
+            ("IBM", EntityLabel::Person),       // right surface, wrong type
+            ("IBM", EntityLabel::Concept),      // generic label never links
             ("Zzyzx Holdings", EntityLabel::Organization), // unknown
         ] {
             let uuid = graph.add_entity(make(name, label.clone())).unwrap();
@@ -10492,7 +10492,10 @@ mod tests {
         let bytes = crate::serialization::encode(&node).unwrap();
         let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
         assert_eq!(decoded.kb_id, Some("Q37156".to_string()));
-        assert!(!needs_migration, "a current-shape record needs no migration");
+        assert!(
+            !needs_migration,
+            "a current-shape record needs no migration"
+        );
     }
 
     // =====================================================================

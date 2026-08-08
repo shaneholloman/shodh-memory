@@ -129,7 +129,10 @@ fn one_entity_reached_by_label_and_alias_is_not_treated_as_ambiguous() {
             competitors,
         } => {
             assert_eq!(entity.qid, "Q3");
-            assert_eq!(competitors, 0, "same QID via several surfaces is one candidate");
+            assert_eq!(
+                competitors, 0,
+                "same QID via several surfaces is one candidate"
+            );
         }
         other => panic!("expected a link, got {other:?}"),
     }
@@ -149,7 +152,12 @@ fn unknown_surface_is_unknown_not_abstained() {
 #[test]
 fn no_fuzzy_matching_a_near_miss_must_not_link() {
     let kb = fixture(SYNTH);
-    for near in ["Apollo Globl Management", "Helio", "Heliosss", "Dominant Corpp"] {
+    for near in [
+        "Apollo Globl Management",
+        "Helio",
+        "Heliosss",
+        "Dominant Corpp",
+    ] {
         assert!(
             kb.resolve(near, "organization").qid().is_none(),
             "{near:?} must not link — a wrong link is worse than none"
@@ -312,8 +320,11 @@ fn one_company_spelled_two_ways_links_to_one_kb_id() {
 
     // And the legal-form variant reaches it too.
     assert_eq!(
-        kb.resolve("International Business Machines Corporation", "organization")
-            .qid(),
+        kb.resolve(
+            "International Business Machines Corporation",
+            "organization"
+        )
+        .qid(),
         Some("Q37156")
     );
 }
@@ -392,7 +403,12 @@ fn asset_rows_are_well_formed() {
         }
         let cols: Vec<&str> = line.split('\t').collect();
         assert_eq!(cols.len(), 5, "row {} has {} columns", n + 1, cols.len());
-        assert!(cols[0].starts_with('Q'), "row {}: bad QID {:?}", n + 1, cols[0]);
+        assert!(
+            cols[0].starts_with('Q'),
+            "row {}: bad QID {:?}",
+            n + 1,
+            cols[0]
+        );
         assert!(
             cols[1] == "organization" || cols[1] == "product",
             "row {}: unexpected type {:?}",
