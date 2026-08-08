@@ -582,7 +582,10 @@ fn on_demand_distillation_arbitrates_a_contradiction_like_maintenance_does() {
 
     // ── Cycle 1: the claim ──────────────────────────────────────────────────
     system
-        .remember(declarative_memory(&format!("{CLAIM}."), 0.9), Some(claim_at))
+        .remember(
+            declarative_memory(&format!("{CLAIM}."), 0.9),
+            Some(claim_at),
+        )
         .expect("remember claim");
     system
         .remember(
@@ -619,7 +622,9 @@ fn on_demand_distillation_arbitrates_a_contradiction_like_maintenance_does() {
         )
         .expect("remember correction echo");
 
-    system.distill_facts(user, 2, 7).expect("distill correction");
+    system
+        .distill_facts(user, 2, 7)
+        .expect("distill correction");
 
     let store = system.fact_store();
     let all = store.list(user, 100).expect("list");

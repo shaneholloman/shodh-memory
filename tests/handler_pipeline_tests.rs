@@ -2248,7 +2248,10 @@ mod dedup_enrichment_tests {
         )
         .await;
         assert!(
-            stored_memory(&h, user, &id).experience.geo_location.is_none(),
+            stored_memory(&h, user, &id)
+                .experience
+                .geo_location
+                .is_none(),
             "precondition: the first write carries no coordinates"
         );
 
