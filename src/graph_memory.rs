@@ -1344,17 +1344,15 @@ impl RelationshipEdge {
         // Independent-evidence gate: corroboration OR elapsed time.
         // `promoted_at.unwrap_or(created_at)` is the moment this edge entered
         // its current tier.
-        let separated_by_clock = match self.tier.promotion_min_separation_secs() {
-            Some(min_secs) => {
-                let entered_tier_at = self.promoted_at.unwrap_or(self.created_at);
-                (now - entered_tier_at).num_seconds() >= min_secs
-            }
-            None => false,
-        };
-        let corroborated = match self.tier.promotion_min_episodes() {
-            Some(min_episodes) => self.distinct_attesting_episodes() >= min_episodes,
-            None => false,
-        };
+        let entered_tier_at = self.promoted_at.unwrap_or(self.created_at);
+        let separated_by_clock = self
+            .tier
+            .promotion_min_separation_secs()
+            .is_some_and(|min_secs| (now - entered_tier_at).num_seconds() >= min_secs);
+        let corroborated = self
+            .tier
+            .promotion_min_episodes()
+            .is_some_and(|min_episodes| self.distinct_attesting_episodes() >= min_episodes);
         if !separated_by_clock && !corroborated {
             return None;
         }
