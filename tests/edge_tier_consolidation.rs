@@ -272,9 +272,20 @@ fn batch_ingest_consolidates_by_evidence_not_by_clock() {
     );
 
     assert_eq!(
-        census.total_scanned, total,
-        "census must scan every edge — a shortfall means a decode failure it swallowed"
+        census.l1_working + census.l2_episodic + census.l3_semantic,
+        census.total_scanned,
+        "every scanned edge must land in exactly one tier bucket"
     );
+    // This ingest invalidates nothing, so the census (which counts all edges)
+    // and `get_all_relationships` (which drops invalidated ones) must agree. A
+    // shortfall here means the census swallowed a decode failure, which would
+    // make every percentage below a fraction of the wrong denominator.
+    assert_eq!(
+        census.total_scanned, total,
+        "census scanned {} edges but the store holds {total}",
+        census.total_scanned
+    );
+    assert!(total > 0, "ingest produced no edges");
 
     // --- The "before" figure is a theorem, not a measurement. ---
     // The clock arm anchors at `promoted_at.unwrap_or(created_at)`, and every
