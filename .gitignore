@@ -152,3 +152,9 @@ tests/recall/longmemeval/
 
 # reconstructed front crate build dir
 front/target/
+
+# Private strategy vault — its own repo, never part of this public one.
+shodh-vault/
+
+# Demo capture artifacts (large binaries, regenerated on demand).
+demo-frames/

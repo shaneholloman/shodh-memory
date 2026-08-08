@@ -157,7 +157,7 @@ export function TasksView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="No profile to browse"
-        body="This instance holds no memory yet, so there is nothing captured to show."
+        body="This instance holds no memory yet."
       />
     );
   }
@@ -189,7 +189,8 @@ export function TasksView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="Nothing outstanding"
-        body="No open todos in this profile. Work captured from a session — yours or an agent's — will show up here."
+        body="No open todos in this profile."
+        more="Tasks are picked up from what was recorded in a session — yours or an agent's — rather than entered here, so they appear as work is captured."
       />
     );
   }

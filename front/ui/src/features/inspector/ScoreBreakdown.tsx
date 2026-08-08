@@ -41,6 +41,26 @@ const FACTORS: { key: keyof ScoreAttribution; label: string; hint: string }[] = 
   { key: "quality_gate", label: "Quality gate", hint: "Content richness" },
 ];
 
+/**
+ * The retrieval legs, in the words the result rows use.
+ *
+ * `sources` carries the server's own tokens — `"graph"` and `"vector"`, pushed
+ * at src/memory/mod.rs:4172 and :4226 — and printing them raw put two things on
+ * screen that should not have been there. `vector` is a lie by omission: it
+ * labels the HYBRID leg, which is BM25 and vector search already fused
+ * (mod.rs:4176-4196), so a reader is told "vector" about a result an exact
+ * keyword match found. And it contradicted the same fact stated in words one
+ * pane to the left, on the row this panel is explaining (features/recall/why.ts).
+ *
+ * An unknown token is shown verbatim rather than dropped: this is the panel
+ * whose entire job is to account for the score, and silently discarding a leg
+ * the server said contributed would be the one failure it cannot have.
+ */
+const LEG_LABEL: Record<string, string> = {
+  vector: "Meaning and wording",
+  graph: "The graph",
+};
+
 /** A multiplier is "neutral" if it left the score alone. Float noise means an
  *  exact 1.0 comparison would leak 0.9999 rows into the list. */
 const NEUTRAL_EPSILON = 0.005;
@@ -89,13 +109,16 @@ export function ScoreBreakdown({ attr }: { attr: ScoreAttribution }) {
       <h3 className="text-[12px] font-medium tracking-tight">Why this surfaced</h3>
 
       {sources.length > 0 ? (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {sources.map((s) => (
-            <Badge key={s} className="mono">
-              {s}
-            </Badge>
-          ))}
-        </div>
+        <>
+          <p className="text-muted-foreground/70 mt-2 text-[11px]">
+            Reached by
+          </p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {sources.map((s) => (
+              <Badge key={s}>{LEG_LABEL[s] ?? s}</Badge>
+            ))}
+          </div>
+        </>
       ) : null}
 
       {/* Additive fusion base, split by leg. */}

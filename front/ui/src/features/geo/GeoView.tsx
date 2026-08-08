@@ -2,6 +2,8 @@ import { useMemo } from "react";
 import type { Reachability } from "@/lib/api";
 import { corpusToRecallMemory, useCorpus } from "@/lib/api/corpus";
 import { EmptyState } from "@/components/ui/empty-state";
+import { InfoHint } from "@/components/ui/info-hint";
+import { Meta, Stat } from "@/components/ui/meta";
 import { useRecall } from "@/features/recall/useRecall";
 import { useMemoryTypes } from "@/features/recall/GraphCanvas";
 import { GeoMap } from "./GeoMap";
@@ -55,7 +57,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="Not connected"
-        body="The map draws from memory, which needs the memory server running."
+        body="The map draws from memory, which needs the server running."
       />
     );
   }
@@ -65,7 +67,7 @@ export function GeoView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="No profile selected"
-        body="The map shows where a profile's memory happened, so it needs a profile that already exists."
+        body="The map is per-profile, and none exists yet."
       />
     );
   }
@@ -80,7 +82,8 @@ export function GeoView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="No coordinates in this corpus"
-        body="A memory only carries coordinates when whatever wrote it supplied them — imported corpora like GDELT do, session captures do not. Once one does, it appears here without any search."
+        body="Nothing stored here carries a position."
+        more="A memory only carries coordinates when whatever wrote it supplied them — imported corpora like GDELT do, session captures do not. The first one that does appears here without any search."
       />
     );
   }
@@ -93,9 +96,26 @@ export function GeoView({ reach }: { reach: Reachability }) {
 
       <GeoMap memories={plotted} types={types} dimmed={dimmed} />
 
-      <div className="text-muted-foreground pointer-events-none absolute top-3 left-4 z-10 text-[12px]">
-        {hasQuery ? "Where this answer happened" : "Where this profile's memory happened"}
-      </div>
+      {/* NO TITLE HERE ANY MORE. "Where this profile's memory happened" was a
+          restatement of the destination's own caption in the bar directly
+          above it — the same words, twice, ten pixels apart. Duplicating a
+          visible label is information pollution, and on a map it was competing
+          with the only thing in this corner worth reading.
+
+          What survives is the one thing the map does that is NOT visible from
+          looking at it: a search does not swap the points out, it turns the
+          matching ones up. Without that cue, a map that stays put after a
+          search reads as a map that ignored it — a documented, real confusion,
+          so it stays on screen rather than moving behind an affordance. It is
+          shown only before a query, because after one the dimming and the
+          matched count say it better than a sentence could. */}
+      {!hasQuery ? (
+        <div className="pointer-events-none absolute top-3 left-4 z-10">
+          <span className="text-muted-foreground/70 text-[11px]">
+            Search raises the points that match
+          </span>
+        </div>
+      ) : null}
 
       <div
         className="pointer-events-none absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center justify-between gap-x-6 gap-y-2"
@@ -112,16 +132,26 @@ export function GeoView({ reach }: { reach: Reachability }) {
             </span>
           ))}
         </div>
-        <span className="text-muted-foreground/70 text-[11px]">
-          {hasQuery
-            ? error
-              ? "That search did not complete — showing the corpus"
-              : isFetching && !data
-                ? "Searching…"
-                : `${matched.length} matched of ${located.length} placed`
-            : `${located.length} located ${located.length === 1 ? "memory" : "memories"}`}
-          {" · scroll to zoom · drag to pan · click a point to inspect"}
-        </span>
+        {/* Counts on the right, gestures behind the icon beside them. What is
+            ON the map is data and belongs on screen; how to move the camera is
+            learned once, and printing it under every session is three of the
+            strip's six words spent on something nobody reads twice. */}
+        <Meta className="shrink-0">
+          {/* "showing all" is not decoration: with no matched count beside it,
+              a bare "search failed" leaves the reader to guess whether the
+              points on screen are a partial answer or the whole corpus. */}
+          {hasQuery && error ? <span className="text-warn">search failed — showing all</span> : null}
+          {hasQuery && !error && isFetching && !data ? <span>searching…</span> : null}
+          {hasQuery && !error && !(isFetching && !data) ? (
+            <Stat value={matched.length} label="matched" />
+          ) : null}
+          <Stat value={located.length} label="located" />
+          <InfoHint label="map controls" align="right" side="up">
+            Scroll to zoom, drag to pan, click a point to inspect it. A search does not change
+            which points are drawn — it raises the ones that match and dims the rest, so an answer
+            is always seen against the corpus it came from.
+          </InfoHint>
+        </Meta>
       </div>
     </section>
   );

@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
+import { InfoHint } from "@/components/ui/info-hint";
+import { Meta, Stat } from "@/components/ui/meta";
 import { RecallDiagram } from "./RecallDiagram";
 import { GraphCanvas, useMemoryTypes } from "./GraphCanvas";
 import { useRecall } from "./useRecall";
@@ -154,20 +156,40 @@ export function GraphStage({ reach }: { reach: Reachability }) {
               ))}
             </div>
           </div>
-          <span className="text-muted-foreground/70 text-[11px]">
-            {/* Say what the edges ARE, not just how to move the camera. Zero
-                causal edges across a result set is a finding about the corpus,
-                not a broken canvas, and staying silent about it invites the
-                opposite reading. */}
-            {/* "lineage edges", not "causal edges". Every edge here comes from
-                the causal lineage graph, but only some classify as the bright
-                causal class (Caused, TriggeredBy) — InformedBy and ResolvedBy
-                draw cool. Calling all twelve "causal" while two thirds render
-                in the typed colour reads as a bug in the legend. */}
-            {edgeCount > 0
-              ? `${edgeCount} lineage ${edgeCount === 1 ? "edge" : "edges"} · scroll to zoom · drag to pan · click a node to inspect`
-              : "No lineage edges connect these results · scroll to zoom · drag to pan · click a node to inspect"}
-          </span>
+          {/* `shrink-0`: this row wraps, and without it the hint is squeezed
+              into a narrow column instead of dropping to a line of its own —
+              at the stage width /recall actually has (viewport minus rail,
+              result column and Inspector) it was rendering as four stacked
+              fragments. Refusing to shrink makes the wrap happen at the row
+              level, which is what `flex-wrap` is here for. */}
+          {/* WHAT IS DRAWN, AND NOTHING ABOUT THE MOUSE. Half of this strip was
+              "scroll to zoom · drag to pan · click a node to inspect" — three
+              gestures, identical on all three canvases in this product, printed
+              under every session of every one of them. They are learned once,
+              so they moved behind the icon. The count of what is on screen did
+              not, because it is a finding.
+
+              Say what the edges ARE, not just how to move the camera: zero
+              causal edges across a result set is a fact about the corpus, not a
+              broken canvas, and staying silent about it invites the opposite
+              reading.
+
+              "lineage edges", not "causal edges". Every edge here comes from
+              the causal lineage graph, but only some classify as the bright
+              causal class (Caused, TriggeredBy) — InformedBy and ResolvedBy
+              draw cool. Calling all twelve "causal" while two thirds render in
+              the typed colour reads as a bug in the legend. */}
+          <Meta className="shrink-0">
+            {edgeCount > 0 ? (
+              <Stat value={edgeCount} label={`lineage ${edgeCount === 1 ? "edge" : "edges"}`} />
+            ) : (
+              <span>No lineage edges connect these results</span>
+            )}
+            <InfoHint label="canvas controls" align="right" side="up">
+              Scroll to zoom, drag to pan, click a node to inspect it. Nodes are the memories this
+              search returned; edges are the causal links the same response carried.
+            </InfoHint>
+          </Meta>
         </div>
       ) : null}
     </section>

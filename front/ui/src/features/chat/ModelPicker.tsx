@@ -24,14 +24,36 @@ import { Badge } from "@/components/ui/badge";
  * navigation. Radix would bring this prebuilt, but this is the only popover
  * in the app and the dependency's cost is the whole point of the "zero net
  * new chrome dependencies" line this UI holds.
+ *
+ * The footer states what a SWAP does, while the choice is still being made —
+ * this control is the one moment the product's strongest property is on
+ * screen, and it was previously unsaid there. It is a guarantee, not a
+ * slogan: PATCH /v1/conversations/{id}/model reassigns the model and nothing
+ * else (seat/src/conversation.ts setModel writes `agent.state.model`, leaving
+ * `agent.state.messages` untouched; seat/src/store.ts setModel UPDATEs the
+ * three model columns, never the transcripts or events tables), and on this
+ * side stores/chat.ts setModel replaces `model` and carries `turns` — where
+ * the retrieved memories live — through unchanged.
+ *
+ * Scope is deliberate and load-bearing. It says memories ALREADY retrieved,
+ * because every later turn runs a fresh proactive pass and the new model
+ * chooses its own recall cues: "a different model retrieves the same
+ * memories" is not something this code guarantees, so it is not said.
+ *
+ * `swap` gates it, because this same picker also opens on the new-conversation
+ * screen, where nothing has been retrieved for the sentence to be about. There
+ * it is a first choice, not a switch, and NewConversation says so itself.
  */
 export function ModelPicker({
   current,
   disabled,
+  swap,
   onSelect,
 }: {
   current: ModelRef | null;
   disabled?: boolean;
+  /** This picker changes the model of a conversation already under way. */
+  swap?: boolean;
   /** Resolves when the seat accepted the change; rejections surface inline. */
   onSelect: (model: SeatModelInfo) => Promise<void>;
 }) {
@@ -229,6 +251,13 @@ export function ModelPicker({
               ))
             )}
           </ul>
+
+          {swap ? (
+            <p className="border-border text-muted-foreground border-t px-3 py-2 text-[11px] leading-relaxed">
+              Changes which model answers next. Memories already retrieved here
+              stay as they are.
+            </p>
+          ) : null}
 
           {Object.entries(data?.local_errors ?? {}).length > 0 ? (
             <div className="border-border text-muted-foreground border-t px-3 py-2 text-[11px]">

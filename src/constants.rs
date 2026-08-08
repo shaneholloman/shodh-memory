@@ -724,6 +724,21 @@ pub const FACT_DEDUP_JACCARD_FLOOR: f32 = 0.30;
 ///   (cosine 0.80 + Jaccard 0.30 is roughly equivalent to Jaccard 0.75 alone)
 pub const FACT_DEDUP_JACCARD_FALLBACK: f32 = 0.75;
 
+/// Confidence boost applied when a stored fact is re-attested by NEW source
+/// evidence, as a fraction of the remaining headroom (`c += k * (1 - c)`).
+///
+/// Justification:
+/// - Diminishing-returns shape: an already-confident fact gains little, a weak
+///   one gains a lot. Saturates at 1.0 without ever exceeding it.
+/// - Was an unnamed `0.1` literal inside the maintenance ingest loop, which is
+///   also why the on-demand distillation path silently applied no boost at all.
+///   Named here so both paths share one value.
+/// - Applied ONLY when the candidate contributes source memories the stored
+///   fact did not already have. Boosting on re-derivation from already-counted
+///   evidence turns the confidence field into a cycle counter — see
+///   `SemanticFactStore::ingest_candidate`.
+pub const FACT_REINFORCEMENT_BOOST: f32 = 0.1;
+
 /// Negation markers for polarity detection in fact deduplication
 ///
 /// Justification:
@@ -887,6 +902,49 @@ pub const TIER_PROMOTION_SESSION_IMPORTANCE: f32 = 0.5;
 ///
 /// Reference: Rasch & Born (2013) "About Sleep's Role in Memory"
 pub const TIER_PROMOTION_SESSION_AGE_SECS: i64 = 86400; // 24 hours
+
+/// Distinct attesting episodes required for an edge to leave L1 (working) for
+/// L2 (episodic).
+///
+/// The *evidence* half of the edge-tier promotion gate, and the reason batch
+/// ingest is no longer a dead end. Wall-clock separation
+/// ([`TIER_PROMOTION_WORKING_AGE_SECS`]) was the only proxy for "independent
+/// evidence", which silently made elapsed minutes a precondition for
+/// consolidation. Every corpus import, every eval run and every seeded
+/// deployment creates all of its edges within one pass, so no edge could ever
+/// satisfy it: the whole graph froze at L1 with a 0.20 retrieval trust
+/// multiplier and then aged out on the L1 prune schedule.
+///
+/// Distinct *episodes* measure what the clock was standing in for. Two
+/// different source memories independently attesting the same entity pair is
+/// evidence; the same conversation re-read forty times is not, and does not
+/// move this counter — `merge_provenance` deduplicates by `source_episode_id`,
+/// so repeated attestation from one episode only raises that record's
+/// `mention_count`, which promotion deliberately ignores.
+///
+/// 2 is the smallest count that can distinguish corroboration from a single
+/// observation, matching the tier's meaning: L2/episodic is "seen more than
+/// once", not "seen a lot".
+pub const TIER_PROMOTION_L2_MIN_EPISODES: usize = 2;
+
+/// Distinct attesting episodes required for an edge to leave L2 (episodic) for
+/// L3 (semantic). See [`TIER_PROMOTION_L2_MIN_EPISODES`].
+///
+/// Deliberately cumulative rather than "N more since the last promotion": because
+/// 4 > 2, an edge cannot reach L3 without acquiring two attestations beyond the
+/// ones that earned it L2, so "independent evidence since entering this tier"
+/// holds without persisting a per-tier episode counter — no schema change, and
+/// no new field that could drift out of agreement with the trail it summarises.
+///
+/// 4 distinct source episodes *plus* strength ≥ `L2_PROMOTION_THRESHOLD` is a
+/// far higher bar than the pre-clock behaviour this replaces, where THREE
+/// strengthen calls arising from a SINGLE observation inside one request reached
+/// L3.
+///
+/// Bounded above by `SHODH_PROVENANCE_MAX_SOURCES` (default 8), which caps the
+/// trail: setting that env var below this value disables the episode route to
+/// L3 entirely, leaving only the wall-clock route.
+pub const TIER_PROMOTION_L3_MIN_EPISODES: usize = 4;
 
 /// Potentiation boost applied during each maintenance cycle
 /// Applied to ALL memories based on access count (Hebbian strengthening)
@@ -3151,6 +3209,7 @@ pub const COMPANION_SCORE_FACTOR: f32 = 0.5;
 // | FACT_DEDUP_COSINE_THRESHOLD   | memory/facts.rs       | find_similar() hybrid dedup       |
 // | FACT_DEDUP_JACCARD_FLOOR      | memory/facts.rs       | find_similar() hybrid dedup       |
 // | FACT_DEDUP_JACCARD_FALLBACK   | memory/facts.rs       | find_similar() fallback mode      |
+// | FACT_REINFORCEMENT_BOOST      | memory/facts.rs       | ingest_candidate() reinforcement  |
 // | FACT_NEGATION_MARKERS         | memory/facts.rs       | detect_polarity()                 |
 //
 // ## Default Configuration Constants

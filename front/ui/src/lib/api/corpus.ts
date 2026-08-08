@@ -32,8 +32,14 @@ export interface CorpusMemory {
   geo_location?: [number, number, number];
 }
 
-interface ListResponse {
+/** Exported because the Inspector reads this cache entry directly, the same way
+ *  it already reads the recall one: a memory selected before any query has run
+ *  exists only here, and refetching it to render a detail view would pay again
+ *  for data the app is already holding. */
+export interface CorpusListResponse {
   memories: CorpusMemory[];
+  /** Every memory in the profile, which is NOT `memories.length` — the request
+   *  caps at `CORPUS_LIMIT`. */
   total: number;
 }
 
@@ -72,7 +78,7 @@ export function useCorpus(reach: Reachability) {
   const { data, error, isFetching } = useQuery({
     queryKey: corpusKey(profile),
     queryFn: ({ signal }) =>
-      api.get<ListResponse>(
+      api.get<CorpusListResponse>(
         `/api/list/${encodeURIComponent(profile!)}?limit=${CORPUS_LIMIT}`,
         signal,
       ),

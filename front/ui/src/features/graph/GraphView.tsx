@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { Reachability } from "@/lib/api";
 import { EmptyState } from "@/components/ui/empty-state";
+import { InfoHint } from "@/components/ui/info-hint";
+import { Meta, Stat } from "@/components/ui/meta";
 import { useSession } from "@/stores/session";
 import { useUniverse } from "./useUniverse";
 import { EntityCanvas, levelFor, type Level } from "./EntityCanvas";
@@ -126,7 +128,7 @@ export function GraphView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="Not connected"
-        body="The knowledge graph is built from the memory server's entity store, which needs the server running."
+        body="The graph is built from the entity store, which needs the server running."
       />
     );
   }
@@ -136,7 +138,7 @@ export function GraphView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="No profile to show"
-        body="The graph is per-profile — each one has its own entity store. This instance holds none yet."
+        body="The graph is per-profile, and none exists yet."
       />
     );
   }
@@ -146,7 +148,8 @@ export function GraphView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="Graph failed to load"
-        body="The entity universe did not come back. The graph endpoint returns the whole corpus in one response, so this fails all at once rather than partially."
+        body="The entity universe did not come back."
+        more="The graph endpoint returns the whole corpus in one response, so it fails all at once rather than partially — there is no partial graph to show."
       />
     );
   }
@@ -158,7 +161,7 @@ export function GraphView({ reach }: { reach: Reachability }) {
         title={isFetching ? "Building the graph" : "Nothing to draw"}
         body={
           isFetching
-            ? "Fetching every entity and relation in this profile, then finding the communities in them. This is one request for the whole corpus."
+            ? "One request for every entity and relation here."
             : "No entity universe came back for this profile."
         }
       />
@@ -170,18 +173,22 @@ export function GraphView({ reach }: { reach: Reachability }) {
       <EmptyState
         size="page"
         title="No entities yet"
-        body="Nothing has been extracted into the knowledge graph for this profile. Entities appear as memories are written and the extraction pipeline types what is in them."
+        body="Nothing has been extracted for this profile yet."
+        more="Entities appear as memories are written and the extraction pipeline types what is in them, so the graph fills in behind the corpus rather than being built separately."
       />
     );
   }
 
   const cluster = clusterId !== null ? (model.clusters[clusterId] ?? null) : null;
-  const shown =
+  // Split into the number and the noun so the strip can set the digits in the
+  // mono face and the word in the text face — the number is what the eye is
+  // hunting for, and "341 entities" rendered wholly in mono buries it.
+  const shownCount =
+    level === "clusters" ? model.clusters.length : (cluster?.size ?? model.nodes.length);
+  const shownNoun =
     level === "clusters"
-      ? `${model.clusters.length} cluster${model.clusters.length === 1 ? "" : "s"}`
-      : cluster
-        ? `${cluster.size} entit${cluster.size === 1 ? "y" : "ies"}`
-        : `${model.nodes.length} entit${model.nodes.length === 1 ? "y" : "ies"}`;
+      ? `cluster${model.clusters.length === 1 ? "" : "s"} of ${model.totalEntities} entities`
+      : `entit${shownCount === 1 ? "y" : "ies"} of ${model.totalEntities}`;
 
   return (
     <section className="relative h-full min-h-0 min-w-0 overflow-hidden">
@@ -229,6 +236,15 @@ export function GraphView({ reach }: { reach: Reachability }) {
                 <span className="text-muted-foreground/60">{l.count}</span>
               </span>
             ))}
+            {/* The third encoding, moved here from the status strip on the
+                right. It belongs with the other two: a key is where a reader
+                decodes the picture, and "size = mentions" is a decoding, not a
+                status. Two dots of different sizes carry it without a word. */}
+            <span className="text-muted-foreground/70 flex items-center gap-1.5 text-[11px]">
+              <span className="bg-muted-foreground/50 size-1.5 rounded-full" />
+              <span className="bg-muted-foreground/50 size-2.5 rounded-full" />
+              size = mentions
+            </span>
           </div>
           {level === "entities" ? (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
@@ -251,21 +267,42 @@ export function GraphView({ reach }: { reach: Reachability }) {
             </div>
           ) : null}
         </div>
-        <span className="text-muted-foreground/70 text-[11px]">
-          {/* Every reduction between the corpus and the pixels is stated. The
-              endpoint is uncapped, so any cut happened on this side, and a view
-              that quietly drops most of a graph is worse than one that admits
-              it. Size encoding is named for the same reason — an unexplained
-              size channel is decoration that looks like data. */}
-          {shown} of {model.totalEntities} · {model.totalConnections} relations
-          {model.edgesDropped > 0 ? ` · budget dropped ${model.edgesDropped}` : ""}
-          {stats.hiddenEdges > 0
-            ? ` · ${stats.hiddenEdges} weakest co-occurrence edges hidden (below ${stats.floor.toFixed(2)})`
-            : ""}{" "}
-          · size = mentions ·{" "}
-          {level === "clusters" ? "click a cluster to drill in" : "click an entity to inspect"} ·
-          scroll to zoom
-        </span>
+        {/* EVERY REDUCTION BETWEEN THE CORPUS AND THE PIXELS IS STILL STATED —
+            that rule has not moved. What has changed is that each reduction is
+            now a token rather than a clause, and the exact co-occurrence floor
+            that produced one of them sits behind the icon: "12 weak edges
+            hidden" is the fact a reader needs on screen, "below 0.14" is how it
+            was computed. The endpoint is uncapped, so any cut happened on this
+            side, and a view that quietly drops most of a graph is worse than
+            one that admits it.
+
+            The two gestures and the size encoding left the strip entirely. Size
+            is a legend entry — an unexplained size channel is decoration that
+            looks like data — and it now sits with the other two encodings in
+            the key on the left, where a reader decoding the picture is already
+            looking. */}
+        <Meta className="shrink-0">
+          <Stat value={shownCount} label={shownNoun} />
+          <Stat value={model.totalConnections} label="relations" />
+          {model.edgesDropped > 0 ? (
+            <Stat value={model.edgesDropped} label="dropped to budget" />
+          ) : null}
+          {stats.hiddenEdges > 0 ? (
+            <Stat value={stats.hiddenEdges} label="weak edges hidden" />
+          ) : null}
+          <InfoHint label="canvas controls" align="right" side="up">
+            Scroll to zoom, and{" "}
+            {level === "clusters"
+              ? "click a cluster to drill into the entities inside it."
+              : "click an entity to inspect it."}
+            {stats.hiddenEdges > 0 ? (
+              <span className="mt-1.5 block">
+                Hidden edges are co-occurrences weaker than {stats.floor.toFixed(2)} — the pairs
+                that appear together too rarely to be worth a line.
+              </span>
+            ) : null}
+          </InfoHint>
+        </Meta>
       </div>
     </section>
   );

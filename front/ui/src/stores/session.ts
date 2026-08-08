@@ -71,7 +71,15 @@ export const useSession = create<SessionState>((set) => ({
     }),
   select: (selectedMemoryId) => set({ selectedMemoryId, selectedEntityId: null }),
   selectEntity: (selectedEntityId) => set({ selectedEntityId, selectedMemoryId: null }),
-  setActiveQuery: (activeQuery) => set({ activeQuery }),
+  // Committing a query starts a new answer, and the selected object belonged to
+  // the previous one. Left standing, it stays open in the Inspector beside a
+  // result set it is not part of — verified in the browser: search from the
+  // pre-query corpus listing with a row selected and the detail pane holds a
+  // memory that appears nowhere in the results, which reads as a stale panel
+  // rather than as a deliberate carry-over. Clearing both is the same rule
+  // `setProfile` and `reconcileProfiles` already follow for the same reason.
+  setActiveQuery: (activeQuery) =>
+    set({ activeQuery, selectedMemoryId: null, selectedEntityId: null }),
 
   reconcileProfiles: (profiles) =>
     set((s) => {
