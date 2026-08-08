@@ -97,7 +97,17 @@ function hexA(hex: string, a: number): string {
 
 const HIT_RADIUS_PX = 9;
 
-export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: string[] }) {
+export function GeoMap({
+  memories,
+  types,
+  dimmed,
+}: {
+  memories: RecallMemory[];
+  types: string[];
+  /** Ids drawn as quiet context — present on the map, visibly not part of the
+   *  current answer. Absent set = every point is a first-class result. */
+  dimmed?: Set<string>;
+}) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const selectedId = useSession((s) => s.selectedMemoryId);
@@ -231,23 +241,29 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
 
       for (const { point, x, y } of screen) {
         const isSelected = point.id === sel;
+        // Selection outranks dimming: a person who clicked a context point is
+        // asking about it, and the map must answer at full strength.
+        const isDim = !isSelected && (dimmed?.has(point.id) ?? false);
         // Coordinates are DATA, so a point takes a category hue. The accent is
         // reserved for focus — the selected point and nothing else.
         const hue = isSelected ? tokens.active : hueFor(point.type);
-        const r = 4 + Math.sqrt(Math.max(0, point.score)) * 3;
+        const r = isDim ? 2.5 : 4 + Math.sqrt(Math.max(0, point.score)) * 3;
 
-        // A soft halo so a single point on an empty ocean is still findable.
-        ctx!.beginPath();
-        ctx!.arc(x, y, r + (isSelected ? 7 : 4), 0, 2 * Math.PI);
-        ctx!.fillStyle = hexA(hue, isSelected ? 0.28 : 0.14);
-        ctx!.fill();
+        if (!isDim) {
+          // A soft halo so a single point on an empty ocean is still findable.
+          // Context points get none — a halo is a claim on attention.
+          ctx!.beginPath();
+          ctx!.arc(x, y, r + (isSelected ? 7 : 4), 0, 2 * Math.PI);
+          ctx!.fillStyle = hexA(hue, isSelected ? 0.28 : 0.14);
+          ctx!.fill();
+        }
 
         ctx!.beginPath();
         ctx!.arc(x, y, r, 0, 2 * Math.PI);
-        ctx!.fillStyle = hexA(hue, 0.9);
+        ctx!.fillStyle = hexA(hue, isDim ? 0.35 : 0.9);
         ctx!.fill();
-        ctx!.lineWidth = isSelected ? 2 : 1;
-        ctx!.strokeStyle = isSelected ? tokens.active : hexA(hue, 1);
+        ctx!.lineWidth = isSelected ? 2 : isDim ? 0.75 : 1;
+        ctx!.strokeStyle = isSelected ? tokens.active : hexA(hue, isDim ? 0.45 : 1);
         ctx!.stroke();
       }
     }
@@ -275,7 +291,7 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
       observer.disconnect();
       sel.on(".zoom", null);
     };
-  }, [points, types]);
+  }, [points, types, dimmed]);
 
   const pointAt = useCallback((sx: number, sy: number) => {
     let hit: { point: GeoPoint; x: number; y: number } | null = null;
