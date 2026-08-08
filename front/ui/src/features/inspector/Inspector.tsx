@@ -1,5 +1,10 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { skipToken, useQuery } from "@tanstack/react-query";
 import type { RecallResponse } from "@/lib/api";
+import {
+  corpusKey,
+  corpusToRecallMemory,
+  type CorpusListResponse,
+} from "@/lib/api/corpus";
 import { useSession } from "@/stores/session";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { Badge } from "@/components/ui/badge";
@@ -53,19 +58,56 @@ export function Inspector() {
   const selectedEntityId = useSession((s) => s.selectedEntityId);
   const select = useSession((s) => s.select);
 
-  // Same key as ResultPane, read straight out of the cache.
+  // TWO CACHES, ONE PANE, and the second one is not an optimisation.
   //
-  // Deliberately `getQueryData` and not `useQuery({ enabled: false })`. That
-  // form still *registers* a query for the key, and a registration carrying no
-  // queryFn throws when nothing else has populated it — which is exactly the
-  // first-paint case here, before any search has run. A cache read has no such
-  // failure mode and cannot issue a request by accident.
-  const data = useQueryClient().getQueryData<RecallResponse>(recallKey(profile, query));
+  // Recall now opens onto the corpus rather than onto an instruction: with no
+  // query, the result column lists the newest memories and every row selects
+  // into this pane exactly like a result. But those rows come from the corpus
+  // listing, and the recall cache under an empty query has never been
+  // populated — so every one of those clicks landed here, found nothing, and
+  // was answered with "search, then select a result". A list whose rows are
+  // invitations and whose clicks say "do something else first" is a dead end in
+  // the one place the product asks a stranger to start.
+  //
+  // Both are read with `queryFn: skipToken`, which subscribes to a cache entry
+  // and can never issue the request itself. This replaces a bare
+  // `getQueryData` read, for a reason the earlier note here did not anticipate:
+  // a cache read is not a subscription, and both of these entries resolve
+  // underneath an Inspector that is already mounted — the corpus fetch lands on
+  // the first paint of /recall, and a fresh recall lands while a memory from the
+  // previous result set is still selected. Neither re-rendered this pane, so it
+  // went on showing a pre-load message, or a selected memory stripped of the
+  // attribution the response had just delivered, until something unrelated
+  // happened to re-render it.
+  //
+  // `skipToken` is specifically what the old note was reaching for and could not
+  // name: `enabled: false` with no `queryFn` registers a query that throws on an
+  // unpopulated key — which IS the first-paint case here — while `skipToken` is
+  // the supported form for "read this key, never fetch it". `useCorpus`/
+  // `useRecall` are not reused because both need `Reachability`, which this pane
+  // is not given and does not need: it only ever reads what those two wrote.
+  const { data } = useQuery<RecallResponse>({
+    queryKey: recallKey(profile, query),
+    queryFn: skipToken,
+  });
+  const { data: corpus } = useQuery<CorpusListResponse>({
+    queryKey: corpusKey(profile),
+    queryFn: skipToken,
+  });
 
-  const memory = data?.memories.find((m) => m.id === selectedId);
+  // Preference order matters: a memory present in BOTH is read from the recall
+  // response, because that copy carries the retrieval evidence — score
+  // attribution, tier as retrieved, and the lineage below. The corpus copy is
+  // the fallback and knows none of that.
+
+  const recalled = data?.memories.find((m) => m.id === selectedId);
+  const listed = recalled ? undefined : corpus?.memories.find((m) => m.id === selectedId);
+  const memory = recalled ?? (listed ? corpusToRecallMemory(listed) : undefined);
 
   // Chain 2: the causal edges that connect this memory to others in the same
-  // result set. The server returns these already — no extra endpoint.
+  // result set. The server returns these already — no extra endpoint. A memory
+  // reached from the corpus listing has none: lineage is a property of a
+  // retrieval, not of a memory, and there is no retrieval to be part of.
   const lineage = (data?.lineage ?? []).filter(
     (e) => e.from === selectedId || e.to === selectedId,
   );
@@ -104,15 +146,28 @@ export function Inspector() {
         ) : !memory ? (
           <Empty
             body={
-              data
-                ? "Select a result to see what it is, why it surfaced, and what it connects to."
-                : "Search, then select a result to see why it surfaced."
+              data || corpus
+                ? "Select a memory to see what it is, when it was recorded, and what it connects to."
+                : "This profile's memory is still loading."
             }
           />
         ) : (
           <>
             <div className="px-4 py-3">
               <p className="text-[13px] leading-relaxed">{memory.experience.content}</p>
+
+              {/* `GET /api/list` caps content at 500 characters and says so on
+                  the row (src/handlers/crud.rs). Recall does not truncate, so
+                  this can only appear on a memory reached from the pre-query
+                  listing — and text that silently stops mid-sentence in a pane
+                  whose whole job is trust has to be labelled as cut, not left
+                  to look like the whole record. */}
+              {listed?.content_truncated ? (
+                <p className="text-muted-foreground/60 mt-1.5 text-[11px]">
+                  Cut short — this memory is {listed.content_length} characters long.
+                  The listing carries a preview; a search result carries the whole text.
+                </p>
+              ) : null}
 
               {memory.experience.tags.length > 0 ? (
                 <Field label="Entities">

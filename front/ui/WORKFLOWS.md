@@ -73,6 +73,25 @@ selects the same memory, so the list and the canvas are two views of one
 selection. From the other end, the Graph destination starts at an entity and
 walks back to the memories it was extracted from.
 
+*Chain 1 starts before the query.* Recall opens onto the corpus, newest first,
+and those rows select into the same Inspector — which reads the corpus cache as
+well as the recall one, because a listing whose rows invite a click and whose
+clicks answer "search first" is a dead end in the one place a stranger begins.
+The head above that listing offers the first move: cues taken verbatim from the
+tags extraction wrote, ranked by how often they appear, so they are a reading of
+this corpus rather than a promise about somebody else's.
+
+**Why a result is a result is on the row.** Which legs reached it, and how many
+of the other results it is causally linked to — one muted line, and absent
+rather than blank when the server attributed nothing. The full attribution stays
+in the Inspector; the row carries the sentence, because nobody opens a panel to
+audit a list they have already read as a black box. Once a query has run the
+head states what was searched, the server's own retrieval time, and the claim
+that distinguishes this from any other ranked list: nothing on screen was
+written. That claim is deliberately about *generation*, not about models —
+retrieval embeds the query with a local encoder, and the copy must never grow
+into saying otherwise.
+
 **Two graphs, two questions — neither replaces the other.**
 
 - *Lineage* (on `/recall`) — "how do these recalled memories cause each other".

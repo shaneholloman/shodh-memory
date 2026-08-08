@@ -73,6 +73,24 @@ export interface RecallMemory {
   score_attribution?: ScoreAttribution;
 }
 
+/**
+ * `RetrievalStats` — src/memory/types.rs:3128. Only the fields this UI renders;
+ * the struct also carries candidate counts, per-leg weights, hop counts and a
+ * `stage_timings` breakdown, none of which belong on an analyst's first screen.
+ *
+ * Present whenever the request set `debug: true`, which this client always does
+ * (lib/api/recall.ts) — src/handlers/recall.rs:601-611 populates it from
+ * `recall_with_diagnostics` on that branch and passes `None` otherwise, and
+ * src/handlers/types.rs:169 skips it when absent. Optional here for that reason.
+ */
+export interface RetrievalStats {
+  /** Total time the server spent retrieving, in MICROseconds
+   *  (src/memory/types.rs:3160-3161). This is the retrieval itself — it does not
+   *  include the network hop, JSON encoding or anything the browser then does,
+   *  so it must never be presented as an end-to-end figure. */
+  retrieval_time_us: number;
+}
+
 /** `RecallFact` — src/handlers/types.rs */
 export interface RecallFact {
   id: string;
@@ -113,6 +131,7 @@ export interface RecallLineageEdge {
 export interface RecallResponse {
   memories: RecallMemory[];
   count: number;
+  retrieval_stats?: RetrievalStats;
   todos?: RecallTodo[];
   todo_count?: number;
   facts?: RecallFact[];
