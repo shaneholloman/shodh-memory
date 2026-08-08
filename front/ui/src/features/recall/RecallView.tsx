@@ -122,7 +122,11 @@ function AnswerHead({
   return (
     <div className="border-border shrink-0 border-b px-4 py-2.5">
       <p className="text-muted-foreground text-[11px]">
-        {shown} of {total} {total === 1 ? "memory" : "memories"}
+        {/* "Top", not a bare count: `shown` is capped by the request limit
+            (lib/api/recall.ts sends 25), so "25 of 74" would read as "25
+            matched" when it means "the 25 best of what matched". "Top 5 of 74"
+            stays exact when fewer come back. */}
+        Top {shown} of {total} {total === 1 ? "memory" : "memories"}
         {retrievalUs !== undefined ? (
           <span title="Time the server spent retrieving and ranking. Excludes the network round trip.">
             {" · retrieved in "}

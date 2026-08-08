@@ -165,7 +165,7 @@ export function Inspector() {
               {listed?.content_truncated ? (
                 <p className="text-muted-foreground/60 mt-1.5 text-[11px]">
                   Cut short — this memory is {listed.content_length} characters long.
-                  Searching for it returns the whole text.
+                  The listing carries a preview; a search result carries the whole text.
                 </p>
               ) : null}
 
