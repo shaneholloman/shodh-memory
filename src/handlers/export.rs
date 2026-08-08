@@ -632,6 +632,7 @@ mod tests {
             is_proper_noun: true,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         }
     }
 

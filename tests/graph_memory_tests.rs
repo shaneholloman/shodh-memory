@@ -53,6 +53,7 @@ fn create_entity_from_ner(ner: &NeuralNer, text: &str) -> Vec<EntityNode> {
             is_proper_noun: true,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         })
         .collect()
 }
@@ -85,6 +86,7 @@ fn create_entity(
         is_proper_noun: is_proper,
         selectivity: None,
         fine_type: None,
+        kb_id: None,
     }
 }
 

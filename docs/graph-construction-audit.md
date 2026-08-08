@@ -89,16 +89,29 @@ embedding cosine ≥ **0.85** (`ENTITY_CONCEPT_MERGE_THRESHOLD`,
 
 ### 1.3 Entity linking
 
-**Gated off by default, behind two independent gates.** `SHODH_KB_LINKING`
-defaults false (`graph_memory.rs:2701-2703`), and `SHODH_KB_PATH` is unset with
-no bundled asset and no downloader (`kb.rs:24-41`). When on, `kb_link_entities`
-(`graph_memory.rs:2700-2741`) does alias-exact then type-blocked cosine NN at
-min **0.75**, and **only seeds aliases** — it never merges nodes and discards
-the Wikidata QID it loaded (`kb.rs:53`).
+*Superseded — this section described the pre-vendored-asset state, in which KB
+linking was inert. It now reads:*
 
-With it off, entity identity rests entirely on in-corpus dedup, the alias table,
-and the 6-hourly canonicalizer. **No world-knowledge merge (`Google` →
-`Alphabet Inc.`) is reachable in a default deployment.**
+**Identity stamping is always on; merging is still gated.** A Wikidata slice is
+vendored in-repo (`src/kb/wikidata-slice.tsv`, 14.2k organisations and
+software/products at ≥12 Wikipedia sitelinks, 1.06 MB, CC0), so `src/kb/mod.rs` resolves
+surfaces with no configuration, no network and no model. `add_entity` stamps
+`EntityNode.kb_id` with the QID on every write, at no extra I/O, and the field
+is write-once: an established identity is never overwritten by a later mention.
+
+Linking abstains by default. A surface links only if its label maps to a KB type
+(`Organization`, `Product`, `Technology` — `Person` and the internal-ish labels
+are deliberately excluded), and only if exactly one type-compatible candidate
+exists or the leading one outranks the runner-up 5× in sitelinks. `ACM` and
+`WTO` therefore resolve to nothing rather than to the wrong organisation.
+
+`kb_link_entities` (`SHODH_KB_LINKING=1`, still default off) is the separate,
+riskier half: it seeds surface→canonical aliases and so changes graph structure
+and retrieval. It is opt-in until measured against the recall gate.
+
+With the gate off, world-knowledge *merges* (`Google` → `Alphabet Inc.`) still
+do not happen — but the identity needed to perform them is now recorded on the
+nodes, which it previously was not.
 
 ### 1.4 Node creation
 
