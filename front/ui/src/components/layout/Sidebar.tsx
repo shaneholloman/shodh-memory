@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Search, TriangleAlert, ListChecks } from "lucide-react";
+import { NavLink } from "react-router-dom";
+import {
+  Search,
+  TriangleAlert,
+  ListChecks,
+  ChevronDown,
+  MessageSquare,
+  KeyRound,
+  Globe,
+  Share2,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
+import { isHumanProfile, type Reachability } from "@/lib/api";
+import { useSession } from "@/stores/session";
 import shodhMark from "@/assets/shodh-mark.png";
 
 /**
@@ -19,7 +31,8 @@ import shodhMark from "@/assets/shodh-mark.png";
  * instead shows every label at once, which is the question a person actually
  * has ("which of these is the one I want?").
  *
- * Three things this has to get right, none of them optional:
+ * Three things this has to get right, none of them optional — all three
+ * verified in a browser, not assumed:
  *
  *  - It expands as an OVERLAY. The stage behind it holds a graph; reflowing a
  *    force layout because a pointer crossed the edge of the screen is
@@ -37,22 +50,53 @@ import shodhMark from "@/assets/shodh-mark.png";
 
 export const DESTINATIONS = [
   {
+    id: "chat",
+    path: "/chat",
+    label: "Conversations",
+    icon: MessageSquare,
+    caption: "Converse with memory on the table",
+  },
+  {
     id: "recall",
+    path: "/recall",
     label: "Recall",
     icon: Search,
     caption: "Search memory and see what connects",
   },
   {
+    id: "graph",
+    path: "/graph",
+    label: "Graph",
+    icon: Share2,
+    caption: "The entities this corpus knows and how they relate",
+  },
+  {
+    id: "geo",
+    path: "/geo",
+    label: "Geo",
+    icon: Globe,
+    caption: "Where the current results happened",
+  },
+  {
     id: "anomalies",
+    path: "/anomalies",
     label: "Anomalies",
     icon: TriangleAlert,
     caption: "What deviates from this user's baseline",
   },
   {
     id: "tasks",
+    path: "/tasks",
     label: "Tasks",
     icon: ListChecks,
     caption: "Open work captured from sessions",
+  },
+  {
+    id: "providers",
+    path: "/providers",
+    label: "Providers",
+    icon: KeyRound,
+    caption: "Model endpoints and credentials",
   },
 ] as const;
 
@@ -87,15 +131,66 @@ function RailLabel({
   );
 }
 
-export function Sidebar({
-  active,
-  onNavigate,
-  identity,
-}: {
-  active: DestinationId;
-  onNavigate: (id: DestinationId) => void;
-  identity: string;
-}) {
+/**
+ * Which profile's memory is on screen.
+ *
+ * Every option here came from `GET /api/users`; none is typed or guessed. That
+ * is a correctness requirement, not tidiness — `get_user_memory`
+ * (src/handlers/state.rs) provisions a fresh RocksDB store for any id it has
+ * not seen rather than rejecting it, so a free-text profile field would let
+ * someone create empty profiles by mistyping.
+ *
+ * Rendered as a native <select> deliberately. It is one of the few controls
+ * that must work before anything else does, and the platform's own is
+ * keyboard-complete, screen-reader-correct and impossible to get wrong.
+ */
+function ProfileSwitcher({ reach, open }: { reach: Reachability; open: boolean }) {
+  const profile = useSession((s) => s.profile);
+  const setProfile = useSession((s) => s.setProfile);
+
+  // The seat stores its own lessons under `<user>.seat-harness` — a real
+  // backend profile, but machinery, not a person. Offering it here invites
+  // exactly the mistake the switcher exists to prevent: a human reading (or
+  // writing!) the harness's internal scope as if it were their memory.
+  const humanProfiles = reach.state === "online"
+    ? reach.profiles.filter(isHumanProfile)
+    : [];
+
+  if (reach.state !== "online" || humanProfiles.length === 0 || !profile) return null;
+
+  const single = humanProfiles.length === 1;
+
+  return (
+    <div className="border-sidebar-border border-t px-2 py-2">
+      <div className="flex h-8 items-center gap-3 px-[0.65rem]">
+        <span className="bg-muted-foreground/40 size-1.5 shrink-0 rounded-full" />
+        <RailLabel open={open} className="min-w-0 flex-1">
+          {single ? (
+            <span className="text-muted-foreground text-[11px]">{profile}</span>
+          ) : (
+            <span className="relative flex items-center gap-1">
+              <select
+                aria-label="Active profile"
+                value={profile}
+                onChange={(e) => setProfile(e.target.value)}
+                className="text-muted-foreground hover:text-foreground focus-visible:ring-ring min-w-0 flex-1 cursor-pointer appearance-none truncate bg-transparent text-[11px] focus-visible:ring-2 focus-visible:outline-none"
+              >
+                {humanProfiles.map((p) => (
+                  <option key={p} value={p} className="bg-popover text-popover-foreground">
+                    {p}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" className="text-muted-foreground size-3 shrink-0" />
+            </span>
+          )}
+        </RailLabel>
+      </div>
+    </div>
+  );
+}
+
+export function Sidebar({ reach }: { reach: Reachability }) {
   const [open, setOpen] = useState(false);
   const closeTimer = useRef<number | undefined>(undefined);
 
@@ -121,17 +216,14 @@ export function Sidebar({
   return (
     <aside
       aria-label="Primary navigation"
-      // Focus events bubble (unlike focusin's absence on React's synthetic
-      // `onFocus` — React's onFocus DOES bubble), so one handler on the
-      // container covers every control inside without wiring each one.
+      // React's onFocus bubbles, so one handler on the container covers every
+      // control inside without wiring each one.
       onMouseEnter={openRail}
       onMouseLeave={closeRail}
       onFocus={openRail}
       // A blur that lands on another control inside the rail is not a leave.
       onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-          closeRail();
-        }
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) closeRail();
       }}
       // Escape closes it for keyboard users who expanded it by tabbing in and
       // want it out of the way without leaving the rail.
@@ -155,54 +247,41 @@ export function Sidebar({
           aria-hidden="true"
           className="size-6 shrink-0 object-contain"
         />
-        <div className="min-w-0 leading-tight">
-          <RailLabel open={open} className="block text-[13px] font-semibold tracking-tight">
-            shodh
-          </RailLabel>
-          <RailLabel open={open} className="text-muted-foreground block text-[11px]">
-            {identity}
-          </RailLabel>
-        </div>
+        <RailLabel open={open} className="text-[13px] font-semibold tracking-tight">
+          shodh
+        </RailLabel>
       </div>
 
       <nav className="flex flex-col gap-1 p-2">
         {DESTINATIONS.map((d) => {
           const Icon = d.icon;
-          const isActive = d.id === active;
           return (
-            <button
+            <NavLink
               key={d.id}
-              type="button"
-              onClick={() => onNavigate(d.id)}
-              aria-current={isActive ? "page" : undefined}
-              className={cn(
-                "flex h-9 shrink-0 items-center gap-3 rounded-lg px-[0.65rem] text-left text-[13px]",
-                "transition-colors duration-100",
-                "focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-2",
-                isActive
-                  ? "bg-primary/10 text-primary hover:bg-primary/20"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground",
-              )}
+              to={d.path}
+              className={({ isActive }) =>
+                cn(
+                  "flex h-9 shrink-0 items-center gap-3 rounded-lg px-[0.65rem] text-left text-[13px]",
+                  "transition-colors duration-100",
+                  "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
+                  isActive
+                    ? "bg-primary/10 text-primary hover:bg-primary/20"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                )
+              }
             >
               <Icon className="size-[18px] shrink-0" strokeWidth={1.7} />
               <RailLabel open={open} className="font-medium">
                 {d.label}
               </RailLabel>
-            </button>
+            </NavLink>
           );
         })}
       </nav>
 
-      {/* The captions only exist to answer "what is this destination for", so
-          they render only when the rail is open enough to hold them. Unlike the
-          labels they are not an accessible name for anything, so removing them
-          when collapsed costs nothing. */}
-      {open ? (
-        <p className="text-muted-foreground/70 px-4 pb-1 text-[11px] leading-relaxed">
-          {DESTINATIONS.find((d) => d.id === active)?.caption}.
-        </p>
-      ) : null}
-
+      <div className="mt-auto shrink-0">
+        <ProfileSwitcher reach={reach} open={open} />
+      </div>
     </aside>
   );
 }

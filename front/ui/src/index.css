@@ -149,6 +149,27 @@
   --edge-strong: #4a4d55;
   --edge-medium: #35373d;
   --edge-weak: #26282c;
+
+  /* Edge consolidation tiers — L1 working → L2 episodic → L3 semantic.
+
+     An ORDINAL ramp, not three categories: the tiers are a progression from
+     new-and-volatile to proven to consolidated, so they are three steps of one
+     cool, desaturated slate family. Three unrelated hues would read as kinds
+     and would compete with the node-type colours, which own categorical colour
+     on this canvas.
+
+     The ramp brightens with consolidation because the ground is near-black:
+     on #08090a, "deep and solid" means MORE present, not darker. L1 sits just
+     above the resting edge greys; L3 is the most legible thing among the edges
+     without ever reaching the accent.
+
+     Deliberately low saturation, to stay clear of --node-org (#4ea7fc), which
+     is a saturated sky blue in the same hue neighbourhood, and well outside
+     the accent's orange band, the destructive pink-red and the warn amber. */
+  --edge-l1: #3f4a57;
+  --edge-l2: #64768c;
+  --edge-l3: #96abc4;
+
   --live: #4cb782;
 }
 
@@ -275,6 +296,137 @@
     #000 25%,
     transparent 78%
   );
+}
+
+/* Rendered assistant markdown. Scoped under .md so model output can never
+   restyle the chrome; sized to the 13px body the rest of the product runs.
+   Colours come from the same tokens as everything else — saturated colour
+   stays reserved for data, so links are foreground+underline, not accent. */
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p,
+.md ul,
+.md ol,
+.md pre,
+.md blockquote,
+.md table {
+  margin: 0.55em 0;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 0.9em 0 0.35em;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.md h1 {
+  font-size: 15px;
+}
+.md h2 {
+  font-size: 14px;
+}
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  font-size: 13px;
+}
+.md ul,
+.md ol {
+  padding-left: 1.4em;
+}
+.md ul {
+  list-style: disc;
+}
+.md ol {
+  list-style: decimal;
+}
+.md li {
+  margin: 0.18em 0;
+}
+.md a {
+  color: var(--foreground);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--muted-foreground);
+}
+.md a:hover {
+  text-decoration-color: var(--foreground);
+}
+.md code {
+  font-family: "Berkeley Mono", "SF Mono", ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.08em 0.35em;
+}
+.md pre {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.7em 0.85em;
+  overflow-x: auto;
+}
+.md pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.md blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 0.85em;
+  color: var(--muted-foreground);
+}
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 0.9em 0;
+}
+.md table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  font-size: 12px;
+}
+.md th,
+.md td {
+  border: 1px solid var(--border);
+  padding: 0.3em 0.6em;
+  text-align: left;
+}
+.md th {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+
+/* A memory citation the model printed ([mem:id]) rendered as the handle it
+   is. Accent-coloured: a citation is precisely a focus target — clicking it
+   opens that memory's evidence. */
+.mem-cite {
+  font-family: "Berkeley Mono", "SF Mono", ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+  border-radius: 4px;
+  padding: 0 0.35em;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.mem-cite:hover {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+}
+.mem-cite:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
 }
 
 /* Activation travelling along an edge. A short dash on a long gap, so exactly

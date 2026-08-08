@@ -733,6 +733,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
                     memory_type: Some(format!("{:?}", m.experience.experience_type)),
                     tags: m.experience.entities.clone(),
                     geo_location: m.experience.geo_location,
+                    toponyms: m.experience.toponyms.clone(),
                 },
                 importance: m.importance(),
                 created_at: m.created_at.to_rfc3339(),

@@ -340,7 +340,16 @@ impl CompressionPipeline {
                 ));
             }
 
-            let experience: Experience = crate::serialization::decode_raw(&decompressed)?;
+            let mut experience: Experience = crate::serialization::decode_raw(&decompressed)?;
+
+            // `Experience::toponyms` is `#[serde(skip)]` — it rides at the tail
+            // of `MemoryFlat` rather than inside the `Experience` encoding, so
+            // it is NOT in this blob. The compressed memory kept it on its outer
+            // experience (compress_lz4 clones the memory and only adds metadata
+            // keys), so carry it across; otherwise decompression would silently
+            // drop resolved places and LZ4 compression would stop being
+            // lossless, contrary to `is_lossless`.
+            experience.toponyms = memory.experience.toponyms.clone();
 
             // Restore the memory
             let mut restored = memory.clone();

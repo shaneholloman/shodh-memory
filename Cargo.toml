@@ -30,6 +30,15 @@ exclude = [
     "*.log",
     "*.json",
     "!src/entity_type/entity-type-schema.json",
+    # The embedded en_core_web_sm manifest is `include_str!`d, so the blanket
+    # "*.json" exclusion above would break a packaged build.
+    #
+    # NOTE: at ~14.4 MiB the bundle puts a packaged crate over the crates.io
+    # 10 MiB limit. That is not a NEW break — `spacy-rusty` is a version-less
+    # path dependency, which already makes `cargo publish` fail — but whoever
+    # fixes the path dep must also solve the asset size (raised limit, or a
+    # feature-gated download).
+    "!src/dep_parser/en_core_web_sm/model.json",
     "!Cargo.lock",
     "job_log.txt",
     "macos_log.txt",

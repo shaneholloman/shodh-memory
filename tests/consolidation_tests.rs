@@ -295,10 +295,18 @@ fn session_tier_survives_a_serialization_round_trip() {
 
 #[test]
 fn every_live_tier_maps_to_a_distinct_graph_multiplier() {
-    // The three live tiers must give three DIFFERENT graph-leg weights,
-    // otherwise persisting the transition buys nothing. These are the constants
-    // `graph_retrieval` matches on; before the promotion write, the 0.6 branch
-    // was effectively dead because almost nothing persisted as Session.
+    // The declared ladder: three live tiers, three DIFFERENT graph-leg weights,
+    // strictly increasing with consolidation.
+    //
+    // NOTE what this pins and what it does not. It pins the CONSTANTS, not the
+    // retrieval path. `graph_retrieval::memory_tier_graph_trust` deliberately
+    // holds `Session` at the `Working` value: the promotion write above made the
+    // 0.6 rung reachable for the very first time, and measured on the
+    // LoCoMo-100 gate it costs recall (multi_hop ndcg 0.2652 -> 0.2516,
+    // open_domain recall@10 0.2750 -> 0.2250). Promoting the middle rung is a
+    // measured decision; `session_graph_trust_is_held_at_the_working_value` is
+    // the tripwire that forces it to be made deliberately. The ladder stays
+    // declared here so the value survives for whoever calibrates it.
     use shodh_memory::constants::{
         MEMORY_TIER_GRAPH_MULT_LONGTERM, MEMORY_TIER_GRAPH_MULT_SESSION,
         MEMORY_TIER_GRAPH_MULT_WORKING,
