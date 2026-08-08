@@ -629,6 +629,7 @@ mod tests {
             is_proper_noun: true,
             selectivity: None,
             fine_type: Some("bridge".to_string()),
+            kb_id: None,
         };
         graph.add_entity(entity).unwrap();
 
@@ -679,6 +680,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         graph.add_entity(entity).unwrap();
 

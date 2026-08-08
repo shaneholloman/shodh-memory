@@ -3060,6 +3060,7 @@ impl MultiUserMemoryManager {
                     is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
                     selectivity: None,
                     fine_type,
+                    kb_id: None,
                 };
                 (ner_entity.text, node)
             })
@@ -3124,6 +3125,7 @@ impl MultiUserMemoryManager {
                             is_proper_noun: false,
                             selectivity: None,
                             fine_type: None,
+                            kb_id: None,
                         },
                     ))
                 } else {
@@ -3196,6 +3198,7 @@ impl MultiUserMemoryManager {
                         is_proper_noun: true,
                         selectivity: None,
                         fine_type: None,
+                        kb_id: None,
                     },
                 ))
             })
@@ -3231,6 +3234,7 @@ impl MultiUserMemoryManager {
                         is_proper_noun: true,
                         selectivity: None,
                         fine_type: None,
+                        kb_id: None,
                     },
                 ))
             })
@@ -3277,6 +3281,7 @@ impl MultiUserMemoryManager {
                             is_proper_noun: false,
                             selectivity: None,
                             fine_type: None,
+                            kb_id: None,
                         },
                     ))
                 })
@@ -4294,6 +4299,7 @@ mod tests {
                 is_proper_noun: true,
                 selectivity: None,
                 fine_type: None,
+                kb_id: None,
             },
         )
     }

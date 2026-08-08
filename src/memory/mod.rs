@@ -8463,6 +8463,7 @@ impl MemorySystem {
                         .unwrap_or(false),
                     selectivity: None,
                     fine_type: None,
+                    kb_id: None,
                 };
                 if graph_guard.add_entity(entity).is_ok() {
                     entities_added += 1;
@@ -8845,6 +8846,7 @@ impl MemorySystem {
                                 .unwrap_or(false),
                             selectivity: None,
                             fine_type,
+                            kb_id: None,
                         }
                     })
                     .collect();
@@ -10735,6 +10737,7 @@ mod companion_injection_tests {
             is_proper_noun: true,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         graph.add_entity(node).expect("add entity")
     }
@@ -11006,6 +11009,7 @@ mod companion_rerank_tests {
             is_proper_noun: true,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         graph.add_entity(node).expect("add entity")
     }
