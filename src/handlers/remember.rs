@@ -1108,7 +1108,10 @@ pub async fn batch_remember(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
     };
 
-    let memory_ids: Vec<String> = memory_results.iter().map(|(_, id, _, _)| id.clone()).collect();
+    let memory_ids: Vec<String> = memory_results
+        .iter()
+        .map(|(_, id, _, _)| id.clone())
+        .collect();
     let created = memory_ids.len();
 
     let mut all_errors = validation_errors;

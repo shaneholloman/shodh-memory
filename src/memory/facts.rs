@@ -1376,7 +1376,9 @@ mod tests {
             .expect("retained for audit");
         assert!(!settled_claim.is_active());
         assert_eq!(settled_claim.invalidated_by.as_deref(), Some("correction"));
-        assert!(settled_claim.contradicts.contains(&"correction".to_string()));
+        assert!(settled_claim
+            .contradicts
+            .contains(&"correction".to_string()));
         assert!(
             !settled_claim.source_memories.is_empty(),
             "invalidation must not break the trust chain back to the episodes"
@@ -1385,7 +1387,9 @@ mod tests {
         let settled_correction = store.get(user, "correction").unwrap().expect("stored");
         assert!(settled_correction.is_active());
         assert!(
-            settled_correction.contradicts.contains(&"claim".to_string()),
+            settled_correction
+                .contradicts
+                .contains(&"claim".to_string()),
             "the winner must remember what it displaced"
         );
     }
@@ -1395,7 +1399,12 @@ mod tests {
         let (store, _dir) = create_test_store();
         let user = "arb";
 
-        let established = candidate("established", "four crew were injured in the incident", 5, 5);
+        let established = candidate(
+            "established",
+            "four crew were injured in the incident",
+            5,
+            5,
+        );
         store
             .ingest_candidate(user, &established, Some(EMB), chrono::Utc::now())
             .unwrap();

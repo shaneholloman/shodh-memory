@@ -5228,7 +5228,8 @@ mod tests {
             is_failure: true,
             ..Default::default()
         };
-        e.metadata.insert("source".to_string(), "telemetry".to_string());
+        e.metadata
+            .insert("source".to_string(), "telemetry".to_string());
         e
     }
 
@@ -5345,7 +5346,9 @@ mod tests {
             reward: Some(0.5),
             ..Default::default()
         };
-        incoming.metadata.insert("run".to_string(), "two".to_string());
+        incoming
+            .metadata
+            .insert("run".to_string(), "two".to_string());
         incoming
             .metadata
             .insert("operator".to_string(), "kestrel".to_string());

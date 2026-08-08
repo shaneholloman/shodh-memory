@@ -1451,7 +1451,12 @@ impl MemorySystem {
                     existing_id = %existing_id.0,
                     "Content dedup: existing memory vanished before merge ({e})"
                 );
-                return Ok(RememberOutcome::deduped(existing_id, Vec::new(), Vec::new(), None));
+                return Ok(RememberOutcome::deduped(
+                    existing_id,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                ));
             }
         };
 
@@ -1462,7 +1467,12 @@ impl MemorySystem {
                 existing_id = %existing_id.0,
                 "Content dedup: identical duplicate, nothing to merge"
             );
-            return Ok(RememberOutcome::deduped(existing_id, Vec::new(), Vec::new(), None));
+            return Ok(RememberOutcome::deduped(
+                existing_id,
+                Vec::new(),
+                Vec::new(),
+                None,
+            ));
         }
 
         // Importance can rise on enrichment, never fall. Computed from the
@@ -1487,7 +1497,10 @@ impl MemorySystem {
                 &existing.experience.tags,
                 &existing.experience.entities,
             ) {
-                tracing::warn!("Failed to reindex merged memory {} in BM25: {e}", existing_id.0);
+                tracing::warn!(
+                    "Failed to reindex merged memory {} in BM25: {e}",
+                    existing_id.0
+                );
             }
             if let Err(e) = self.hybrid_search.commit_and_reload() {
                 tracing::warn!("Failed to commit/reload BM25 index after merge: {e}");
