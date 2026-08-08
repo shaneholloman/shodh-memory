@@ -251,6 +251,7 @@ export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
               <ModelPicker
                 current={model}
                 disabled={streaming}
+                swap
                 onSelect={async (m) => {
                   const applied = await changeModel(activeId, m.provider, m.id);
                   setModel(activeId, applied);
