@@ -260,9 +260,25 @@ function findPatterns(items: Groupable[]): Pattern[] {
         a.attribute.value === b.attribute.value;
       if (!closeMagnitude && !sameType && !sameAttribute) continue;
 
+      // THE TWO COMPONENTS' EVIDENCE HAS TO BE CARRIED ACROSS THE UNION.
+      // `reasons` is keyed by component root, and a union re-roots one of the
+      // trees — so reading `reasons.get(find(i))` AFTER the union can land on a
+      // root that has never been written to, silently discarding everything
+      // learned about the component that just lost its root. Three findings
+      // joined as (A,B) then (A,C) reported only the second pair's tokens, and
+      // the failure is invisible: the members are right and the evidence is
+      // merely thin, which is the worst shape for a bug on a screen whose whole
+      // job is showing its reasoning.
+      const rootA = find(i);
+      const rootB = find(j);
+      const carried = [...(reasons.get(rootA) ?? []), ...(reasons.get(rootB) ?? [])];
+      reasons.delete(rootA);
+      reasons.delete(rootB);
+
       union(i, j);
       const key = find(i);
-      const evidence = reasons.get(key) ?? [];
+      const evidence: string[] = [];
+      for (const token of carried) if (!evidence.includes(token)) evidence.push(token);
       const term = `share “${shared[0]}”`;
       if (!evidence.includes(term)) evidence.push(term);
       if (closeMagnitude) {
