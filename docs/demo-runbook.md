@@ -40,7 +40,7 @@ rehearsal produces a pass/fail list rather than an impression.
 | 12 | **Needle**: ask "was there any warning sign before the Dali incident?" | needle-in-haystack over ~67 memories | the three quiet pre-incident memories (switchboard alarm at inspection, reefer-feeder voltage sag, deferred breaker overhaul) surface out of the routine noise; the model assembles them into a warning narrative with `[mem:id]` chips; none of the haystack ops logs pollute the evidence |
 | 13 | **Anomaly**: ask "any anomalies in the container manifests?" | quantitative outlier detection via recall | the single MSKU-4471820 weight mismatch (4,200 kg declared vs 28,650 kg weighed) surfaces from dozens of routine manifest/ops memories; model states the discrepancy and the VGM flag |
 | 14 | **Contradiction**: ask "how many crew were injured in the collapse?" | the system carries corrections, the model reasons over them | both the initial four-injured report and the correction surface; the model leads with the corrected fact and cites the correction memory |
-| 15 | **Geo outlier**: map view after asking "anything unusual in vehicle movements?" | spatial anomaly, visibly | truck T-118's Annapolis ping sits alone, far from the port cluster; clicking it opens the Inspector on the off-corridor memory |
+| 15 | **Geo outlier**: map view after asking "anything unusual in truck movements?" | spatial anomaly, visibly | truck T-118's Annapolis ping sits alone, far from the port cluster; clicking it opens the Inspector on the off-corridor memory |
 
 Beats 12–15 are the analyst-workbench thesis in miniature: the model is
 replaceable (beat 9 proved it), the MEMORY does the finding. Deliver each one
