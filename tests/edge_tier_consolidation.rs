@@ -40,7 +40,13 @@ fn store_root(name: &str) -> PathBuf {
 }
 
 struct Store {
-    graph: GraphMemory,
+    /// `Option` so `Drop` can CLOSE the database before deleting its directory.
+    /// `Drop::drop` runs before the struct's fields are dropped, so holding a
+    /// plain `GraphMemory` here meant RocksDB still had the files open when
+    /// `remove_dir_all` ran: on Windows the delete fails, and because the
+    /// result was discarded it failed silently, leaving a multi-megabyte store
+    /// behind after every run. Always `take()` and drop the handle first.
+    graph: Option<GraphMemory>,
     path: PathBuf,
 }
 
@@ -49,14 +55,29 @@ impl Store {
         let path = store_root(name);
         std::fs::create_dir_all(&path).expect("create store dir");
         let graph = GraphMemory::new(&path, None).expect("open graph memory");
-        Store { graph, path }
+        Store {
+            graph: Some(graph),
+            path,
+        }
+    }
+
+    fn graph(&self) -> &GraphMemory {
+        self.graph.as_ref().expect("store is open")
     }
 }
 
 impl Drop for Store {
     fn drop(&mut self) {
-        // Best effort: RocksDB may still hold handles if a test panicked.
-        let _ = std::fs::remove_dir_all(&self.path);
+        // Close the DB first (see the field comment), then delete.
+        drop(self.graph.take());
+        if let Err(e) = std::fs::remove_dir_all(&self.path) {
+            // Report rather than swallow: a test store left under C:\smt is a
+            // real leak, and a silent one is how it goes unnoticed.
+            eprintln!(
+                "warning: could not delete test store {}: {e}",
+                self.path.display()
+            );
+        }
     }
 }
 
@@ -219,9 +240,9 @@ fn batch_ingest_consolidates_by_evidence_not_by_clock() {
         corpus.len()
     );
 
-    let ingest_secs = ingest(&store.graph, &corpus);
-    let census = store.graph.edge_tier_census().expect("census");
-    let edges = store.graph.get_all_relationships().expect("all edges");
+    let ingest_secs = ingest(store.graph(), &corpus);
+    let census = store.graph().edge_tier_census().expect("census");
+    let edges = store.graph().get_all_relationships().expect("all edges");
 
     // --- Episode histogram: the evidence the gate actually reads. ---
     let mut hist: HashMap<usize, usize> = HashMap::new();
@@ -377,9 +398,9 @@ fn corroborated_edges_survive_the_lazy_prune_path() {
     // promotion also shields it from strength-based pruning.
     let store = Store::open("prune");
     let corpus: Vec<CorpusItem> = load_corpus().into_iter().take(200).collect();
-    ingest(&store.graph, &corpus);
+    ingest(store.graph(), &corpus);
 
-    let edges = store.graph.get_all_relationships().expect("all edges");
+    let edges = store.graph().get_all_relationships().expect("all edges");
     let corroborated: Vec<_> = edges
         .iter()
         .filter(|e| e.distinct_attesting_episodes() >= TIER_PROMOTION_L2_MIN_EPISODES)
