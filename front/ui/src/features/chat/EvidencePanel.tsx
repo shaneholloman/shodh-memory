@@ -28,6 +28,18 @@ import { ScrollArea } from "@/components/ui/scroll-area";
  *
  * Two levels: a digest of every turn's evidence (newest first), and a
  * memory-detail view any inline chip, citation or digest row focuses.
+ *
+ * The strip under the header appears ONLY once this conversation has actually
+ * changed model — it is a report of something that happened, not a standing
+ * claim. That is what makes it checkable: the reader watched the swap, and
+ * the rows underneath are the same rows. It survives a reload because
+ * `model_changed` is a durable event (seat/src/store.ts persists every
+ * non-delta event) and `buildTurns` replays it into `ops`.
+ *
+ * "Already retrieved" is the exact scope. Turns taken after the swap do add
+ * new rows below, retrieved by a new pass the new model drove — so the line
+ * says the swap did not change what was retrieved, and never that the list
+ * stopped growing or that any model retrieves the same memories.
  */
 
 interface ResolvedMemory {
@@ -292,6 +304,16 @@ export function EvidencePanel({
     return resolveSelection(convo.turns, selected.turn, selected.memoryId);
   }, [selected, convo, conversationId]);
 
+  // A swap that this conversation actually performed. The op only reaches the
+  // client when the seat flushes its pending events at the start of the next
+  // turn (seat/src/conversation.ts sendMessage), so this line arrives with the
+  // new model's first answer — the moment the reader is looking for the
+  // difference the swap made to the evidence.
+  const swapped = useMemo(
+    () => (convo?.turns ?? []).some((turn) => turn.ops.some((op) => op.type === "model_changed")),
+    [convo],
+  );
+
   const turnsWithEvidence = useMemo(
     () =>
       (convo?.turns ?? [])
@@ -322,6 +344,16 @@ export function EvidencePanel({
           </Button>
         ) : null}
       </header>
+
+      {/* Its own strip rather than a second header line: the header is h-10 to
+          stay level with the conversation's, and this sentence has to WRAP at
+          the panel's narrow widths (min(340px,26vw) — 266px at 1024) instead of
+          truncating into half a claim. */}
+      {swapped ? (
+        <p className="border-border text-muted-foreground shrink-0 border-b px-4 py-1.5 text-[11px] leading-relaxed">
+          Switching models did not change what was already retrieved.
+        </p>
+      ) : null}
 
       <ScrollArea className="min-h-0 flex-1">
         {resolved && selected ? (

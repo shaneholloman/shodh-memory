@@ -228,6 +228,7 @@ export function ChatView({ reach, seat }: { reach: Reachability; seat: SeatReach
             <ModelPicker
               current={convo?.model ?? activeSummary?.model ?? null}
               disabled={convo?.streaming}
+              swap
               onSelect={async (model) => {
                 const applied = await changeModel(activeId, model.provider, model.id);
                 setModel(activeId, applied);
