@@ -93,8 +93,19 @@ export function GeoView({ reach }: { reach: Reachability }) {
 
       <GeoMap memories={plotted} types={types} dimmed={dimmed} />
 
-      <div className="text-muted-foreground pointer-events-none absolute top-3 left-4 z-10 text-[12px]">
-        {hasQuery ? "Where this answer happened" : "Where this profile's memory happened"}
+      <div className="pointer-events-none absolute top-3 left-4 z-10 flex flex-col gap-0.5">
+        <span className="text-muted-foreground text-[12px]">
+          {hasQuery ? "Where this answer happened" : "Where this profile's memory happened"}
+        </span>
+        {/* Said only before a query, because it is the one thing this map does
+            that is not visible from looking at it: searching does not swap the
+            points out, it turns the matching ones up. Without the line, a map
+            that stays put after a search reads as a map that ignored it. */}
+        {!hasQuery ? (
+          <span className="text-muted-foreground/60 text-[11px]">
+            Search to raise the points that match
+          </span>
+        ) : null}
       </div>
 
       <div

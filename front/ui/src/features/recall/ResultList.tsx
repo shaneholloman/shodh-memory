@@ -1,8 +1,9 @@
 import { cn } from "@/lib/utils";
-import type { RecallMemory } from "@/lib/api";
+import type { RecallLineageEdge, RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { whyItSurfaced } from "./why";
 
 /**
  * The result column.
@@ -10,7 +11,21 @@ import { Skeleton } from "@/components/ui/skeleton";
  * A row is the entry point to both chains in WORKFLOWS.md — selecting it opens
  * the Inspector, which is the only object-detail surface in the product. So the
  * row's job is to carry just enough to choose between candidates, and nothing
- * more: the content, when it was recorded, and how strongly it surfaced.
+ * more: the content, when it was recorded, how strongly it surfaced, and — the
+ * one addition — why.
+ *
+ * WHY THE REASON IS ON THE ROW. The full attribution has always been one click
+ * away in the Inspector, and one click away is where it stayed: a ranked list
+ * with no stated reason reads as a black box, and nobody opens a panel to
+ * check a list they have already decided not to trust. So the strongest single
+ * line comes forward and the arithmetic stays behind (see why.ts, which is also
+ * where the constraints on the wording live). It is one line, muted, under the
+ * content — a reason competing with the memory for attention would have traded
+ * one unreadable row for another.
+ *
+ * The line is absent, not blank, when the server attributed nothing: corpus
+ * rows in the pre-query listing were never retrieved and have no reason to
+ * give, and a row of dashes standing in for that would be a fabrication.
  *
  * The score shown is the server's normalised `score`, not the raw fusion
  * output. It is rendered as a bar rather than a number because the useful
@@ -30,9 +45,16 @@ function relativeDay(iso: string): string {
   return `${Math.floor(days / 365)}y ago`;
 }
 
-function ResultRow({ memory }: { memory: RecallMemory }) {
+function ResultRow({
+  memory,
+  lineage,
+}: {
+  memory: RecallMemory;
+  lineage: RecallLineageEdge[] | undefined;
+}) {
   const selected = useSession((s) => s.selectedMemoryId === memory.id);
   const select = useSession((s) => s.select);
+  const why = whyItSurfaced(memory, lineage);
 
   return (
     <button
@@ -53,6 +75,20 @@ function ResultRow({ memory }: { memory: RecallMemory }) {
       >
         {memory.experience.content}
       </p>
+
+      {/* Why it is here, in the human's words. Two clauses at most, and each is
+          omitted independently: a memory the graph reached with no lineage to
+          the rest of the set says only the first, one in a set with no
+          attribution says only the second. */}
+      {why ? (
+        <p className="text-muted-foreground/70 mt-1.5 text-[11px] leading-relaxed">
+          {why.legs}
+          {why.legs !== null && why.links > 0 ? " · " : null}
+          {why.links > 0
+            ? `Connects to ${why.links} other${why.links === 1 ? "" : "s"} here`
+            : null}
+        </p>
+      ) : null}
 
       <div className="mt-2 flex items-center gap-2">
         {/* Relative strength against the top hit, which is what the server's
@@ -77,12 +113,20 @@ function ResultRow({ memory }: { memory: RecallMemory }) {
   );
 }
 
-export function ResultList({ memories }: { memories: RecallMemory[] }) {
+export function ResultList({
+  memories,
+  lineage,
+}: {
+  memories: RecallMemory[];
+  /** The causal edges the same response carried. Optional because the pre-query
+   *  corpus listing is not a result set and has none. */
+  lineage?: RecallLineageEdge[];
+}) {
   return (
     <ScrollArea role="list" className="min-h-0 flex-1">
       {memories.map((m) => (
         <div role="listitem" key={m.id}>
-          <ResultRow memory={m} />
+          <ResultRow memory={m} lineage={lineage} />
         </div>
       ))}
     </ScrollArea>

@@ -154,7 +154,13 @@ export function GraphStage({ reach }: { reach: Reachability }) {
               ))}
             </div>
           </div>
-          <span className="text-muted-foreground/70 text-[11px]">
+          {/* `shrink-0`: this row wraps, and without it the hint is squeezed
+              into a narrow column instead of dropping to a line of its own —
+              at the stage width /recall actually has (viewport minus rail,
+              result column and Inspector) it was rendering as four stacked
+              fragments. Refusing to shrink makes the wrap happen at the row
+              level, which is what `flex-wrap` is here for. */}
+          <span className="text-muted-foreground/70 shrink-0 text-[11px]">
             {/* Say what the edges ARE, not just how to move the camera. Zero
                 causal edges across a result set is a finding about the corpus,
                 not a broken canvas, and staying silent about it invites the
