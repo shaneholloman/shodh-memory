@@ -54,6 +54,83 @@ const MEMORIES = [
   ["Corrected report: no crew members aboard the Dali were injured; the casualties were road workers on the bridge deck.", "observation", null],
   // Unrelated island — proves the graph renders disconnection honestly
   ["The Vamana index rebuild cut recall latency from 340ms to 92ms on the evaluation corpus.", "learning", null],
+
+  // ---------------------------------------------------------------------------
+  // THE NEEDLE — a pre-incident warning thread buried in the haystack below.
+  // Three quiet memories, weeks apart, no alarm language, no cross-references.
+  // The ask "was there any warning sign before the Dali incident?" must fish
+  // exactly these out of the routine noise.
+  // ---------------------------------------------------------------------------
+  ["Routine port-state inspection of the Dali at Seagirt noted an intermittent low-voltage alarm on the main switchboard; the crew reset it and the inspector logged it as resolved.", "observation", [39.2646, -76.5583, 0]],
+  ["Electrician's shift note: reefer bank on the Dali's forward feeder showed voltage sag twice during cargo operations, within tolerance but recurring.", "observation", null],
+  ["Synergy Marine deferred the Dali's switchboard breaker overhaul to the next scheduled dry dock to avoid a berth overstay.", "decision", null],
+
+  // Quantitative anomaly buried in routine manifests — "any anomalies in the
+  // container manifests?" should surface this single mismatch.
+  ["Gate scale check: container MSKU-4471820 declared 4,200 kg on the manifest but weighed 28,650 kg at the Seagirt in-gate; flagged for VGM re-verification.", "observation", [39.2646, -76.5583, 0]],
+
+  // Geo outlier — a position that does not belong to the port's operating
+  // footprint; the map should make it visually obvious.
+  ["Drayage truck T-118 carrying an export reefer pinged 40 km off its assigned corridor near Annapolis during the evening run.", "observation", [38.9784, -76.4922, 0]],
+
+  // ---------------------------------------------------------------------------
+  // THE HAYSTACK — routine port operations. Mundane on purpose: berth moves,
+  // weather, crane maintenance, customs holds, shift notes. Entities repeat
+  // across memories (berths, cranes, ships, terminals) so the graph gets real
+  // Hebbian structure, but none of these use causal connectives and none
+  // reference the incident.
+  // ---------------------------------------------------------------------------
+  ["MSC Brianna completed cargo operations at Seagirt berth 3 and departed on the evening tide.", "observation", [39.2646, -76.5583, 0]],
+  ["Crane STS-07 at Seagirt completed its 4,000-hour preventive maintenance; hoist brake pads replaced.", "observation", [39.2646, -76.5583, 0]],
+  ["Morning shift moved 1,847 containers at Seagirt, slightly above the 30-day average.", "observation", null],
+  ["Evergreen Ever Focus assigned to Seagirt berth 2 for Thursday arrival, draft 12.8 metres.", "observation", [39.2646, -76.5583, 0]],
+  ["Fog delayed pilot boardings in the Craighill Channel for two hours before conditions lifted.", "observation", [39.13, -76.42, 0]],
+  ["Customs placed a documentation hold on 12 containers from the CMA CGM Argentina pending broker corrections.", "observation", null],
+  ["Dundalk Marine Terminal handled 3,200 imported vehicles this week, in line with forecast.", "observation", [39.2504, -76.5312, 0]],
+  ["Longshore gang 14 set a terminal record with 42 crane moves per hour on the night shift.", "observation", null],
+  ["The Wallenius Wilhelmsen Tosca discharged heavy machinery at Dundalk without incident.", "observation", [39.2504, -76.5312, 0]],
+  ["Berth 1 at Seagirt scheduled for fender replacement next month; no vessel impact expected.", "task", [39.2646, -76.5583, 0]],
+  ["Reefer monitoring rounds found all 240 plugged units within temperature spec.", "observation", null],
+  ["The harbor tug Bridget McAllister returned to service after routine engine overhaul.", "observation", null],
+  ["Chesapeake Bay pilots reported normal transit conditions; visibility eight nautical miles.", "observation", null],
+  ["Weekly safety briefing covered updated lashing procedures for high-cube containers.", "learning", null],
+  ["CSX intermodal ramp turned 96% of import boxes within 48 hours this week.", "observation", null],
+  ["Empty container yard at Fairfield reached 78% utilization; repositioning plan drafted.", "observation", [39.2431, -76.5877, 0]],
+  ["Maersk Kensington arrived at Seagirt berth 4 with 2,900 import containers.", "observation", [39.2646, -76.5583, 0]],
+  ["Gate cameras at Dundalk upgraded to read damaged container door labels.", "observation", [39.2504, -76.5312, 0]],
+  ["Thunderstorm forecast prompted crane wind-speed monitoring; operations continued below limits.", "observation", null],
+  ["Hapag-Lloyd Atlanta Express completed bunkering at anchorage before berthing.", "observation", [39.2, -76.52, 0]],
+  ["Terminal operating system patched overnight; gate transactions resumed at 05:00 without backlog.", "observation", null],
+  ["Crane STS-04 flagged a slew-drive vibration reading at the high end of normal; monitoring continued.", "observation", [39.2646, -76.5583, 0]],
+  ["Quarterly emissions report filed: terminal equipment idle time down 9% year over year.", "observation", null],
+  ["Two export soybean trains unloaded at the CNX Marine Terminal on schedule.", "observation", [39.2205, -76.5866, 0]],
+  ["Vessel traffic service logged 31 deep-draft transits through the main channel this week.", "observation", null],
+  ["Warehouse C at Point Breeze passed its annual fire-suppression inspection.", "observation", [39.2606, -76.5773, 0]],
+  ["ZIM Baltimore sailed for Norfolk after a routine eight-hour port call.", "observation", null],
+  ["Chassis pool availability tightened to 91%; provider notified per service agreement.", "observation", null],
+  ["Pilot association scheduled semi-annual bridge-team simulator training for member pilots.", "learning", null],
+  ["Seagirt yard block E re-striped; reefer rows gained four additional plug positions.", "observation", [39.2646, -76.5583, 0]],
+  ["The Atlantic Container Line Atlantic Sun loaded project cargo bound for Antwerp.", "observation", null],
+  ["Random cargo exam rate held at 3.1% for the month, unchanged from prior period.", "observation", null],
+  ["Tug assist requirements reviewed for vessels over 300 metres; no changes recommended.", "learning", null],
+  ["Marine terminal lighting audit found six fixtures below lux spec in the Dundalk rail yard.", "observation", [39.2504, -76.5312, 0]],
+  ["COSCO Development windowed for Saturday arrival; berth 3 turn time projected at 22 hours.", "observation", [39.2646, -76.5583, 0]],
+  ["Monthly draft survey of the Curtis Bay coal pier showed silting within dredge tolerance.", "observation", [39.2205, -76.5866, 0]],
+  ["Breakbulk crew discharged wind turbine blades at North Locust Point over two shifts.", "observation", [39.2704, -76.5952, 0]],
+  ["Ship chandler deliveries consolidated to a single gate window to reduce congestion.", "decision", null],
+  ["Crane operator recertification completed for 28 operators; two scheduled for retest.", "observation", null],
+  ["The Grimaldi Grande Baltimora loaded 1,100 export vehicles at Dundalk.", "observation", [39.2504, -76.5312, 0]],
+  ["Water taxi service resumed its harbor route after seasonal maintenance.", "observation", [39.2847, -76.6205, 0]],
+  ["Line handlers reported a parted stern line on the bulk carrier Ocean Prosperity; replaced without delay to sailing.", "observation", null],
+  ["Port administration approved the fiscal-year dredging budget for the access channels.", "decision", null],
+  ["Refrigerated cargo volumes rose 14% month over month, led by poultry exports.", "observation", null],
+  ["Security drill simulated an unauthorized gate entry; response time met the standard.", "observation", null],
+  ["The container freight station cleared its LCL backlog ahead of the holiday weekend.", "observation", null],
+  ["Rail dwell for export coal at Curtis Bay averaged 2.1 days, best quarter in two years.", "observation", [39.2205, -76.5866, 0]],
+  ["Evergreen Ever Focus departed berth 2 after a 19-hour turn, one hour ahead of window.", "observation", [39.2646, -76.5583, 0]],
+  ["Stevedore payroll system migration completed; no missed shifts reported.", "observation", null],
+  ["Harbor survey vessel completed side-scan mapping of anchorage B.", "observation", [39.2, -76.52, 0]],
+  ["Seagirt gate processed 4,102 truck transactions, a seasonal high, with average turn under 40 minutes.", "observation", [39.2646, -76.5583, 0]],
 ];
 
 const TODOS = [
