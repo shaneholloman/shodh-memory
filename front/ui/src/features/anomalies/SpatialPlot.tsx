@@ -131,21 +131,29 @@ export function SpatialPlot({
 
   const flagged = chart.points.filter((p) => p.flagged).sort((a, b) => b.km - a.km);
   const baseline = chart.points.filter((p) => !p.flagged);
-  const stacked = chart.points.reduce((a, p) => Math.max(a, p.memoryIds.length), 0);
+  /** The busiest stack INSIDE the line. Counting the flagged points into this
+   *  would be arithmetic about a different set than the sentence is describing. */
+  const busiest = baseline.reduce((a, p) => Math.max(a, p.memoryIds.length), 0);
 
   const summary = useMemo(() => {
     const inside = chart.placed - flagged.reduce((a, p) => a + p.memoryIds.length, 0);
     const list = flagged.map((p) => formatKm(p.km)).join(", ");
+    // The position count has to be the count for the memories the clause is
+    // about — the ones inside the line — not the plot's total. Saying "32 sit
+    // within 9.5 km, sharing 16 distinct positions" folded the four outliers'
+    // own positions into a sentence about the cluster, which is a small false
+    // statement on a screen whose entire argument is that its arithmetic can be
+    // checked.
     return `Distance from the cluster centre, on a log radius, against true bearing. ${inside} of ${chart.placed} placed memories sit within ${formatKm(chart.cutoffKm)} of the centre${
-      stacked > 1
-        ? `, sharing ${chart.points.length} distinct positions — the busiest holds ${stacked}`
+      busiest > 1
+        ? `, across ${baseline.length} distinct positions — the busiest holding ${busiest}`
         : ""
     }. ${
       flagged.length === 0
         ? "None fall outside the flag line."
         : `${flagged.length} fall outside the flag line, at ${list}.`
     }`;
-  }, [chart, flagged, stacked]);
+  }, [chart, flagged, baseline.length, busiest]);
 
   const rCut = radius(chart.cutoffKm);
   const rTyp = radius(chart.typicalKm);
@@ -285,10 +293,14 @@ export function SpatialPlot({
                 d={`M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}`}
                 fill="none"
                 stroke={MARK.flagged}
-                strokeWidth={1.25}
-                strokeDasharray="1 3"
+                strokeWidth={1.5}
+                // Heavier than a hairline dot pattern: at 1px on a 3px gap the
+                // tie read as part of the ring system rather than as a
+                // deliberate connector between two findings, which is the one
+                // thing on this plot the reader is most likely to miss.
+                strokeDasharray="2.5 3"
                 strokeLinecap="round"
-                opacity={0.75}
+                opacity={0.85}
               />
               <text
                 x={lx}
