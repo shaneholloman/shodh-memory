@@ -340,6 +340,7 @@ fn build_knowledge_graph(graph: &GraphMemory) -> Result<MifKnowledgeGraph> {
             created_at: e.created_at,
             last_seen_at: e.last_seen_at,
             fine_type: e.fine_type,
+            kb_id: None,
         })
         .collect();
 
