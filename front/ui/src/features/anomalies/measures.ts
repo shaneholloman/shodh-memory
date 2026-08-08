@@ -33,18 +33,29 @@ export interface Finding {
   /** The memory's own text (a 500-char preview — `content_truncated` on the
    *  corpus row says when more exists). Shown so the finding can be checked. */
   content: string;
+  /** The memory's own type, carried so grouping can ask whether two findings
+   *  are the same KIND of record. Never used as a hue here — hue means
+   *  memory_type elsewhere in the product and this screen does not restate it. */
+  memoryType: string;
   /**
    * How far past the flag line this memory sits, in the lens's own terms.
    * Unitless and comparable only WITHIN a lens — a geo modified z-score and a
    * quantity ratio are different quantities and are never compared.
    *
-   * Used to ORDER the findings within a section, and for nothing else. It is
-   * never drawn and never printed: the magnitudes it ranks are unbounded (one
-   * memory in this corpus sits 126 robust scales out, another 14), so any bar
-   * scaled to the largest would render every other genuine finding as a stub
-   * and understate it. What each row states — the distance, the two quantities,
-   * the term count — is the honest presentation of its own magnitude, and
-   * position in the list is the comparison.
+   * Used to ORDER the findings within a section, and for nothing else. THIS
+   * NUMBER IS NEVER DRAWN AND NEVER PRINTED. The magnitudes it ranks are
+   * unbounded — one memory in this corpus sits 126 robust scales out, another
+   * 14 — so any bar scaled to the largest would render every other genuine
+   * finding as a stub and understate it. That mistake was made once here and
+   * reverted.
+   *
+   * What IS drawn is each lens's own measured quantity on a scale built for
+   * it: kilometres on a symmetric-log radius, a dimensionless ratio on a log
+   * axis, a connection count on a linear one. Those scales are defined by the
+   * `*Chart` payloads below, which carry the WHOLE distribution rather than
+   * only the flagged points — a flagged value means nothing without the
+   * ordinary values it is being judged against, and a screen that plots only
+   * the outliers is asking to be taken on faith.
    */
   deviation: number;
   /**
@@ -64,6 +75,227 @@ export interface Finding {
    */
   value: string;
   against: string;
+}
+
+// =============================================================================
+// WHAT THE GRAPHICS ARE DRAWN FROM
+// =============================================================================
+
+/**
+ * Every plotted point of the location lens, flagged or not.
+ *
+ * One entry per DISTINCT COORDINATE, not per memory: 20 of this corpus's 36
+ * placed memories share a coordinate with another (12 sit on one berth), and
+ * plotting them as 36 marks would draw 16 dots while the section title claims
+ * 36. `memoryIds` carries the stack, so the count is encoded by area and the
+ * plot and the caption agree. Jitter was rejected outright — inventing a
+ * position on a plot whose entire claim is positional honesty is the one thing
+ * this destination cannot do.
+ *
+ * `bearing` is the true initial bearing from the cluster centre, in degrees
+ * clockwise from north. It is real measured direction, not decoration: on this
+ * corpus the two furthest memories sit at nearly the same distance in almost
+ * OPPOSITE directions (52° and 175°), which a distance-only plot cannot show
+ * and which changes what the pair means.
+ */
+export interface SpatialPoint {
+  /** Every memory at this exact coordinate. Length is the stack size. */
+  memoryIds: string[];
+  /** Great-circle distance from the cluster centre, km. */
+  km: number;
+  /** Initial bearing from the cluster centre, degrees clockwise from north. */
+  bearing: number;
+  flagged: boolean;
+}
+
+export interface SpatialChart {
+  kind: "spatial";
+  points: SpatialPoint[];
+  typicalKm: number;
+  cutoffKm: number;
+  maxKm: number;
+  /** Memories, not points — the caption's denominator. */
+  placed: number;
+}
+
+/**
+ * One magnitude disagreement, as the two numbers that disagree.
+ *
+ * The plotted axis is `factor`, which is DIMENSIONLESS — max over min. That is
+ * the only way a kilogram row and a millisecond row can share one axis without
+ * a second scale, and it is the honest comparison: "6.8× apart" and "3.7×
+ * apart" are the same kind of quantity even though kilograms and milliseconds
+ * are not. Absolute values stay on the row as text, in their own units.
+ *
+ * `factor` is always ≥ 1 and the bar always grows rightward from 1×, including
+ * for a corpus outlier that sits BELOW its unit's median — in that case the
+ * baseline is the larger number and `lowIsFlagged` says so, rather than the
+ * bar running backwards off a shared origin.
+ */
+export interface RatioPair {
+  memoryId: string;
+  unit: string;
+  lowValue: number;
+  highValue: number;
+  /** max / min. Always ≥ 1. */
+  factor: number;
+  /** Whether the flagged value is the smaller of the two. Only meaningful for
+   *  `scope: "corpus"`, where the other end is the unit's median. */
+  lowIsFlagged: boolean;
+  /** `within` — both numbers written in one memory. `corpus` — this memory's
+   *  value against the median of every other memory using the same unit. */
+  scope: "within" | "corpus";
+}
+
+export interface RatioChart {
+  kind: "ratio";
+  pairs: RatioPair[];
+  maxFactor: number;
+}
+
+/**
+ * How many other memories each judged memory shares an extracted term with.
+ *
+ * The whole distribution, because isolation is only legible against connection:
+ * six memories at zero is a shrug on its own and unmistakable beside a mass
+ * sitting at one to seventeen. This is the honest extension the graphic needed
+ * — the lens already computed who was isolated, it simply never reported the
+ * population that made "isolated" mean anything.
+ *
+ * Memories that yielded NO terms are excluded, exactly as they are excluded
+ * from the findings: nothing can be said about what they connect to, and
+ * drawing them at zero would put them in the same bucket as a memory that has
+ * terms and shares none, which is a different and much stronger statement.
+ */
+export interface DegreeChart {
+  kind: "degree";
+  /** One connection count per judged memory. */
+  counts: number[];
+  medianCount: number;
+  maxCount: number;
+  isolatedCount: number;
+  judged: number;
+}
+
+export type LensChart = SpatialChart | RatioChart | DegreeChart;
+
+/**
+ * Findings that belong together, and the evidence that says so.
+ *
+ * WHY THE RULE IS DELIBERATELY HARD TO SATISFY. A pattern claim is the
+ * strongest thing this screen says — it asserts that two findings have one
+ * cause — so it is the claim most worth being wrong about. Three signals are
+ * available between any two findings: a shared extracted term, magnitudes
+ * within `MAGNITUDE_TOLERANCE` of each other, and the same memory type. None
+ * of them is sufficient alone. A shared term can be a broad one; equal
+ * magnitudes can be coincidence; and memory type is nearly free on a corpus
+ * that is 57/74 Observation, so a rule of "any two signals" would group two
+ * unrelated observations that happened to land at a similar distance.
+ *
+ * So a SHARED TERM IS REQUIRED, and a second signal must corroborate it. That
+ * is stricter than grouping on magnitude alone, and it is the direction to err
+ * in: a missed pattern costs a reader an insight, an invented one costs the
+ * screen its credibility.
+ *
+ * `evidence` is rendered verbatim next to the group, including the term
+ * itself, so a reader can see the grouping was made on the word "port" and
+ * discount it accordingly. The screen never asserts the cause — it shows what
+ * the two findings have in common and stops there.
+ */
+export interface Pattern {
+  memoryIds: string[];
+  evidence: string[];
+}
+
+/** Two magnitudes this close count as "the same magnitude". 5% is loose enough
+ *  to join 259.3 km and 259.9 km and tight enough to keep 18 km and 31 km
+ *  apart, and it is relative so it means the same thing at every scale. */
+const MAGNITUDE_TOLERANCE = 0.05;
+
+interface Groupable {
+  memoryId: string;
+  memoryType: string;
+  magnitude: number;
+  terms: Set<string>;
+  /** A lens-specific attribute two findings can have in common — the unit, for
+   *  the quantity lens. Corroborates a shared term exactly as an equal
+   *  magnitude or a matching type does, and renders in the group's evidence in
+   *  the lens's own words rather than as a synthetic term. */
+  attribute?: { label: string; value: string };
+}
+
+/**
+ * Findings joined into components by the two-signal rule above.
+ *
+ * Pairs that qualify are merged transitively — if A groups with B and B with
+ * C, all three are one pattern — because a pattern is a claim about a set, and
+ * reporting {A,B} and {B,C} as two overlapping patterns would double-count B
+ * and describe the same structure twice.
+ */
+function findPatterns(items: Groupable[]): Pattern[] {
+  const parent = items.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const union = (a: number, b: number) => {
+    parent[find(a)] = find(b);
+  };
+
+  const reasons = new Map<number, string[]>();
+
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const a = items[i];
+      const b = items[j];
+
+      const shared = [...a.terms].filter((t) => b.terms.has(t));
+      if (shared.length === 0) continue;
+
+      const larger = Math.max(Math.abs(a.magnitude), Math.abs(b.magnitude));
+      const closeMagnitude =
+        larger > 0 && Math.abs(a.magnitude - b.magnitude) / larger <= MAGNITUDE_TOLERANCE;
+      const sameType = a.memoryType === b.memoryType;
+      const sameAttribute =
+        a.attribute !== undefined &&
+        b.attribute !== undefined &&
+        a.attribute.label === b.attribute.label &&
+        a.attribute.value === b.attribute.value;
+      if (!closeMagnitude && !sameType && !sameAttribute) continue;
+
+      union(i, j);
+      const key = find(i);
+      const evidence = reasons.get(key) ?? [];
+      const term = `share “${shared[0]}”`;
+      if (!evidence.includes(term)) evidence.push(term);
+      if (closeMagnitude) {
+        const gap = larger > 0 ? (Math.abs(a.magnitude - b.magnitude) / larger) * 100 : 0;
+        const token = gap < 1 ? "same magnitude" : `${gap.toFixed(0)}% apart`;
+        if (!evidence.includes(token)) evidence.push(token);
+      }
+      if (sameAttribute && a.attribute) {
+        const token = `both ${a.attribute.label} ${a.attribute.value}`;
+        if (!evidence.includes(token)) evidence.push(token);
+      }
+      if (sameType) {
+        const token = `both ${a.memoryType}`;
+        if (!evidence.includes(token)) evidence.push(token);
+      }
+      reasons.set(key, evidence);
+    }
+  }
+
+  const components = new Map<number, string[]>();
+  for (let i = 0; i < items.length; i++) {
+    const root = find(i);
+    const bucket = components.get(root);
+    if (bucket) bucket.push(items[i].memoryId);
+    else components.set(root, [items[i].memoryId]);
+  }
+
+  const patterns: Pattern[] = [];
+  for (const [root, memoryIds] of components) {
+    if (memoryIds.length < 2) continue;
+    patterns.push({ memoryIds, evidence: reasons.get(root) ?? [] });
+  }
+  return patterns;
 }
 
 /**
@@ -94,9 +326,16 @@ interface LensBasis {
   detail?: string;
 }
 
+/**
+ * `chart` rides on `clear` as well as on `findings`, and that is the point.
+ * "Nothing flagged" over an empty panel is indistinguishable from "this lens
+ * did not run"; the same words over a drawn distribution with every point
+ * inside the line is a result a reader can check. A lens that reached a
+ * conclusion shows its population either way.
+ */
 export type LensResult =
-  | ({ state: "findings"; findings: Finding[] } & LensBasis)
-  | ({ state: "clear" } & LensBasis)
+  | ({ state: "findings"; findings: Finding[]; chart: LensChart; patterns: Pattern[] } & LensBasis)
+  | ({ state: "clear"; chart?: LensChart } & LensBasis)
   | ({ state: "insufficient"; reason: string } & LensBasis);
 
 // =============================================================================
@@ -173,6 +412,23 @@ function greatCircleKm(aLat: number, aLon: number, bLat: number, bLon: number): 
   return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
+/**
+ * Initial bearing from a to b, degrees clockwise from true north.
+ *
+ * The forward azimuth of the great circle, which is the direction you would
+ * actually set off in — not the angle of the straight line between two points
+ * on a flat plot of latitude against longitude, which is wrong by the cosine
+ * of the latitude and gets worse the further north the corpus sits.
+ */
+function bearingDegrees(aLat: number, aLon: number, bLat: number, bLon: number): number {
+  const dLon = toRadians(bLon - aLon);
+  const y = Math.sin(dLon) * Math.cos(toRadians(bLat));
+  const x =
+    Math.cos(toRadians(aLat)) * Math.sin(toRadians(bLat)) -
+    Math.sin(toRadians(aLat)) * Math.cos(toRadians(bLat)) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
 function formatKm(km: number): string {
   if (km < 1) return `${Math.round(km * 1000)} m`;
   if (km < 10) return `${km.toFixed(1)} km`;
@@ -242,6 +498,7 @@ export function offPatternLocations(memories: CorpusMemory[]): LensResult {
     .map(({ memory, km }) => ({
       memoryId: memory.id,
       content: memory.content,
+      memoryType: memory.memory_type,
       deviation: (km - typical) / spread.scale,
       // Only the distance. "…from the middle of the cluster the other 35
       // placed memories form, which normally sit 2.4 km out" is true of every
@@ -250,6 +507,56 @@ export function offPatternLocations(memories: CorpusMemory[]): LensResult {
       against: "from cluster centre",
     }))
     .sort((a, b) => b.deviation - a.deviation);
+
+  // Every placed memory becomes a plotted point, collapsed onto its exact
+  // coordinate so a berth holding twelve memories draws as one mark of twelve
+  // rather than as one mark. Keyed on the raw numbers rather than a rounded
+  // string: two coordinates that differ in the seventh decimal are different
+  // positions and the plot should not decide otherwise.
+  const stacks = new Map<string, SpatialPoint>();
+  located.forEach((m, i) => {
+    const key = `${m.geo_location[0]},${m.geo_location[1]}`;
+    const existing = stacks.get(key);
+    if (existing) {
+      existing.memoryIds.push(m.id);
+      return;
+    }
+    stacks.set(key, {
+      memoryIds: [m.id],
+      km: distances[i],
+      bearing: bearingDegrees(centreLat, centreLon, m.geo_location[0], m.geo_location[1]),
+      flagged: distances[i] > cutoff,
+    });
+  });
+
+  const chart: SpatialChart = {
+    kind: "spatial",
+    points: [...stacks.values()],
+    typicalKm: typical,
+    cutoffKm: cutoff,
+    maxKm: distances.reduce((a, b) => Math.max(a, b), 0),
+    placed: located.length,
+  };
+
+  // Grouping asks about the flagged memories only. Whether two ordinary
+  // memories in the cluster share a term is a fact about the corpus, not a
+  // pattern among anomalies, and drawing it here would bury the four findings
+  // under thirty-odd ties that are not what this screen is for.
+  const flaggedIds = new Set(findings.map((f) => f.memoryId));
+  const patterns = findPatterns(
+    located.flatMap((m, i) =>
+      flaggedIds.has(m.id)
+        ? [
+            {
+              memoryId: m.id,
+              memoryType: m.memory_type,
+              magnitude: distances[i],
+              terms: new Set(m.tags.map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0)),
+            },
+          ]
+        : [],
+    ),
+  );
 
   // The spread token has to describe the estimator that actually produced the
   // number. Saying "half within" of a MEAN deviation would be a false statement
@@ -267,11 +574,11 @@ export function offPatternLocations(memories: CorpusMemory[]): LensResult {
     ? undefined
     : `More than half of these share one exact position, so the median spread came out at zero and the average distance stands in for it — a looser line than the other measures draw.`;
 
-  const detail = `Centre is the median latitude and longitude of the ${located.length} placed memories, and distance is great-circle from there. The cutoff is ${MODIFIED_Z_CUTOFF} robust scales past the typical distance — Iglewicz & Hoaglin's published modified-z cutoff, not a number tuned to this corpus. The remaining ${others} placed memories are the baseline every row is measured against.`;
+  const detail = `Centre is the median latitude and longitude of the ${located.length} placed memories, and distance is great-circle from there. The cutoff is ${MODIFIED_Z_CUTOFF} robust scales past the typical distance — Iglewicz & Hoaglin's published modified-z cutoff, not a number tuned to this corpus. The remaining ${others} placed memories are the baseline every row is measured against. The plot places each memory at its true bearing from that centre and its distance on a symmetric-log radius, so a cluster spanning one harbour and a diversion 260 km away are legible on one scale.`;
 
   return findings.length > 0
-    ? { state: "findings", findings, facts, caveat, detail }
-    : { state: "clear", facts, caveat, detail };
+    ? { state: "findings", findings, chart, patterns, facts, caveat, detail }
+    : { state: "clear", chart, facts, caveat, detail };
 }
 
 // =============================================================================
@@ -411,6 +718,7 @@ export function quantityOutliers(memories: CorpusMemory[]): LensResult {
   const perMemory = memories.map((m) => ({ memory: m, quantities: parseQuantities(m.content) }));
 
   const findings: Finding[] = [];
+  const pairs: RatioPair[] = [];
 
   // --- within one memory ---------------------------------------------------
   for (const { memory, quantities } of perMemory) {
@@ -426,9 +734,19 @@ export function quantityOutliers(memories: CorpusMemory[]): LensResult {
       const high = values.reduce((a, b) => (a.value >= b.value ? a : b));
       if (high.value === low.value) continue;
       const factor = high.value / low.value;
+      pairs.push({
+        memoryId: memory.id,
+        unit,
+        lowValue: low.value,
+        highValue: high.value,
+        factor,
+        lowIsFlagged: false,
+        scope: "within",
+      });
       findings.push({
         memoryId: memory.id,
         content: memory.content,
+        memoryType: memory.memory_type,
         deviation: Math.log10(factor),
         // Both numbers and the factor between them, which is the whole finding.
         // What is NOT said is which one is wrong: the arithmetic cannot know,
@@ -469,9 +787,25 @@ export function quantityOutliers(memories: CorpusMemory[]): LensResult {
     for (const entry of entries) {
       const z = Math.abs(entry.value - centre) / spread.scale;
       if (z <= MODIFIED_Z_CUTOFF) continue;
+      // The pair being drawn is this memory's value against its unit's median.
+      // A value below the median is just as much an outlier as one above, so
+      // the bar is built from the larger over the smaller and `lowIsFlagged`
+      // records which end the memory actually sits on.
+      const low = Math.min(entry.value, centre);
+      const high = Math.max(entry.value, centre);
+      pairs.push({
+        memoryId: entry.memory.id,
+        unit,
+        lowValue: low,
+        highValue: high,
+        factor: low > 0 ? high / low : Number.POSITIVE_INFINITY,
+        lowIsFlagged: entry.value < centre,
+        scope: "corpus",
+      });
       findings.push({
         memoryId: entry.memory.id,
         content: entry.memory.content,
+        memoryType: entry.memory.memory_type,
         deviation: z,
         // The baseline stays on the row here, unlike the location lens: this
         // section mixes units, so "typical 38 t" is true of the tonnes rows and
@@ -521,10 +855,41 @@ export function quantityOutliers(memories: CorpusMemory[]): LensResult {
   const detail = `${unitMethod} A unit needs ${MIN_UNIT_SAMPLES} separate memories before a normal range is claimed for it${shortSummary ? `; the most common so far are ${shortSummary}` : ""}.`;
 
   findings.sort((a, b) => b.deviation - a.deviation);
+  pairs.sort((a, b) => b.factor - a.factor);
+
+  const chart: RatioChart = {
+    kind: "ratio",
+    pairs,
+    maxFactor: pairs.reduce((a, p) => (Number.isFinite(p.factor) ? Math.max(a, p.factor) : a), 1),
+  };
+
+  // Grouping here asks the same two-signal question as the location lens, with
+  // the magnitude being the factor between the two numbers. On a corpus whose
+  // disagreements are one in kilograms and one in milliseconds, sharing no
+  // term, it correctly finds nothing — and the section says so rather than
+  // manufacturing a tie out of the fact that both are "numbers".
+  const byId = new Map(memories.map((m) => [m.id, m]));
+  const patterns = findPatterns(
+    pairs.flatMap((p) => {
+      const memory = byId.get(p.memoryId);
+      if (!memory) return [];
+      return [
+        {
+          memoryId: p.memoryId,
+          memoryType: memory.memory_type,
+          magnitude: p.factor,
+          terms: new Set(
+            memory.tags.map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0),
+          ),
+          attribute: { label: "in", value: p.unit },
+        },
+      ];
+    }),
+  );
 
   return findings.length > 0
-    ? { state: "findings", findings, facts, caveat, detail }
-    : { state: "clear", facts, caveat, detail };
+    ? { state: "findings", findings, chart, patterns, facts, caveat, detail }
+    : { state: "clear", chart, facts, caveat, detail };
 }
 
 // =============================================================================
@@ -577,15 +942,24 @@ export function isolatedMemories(memories: CorpusMemory[]): LensResult {
   const terms = (m: CorpusMemory) =>
     new Set(m.tags.map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0));
 
-  // How many DISTINCT memories each term appears in — not how many times it was
-  // extracted, so a term repeated within one memory never looks like a link.
-  const reach = new Map<string, number>();
+  // Which DISTINCT memories each term appears in. The SET, not a count: the
+  // count alone answers "is this term shared", which is all the finding needed,
+  // but the plot needs "how many other memories does this one reach", and
+  // rebuilding that by comparing every memory with every other is O(n²) in
+  // memories where this is O(total terms). The set is also the honest
+  // definition — a term repeated inside one memory can never look like a link.
+  const holders = new Map<string, Set<string>>();
   for (const m of memories) {
-    for (const term of terms(m)) reach.set(term, (reach.get(term) ?? 0) + 1);
+    for (const term of terms(m)) {
+      const bucket = holders.get(term);
+      if (bucket) bucket.add(m.id);
+      else holders.set(term, new Set([m.id]));
+    }
   }
 
   const unextracted: CorpusMemory[] = [];
   const findings: Finding[] = [];
+  const counts: number[] = [];
 
   for (const m of memories) {
     const own = terms(m);
@@ -593,11 +967,23 @@ export function isolatedMemories(memories: CorpusMemory[]): LensResult {
       unextracted.push(m);
       continue;
     }
-    const shared = [...own].filter((t) => (reach.get(t) ?? 0) > 1);
+    // Distinct OTHER memories reached through any shared term. A memory that
+    // reaches the same neighbour through six terms is connected to one
+    // neighbour, not six.
+    const neighbours = new Set<string>();
+    for (const term of own) {
+      for (const id of holders.get(term) ?? []) {
+        if (id !== m.id) neighbours.add(id);
+      }
+    }
+    counts.push(neighbours.size);
+
+    const shared = [...own].filter((t) => (holders.get(t)?.size ?? 0) > 1);
     if (shared.length > 0) continue;
     findings.push({
       memoryId: m.id,
       content: m.content,
+      memoryType: m.memory_type,
       // More unique terms is stronger isolation: a memory naming twelve things,
       // none of which any other memory names, is further out than one naming
       // two. Ordering only — never shown as a number.
@@ -624,9 +1010,27 @@ export function isolatedMemories(memories: CorpusMemory[]): LensResult {
       : undefined;
 
   const detail =
-    "Two memories count as connected when the extraction pulled the same term out of both — including broad terms, so a memory reaches this list only by sharing nothing at all. The measure under-reports rather than over-reports, which is the safe direction on a screen like this one.";
+    "Two memories count as connected when the extraction pulled the same term out of both — including broad terms, so a memory reaches this list only by sharing nothing at all. The measure under-reports rather than over-reports, which is the safe direction on a screen like this one. The plot counts, for every judged memory, how many DISTINCT other memories it reaches through any shared term; the isolated ones are the column at zero.";
+
+  const chart: DegreeChart = {
+    kind: "degree",
+    counts,
+    medianCount: counts.length > 0 ? medianOf(counts) : 0,
+    maxCount: counts.reduce((a, b) => Math.max(a, b), 0),
+    isolatedCount: findings.length,
+    judged,
+  };
+
+  // THIS LENS CANNOT HAVE PATTERNS, and the reason is structural rather than
+  // circumstantial: a memory qualifies as isolated precisely BY sharing no term
+  // with any other memory, so no two findings here can ever share a term, and a
+  // shared term is what this screen requires before it will call two findings
+  // one pattern. Passing an empty list rather than skipping the call keeps that
+  // an explicit, testable statement instead of an omission a later reader has
+  // to reconstruct.
+  const patterns: Pattern[] = [];
 
   return findings.length > 0
-    ? { state: "findings", findings, facts, caveat, detail }
-    : { state: "clear", facts, caveat, detail };
+    ? { state: "findings", findings, chart, patterns, facts, caveat, detail }
+    : { state: "clear", chart, facts, caveat, detail };
 }
