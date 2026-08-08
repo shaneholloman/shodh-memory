@@ -50,7 +50,7 @@ const INSPECTOR_OFFSET = "pr-[min(280px,36vw)]";
  *  that selected something with nowhere to show it would be a dead end. On a
  *  destination with no selectable objects the Inspector could show nothing but
  *  an explanation of itself, so it stays off those. */
-const ROUTES_WITH_INSPECTOR = ["/recall", "/geo", "/graph"];
+const ROUTES_WITH_INSPECTOR = ["/recall", "/geo", "/graph", "/anomalies"];
 
 /** Destinations that render a recall result and therefore need the cue that
  *  produced it. Without the field, Geo would depend on the user having visited
