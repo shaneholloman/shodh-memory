@@ -9,32 +9,51 @@ import { Meta, Stat } from "@/components/ui/meta";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { SpatialPlot } from "./SpatialPlot";
+import { RatioPlot } from "./RatioPlot";
+import { DegreePlot } from "./DegreePlot";
 import {
   isolatedMemories,
   offPatternLocations,
   quantityOutliers,
   type Finding,
+  type LensChart,
   type LensResult,
+  type Pattern,
 } from "./measures";
 
 /**
  * Anomalies — what deviates from this profile's own baseline.
  *
- * The destination exists to answer three questions a reader has in front of
- * any result: what am I looking at, why was this one chosen, and what did the
- * choosing. So every finding carries the measure that produced it, in the same
- * row, naming the numbers being compared. Nothing here says "anomalous" and
- * leaves it there.
+ * THE SCREEN'S JOB IS THAT YOU SEE THE FINDINGS BEFORE YOU READ ANYTHING. Two
+ * earlier passes computed the right things and then printed them: a vertical
+ * list of memory sentences with a number attached, which asks a reader to
+ * RECONSTRUCT a distribution from four rows of prose and to notice, unaided,
+ * that two of those rows are the same event. Compressing the sentences into
+ * tokens made the list shorter and left it a list. Nothing was plotted, nothing
+ * showed where a flagged value sat relative to normal, and nothing showed that
+ * two findings were one finding.
  *
- * WHERE THE COMPARISON IS SPLIT, AND WHY. Every measure is a comparison, and a
- * comparison has two halves: the baseline, which is the same for every row in a
- * section, and the memory's own magnitude, which is not. Stating both on every
- * row produced the exact wall this screen was rebuilt to remove — four rows
- * reading "260 km / 259 km / 31 km / 18 km from the middle of the cluster the
- * other 35 placed memories form, which normally sit 2.4 km out". So the
- * baseline is stated ONCE, as tokens under the section title, and the row
- * carries only what distinguishes it. The evidence is intact; the sentence is
- * gone.
+ * So every lens that reaches a conclusion now DRAWS ITS POPULATION FIRST, with
+ * the flagged points in it, and the rows underneath are confirmation. Each
+ * graphic is chosen for the shape of its own measure rather than for
+ * consistency with the others — a distance-from-centre with a heavy tail, a
+ * ratio between two magnitudes, and a degree distribution are three different
+ * kinds of quantity, and one house chart type would have flattered exactly none
+ * of them. The reasoning for each is in its own file.
+ *
+ * MEMORY TEXT IS EVIDENCE, NOT THE HEADLINE. It sat first and ran to two or
+ * three lines, which is what made the screen a wall: the sentence is the part
+ * a reader needs LAST, once the plot and the magnitude have already told them
+ * which memory to care about. It is now one truncated line under the numbers,
+ * with the Inspector one click away for the whole record.
+ *
+ * PATTERNS ARE A SEPARATE CLAIM AND ARE MARKED AS ONE. Findings that the
+ * measure can show belong together are drawn tied on the plot and bracketed in
+ * the list, with the evidence for the grouping stated in the bracket. The rule
+ * is deliberately strict and lives in measures.ts; what matters here is that a
+ * group never asserts a CAUSE, it states what two findings have in common and
+ * lets the reader supply the rest.
  *
  * THREE REGISTERS, AND THE RULE THAT SEPARATES THEM. `facts` (the baseline
  * numbers) and `caveat` (anything that changes how those numbers should be
@@ -49,6 +68,10 @@ import {
  * a median absolute deviation over great-circle distance, unit-matched number
  * comparison, and term overlap. No model is called, here or on the server, and
  * that is the claim the header makes: the store finds these in its own data.
+ * The rebuild changed what those measures REPORT — they now return the whole
+ * distribution rather than only the points past the line, because a flagged
+ * value is meaningless without the ordinary ones it was judged against — and
+ * changed nothing about how any of them decides.
  *
  * NO REQUEST OF ITS OWN. It reads `useCorpus`, the same single react-query
  * entry Recall and Geo already populate (lib/api/corpus.ts), so arriving here
@@ -72,29 +95,44 @@ interface Lens {
   result: LensResult;
 }
 
+function LensGraphic({ chart, patterns }: { chart: LensChart; patterns: Pattern[] }) {
+  switch (chart.kind) {
+    case "spatial":
+      return <SpatialPlot chart={chart} patterns={patterns} />;
+    case "ratio":
+      return <RatioPlot chart={chart} />;
+    case "degree":
+      return <DegreePlot chart={chart} />;
+  }
+}
+
 /**
  * One flagged memory.
  *
  * Selecting sets the one global selection (`useSession().select`), exactly as
  * a recall result row does, so an anomaly is the same kind of object as any
- * other memory in the product and hands off to the same Inspector. The row also
- * shows its own selected state, so the click reads as having landed even before
- * the detail pane resolves.
+ * other memory in the product. NOTE that this route does not itself mount the
+ * Inspector — `ROUTES_WITH_INSPECTOR` is `/recall`, `/geo`, `/graph`
+ * (app/App.tsx:53) — so the selection made here is carried BY the session to
+ * those destinations rather than opening a pane in place. The row therefore has
+ * to show its own selected state or the click would appear to do nothing, and
+ * the plot above lights the same memory, so a click in either place is visibly
+ * answered in both.
  *
- * SEVERITY IS POSITION, AND ONLY POSITION. Rows are ordered furthest-first and
- * carry no severity mark. Not a colour, because hue in this product means
- * memory type and a second categorical palette on the same surface would put
- * two encodings on one channel. Not a bar either, and that one was tried and
- * removed: the underlying magnitudes are unbounded, so on a real corpus where
- * one memory sits 126 robust scales out and the next sits 14, a bar scaled to
- * the largest drew the second as an empty stub — it made a genuine finding look
- * like a rounding error, which is the exact clarity defect this destination
- * exists to fix. Every row states its own magnitude instead, in the units of
- * its own measure, where it can be checked against the memory above it.
+ * THE MAGNITUDE LEADS, IN THE MONO FACE, and the memory's own words follow in
+ * one clamped line. That order is the whole difference between this and the
+ * wall it replaces: a column of numerals is scannable without reading, which is
+ * the same argument that puts numerics in their own column in a dense table,
+ * and the sentence is there to confirm a finding the reader has already found
+ * rather than to deliver it.
  *
- * The magnitude leads and is set in the mono face, so a column of them is
- * scannable without reading a single label — the same argument that puts
- * numerics in their own right-aligned column in a dense table.
+ * SEVERITY IS POSITION, AND ONLY POSITION — no bar, no colour ramp, no badge.
+ * A bar was tried here and removed: the underlying magnitudes are unbounded, so
+ * on a real corpus where one memory sits 126 robust scales out and the next
+ * sits 14, a bar scaled to the largest drew the second as an empty stub. The
+ * plot above now carries the magnitude comparison on a scale built to survive
+ * that range, which is where an unbounded quantity belongs; the row states its
+ * own number and takes its rank from its position in the list.
  */
 function FindingRow({ finding }: { finding: Finding }) {
   const selected = useSession((s) => s.selectedMemoryId === finding.memoryId);
@@ -106,28 +144,63 @@ function FindingRow({ finding }: { finding: Finding }) {
       onClick={() => select(finding.memoryId)}
       aria-current={selected ? "true" : undefined}
       className={cn(
-        "border-border w-full border-b px-4 py-2.5 text-left transition-colors duration-100",
+        "border-border w-full border-b px-4 py-2 text-left transition-colors duration-100",
         "focus-visible:ring-ring focus-visible:-outline-offset-2 focus-visible:ring-2 focus-visible:outline-none",
         selected ? "bg-primary/10" : "hover:bg-accent/60",
       )}
     >
+      {/* The evidence, first. Two tokens, not a sentence: what this one
+          measured, and what that measurement is of. The baseline it is measured
+          against is the section's, stated once above and drawn once above. */}
+      <Meta className="text-[12px]">
+        <Stat value={finding.value} />
+        <span>{finding.against}</span>
+      </Meta>
       <p
         className={cn(
-          "line-clamp-2 text-[13px] leading-relaxed",
-          selected ? "text-foreground" : "text-foreground/90",
+          "mt-0.5 truncate text-[12px] leading-relaxed",
+          selected ? "text-foreground/80" : "text-muted-foreground",
         )}
       >
         {finding.content}
       </p>
-
-      {/* The evidence, under the memory it judged. Two tokens, not a sentence:
-          what this one measured, and what that measurement is of. The baseline
-          it is measured against is the section's, stated once above. */}
-      <Meta className="mt-1">
-        <Stat value={finding.value} />
-        <span>{finding.against}</span>
-      </Meta>
     </button>
+  );
+}
+
+/**
+ * Findings the measure can show belong together.
+ *
+ * The bracket is a rule down the left and one line of evidence — not a heading,
+ * not a colour, and above all not a stated cause. What the arithmetic knows is
+ * that these findings share a term, and a magnitude or a type; what it does not
+ * know is why, and the difference between those two is the difference between
+ * this screen and one that guesses.
+ */
+function PatternGroup({ pattern, findings }: { pattern: Pattern; findings: Finding[] }) {
+  return (
+    // `--node-anomalous` is a graph-canvas custom property, deliberately
+    // outside the shadcn set and so outside `@theme inline` — there is no
+    // `border-node-anomalous` utility for Tailwind to generate, and writing one
+    // would compile clean and render nothing. The token is applied directly.
+    <div
+      className="border-l-2"
+      style={{ borderColor: "color-mix(in oklab, var(--node-anomalous) 45%, transparent)" }}
+    >
+      <div className="px-4 pt-2">
+        <Meta className="text-[11px]">
+          <span className="text-foreground/70">
+            {findings.length} findings, one pattern
+          </span>
+          {pattern.evidence.map((e) => (
+            <span key={e}>{e}</span>
+          ))}
+        </Meta>
+      </div>
+      {findings.map((f) => (
+        <FindingRow key={`${f.memoryId}-${f.value}`} finding={f} />
+      ))}
+    </div>
   );
 }
 
@@ -151,6 +224,44 @@ function LensSection({ lens }: { lens: Lens }) {
   const Icon = lens.icon;
   const result = lens.result;
   const count = result.state === "findings" ? result.findings.length : 0;
+
+  /**
+   * The findings in display order, with grouped ones kept together.
+   *
+   * A pattern's members take the position of whichever of them ranked highest,
+   * so grouping never reorders the section's furthest-first logic more than it
+   * has to — the strongest finding stays where a reader expects it and brings
+   * its relatives with it.
+   */
+  const blocks = useMemo(() => {
+    if (result.state !== "findings") return [];
+    const patternOf = new Map<string, Pattern>();
+    for (const p of result.patterns) {
+      for (const id of p.memoryIds) patternOf.set(id, p);
+    }
+    const done = new Set<Pattern>();
+    const out: Array<
+      { kind: "single"; finding: Finding } | { kind: "pattern"; pattern: Pattern; findings: Finding[] }
+    > = [];
+    for (const finding of result.findings) {
+      const pattern = patternOf.get(finding.memoryId);
+      if (!pattern) {
+        out.push({ kind: "single", finding });
+        continue;
+      }
+      if (done.has(pattern)) continue;
+      done.add(pattern);
+      out.push({
+        kind: "pattern",
+        pattern,
+        findings: result.findings.filter((f) => pattern.memoryIds.includes(f.memoryId)),
+      });
+    }
+    return out;
+  }, [result]);
+
+  const chart = result.state === "insufficient" ? undefined : result.chart;
+  const patterns = result.state === "findings" ? result.patterns : [];
 
   return (
     <section>
@@ -205,11 +316,29 @@ function LensSection({ lens }: { lens: Lens }) {
         ) : null}
       </div>
 
-      {result.state === "findings"
-        ? result.findings.map((f) => (
-            <FindingRow key={`${lens.id}-${f.memoryId}-${f.value}`} finding={f} />
-          ))
-        : null}
+      {/* The population, drawn. Above the rows because it is what the rows are
+          confirming, and present on a clear result too — "nothing flagged" over
+          a drawn distribution is a result, over an empty panel it is a shrug. */}
+      {chart ? (
+        <div className="border-border border-b">
+          <LensGraphic chart={chart} patterns={patterns} />
+        </div>
+      ) : null}
+
+      {blocks.map((block) =>
+        block.kind === "single" ? (
+          <FindingRow
+            key={`${lens.id}-${block.finding.memoryId}-${block.finding.value}`}
+            finding={block.finding}
+          />
+        ) : (
+          <PatternGroup
+            key={`${lens.id}-pattern-${block.pattern.memoryIds.join("-")}`}
+            pattern={block.pattern}
+            findings={block.findings}
+          />
+        ),
+      )}
     </section>
   );
 }
@@ -222,12 +351,9 @@ function LensSkeleton() {
       </div>
       <div className="border-border border-b px-4 py-3">
         <Skeleton className="h-3 w-[70%]" />
-        <Skeleton className="mt-2 h-2.5 w-[90%]" />
       </div>
       <div className="border-border border-b px-4 py-3">
-        <Skeleton className="h-[13px] w-full" />
-        <Skeleton className="mt-1.5 h-[13px] w-[62%]" />
-        <Skeleton className="mt-2.5 h-2.5 w-[80%]" />
+        <Skeleton className="h-[132px] w-full" />
       </div>
     </section>
   );
@@ -279,6 +405,15 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
     }
     return ids.size;
   }, [lenses]);
+
+  const patternCount = useMemo(
+    () =>
+      lenses.reduce(
+        (a, lens) => a + (lens.result.state === "findings" ? lens.result.patterns.length : 0),
+        0,
+      ),
+    [lenses],
+  );
 
   if (reach.state !== "online") {
     return (
@@ -353,6 +488,7 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
         <header className="border-border flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-4 py-3">
           <Meta className="text-[12px]">
             <Stat value={flagged} label="flagged" />
+            {patternCount > 0 ? <Stat value={patternCount} label="pattern" /> : null}
             <Stat value={memories.length} label="memories" />
             <Stat value={lenses.length} label="measures" />
           </Meta>
