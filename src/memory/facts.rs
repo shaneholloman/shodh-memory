@@ -32,6 +32,27 @@ pub struct FactStats {
     pub avg_support: f32,
 }
 
+/// Postcard defaults for the trailing `SemanticFact` fields added by the
+/// invalidation increment, in declaration order: `invalidated_at: Option`
+/// (None = `0x00`), `invalidated_by: Option` (None = `0x00`),
+/// `contradicts: Vec` (empty = varint `0x00`).
+///
+/// Facts were previously decoded with plain `try_decode`, which has NO
+/// tolerance for a record written with fewer fields than the struct now
+/// declares — postcard is positional and carries no field presence, so adding a
+/// trailing field without this would make **every existing fact in every live
+/// store fail to decode**. `try_decode_compat` appends these one at a time.
+/// Keep in sync with any new trailing field.
+const FACT_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
+
+/// Decode a stored `SemanticFact`, tolerating records written before the
+/// invalidation fields existed. The single choke point for every fact read.
+fn decode_fact(data: &[u8]) -> Result<SemanticFact> {
+    let (fact, _needs_migration) =
+        crate::serialization::try_decode_compat::<SemanticFact>(data, FACT_DEFAULT_SUFFIX)?;
+    Ok(fact)
+}
+
 /// Storage for semantic facts with indexing
 pub struct SemanticFactStore {
     db: Arc<DB>,
@@ -90,7 +111,7 @@ impl SemanticFactStore {
         let key = format!("facts:{}:{}", user_id, fact_id);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (fact, _) = crate::serialization::try_decode::<SemanticFact>(&data)?;
+                let fact = decode_fact(&data)?;
                 Ok(Some(fact))
             }
             None => Ok(None),
@@ -178,7 +199,7 @@ impl SemanticFactStore {
                 continue;
             }
 
-            if let Ok((fact, _)) = crate::serialization::try_decode::<SemanticFact>(&value) {
+            if let Ok(fact) = decode_fact(&value) {
                 facts.push(fact);
                 if facts.len() >= limit {
                     break;
@@ -335,7 +356,7 @@ impl SemanticFactStore {
             if key_str.matches(':').count() > 2 {
                 continue;
             }
-            if let Ok((fact, _)) = crate::serialization::try_decode::<SemanticFact>(&value) {
+            if let Ok(fact) = decode_fact(&value) {
                 let millis = fact.created_at.timestamp_millis();
                 max_millis = Some(max_millis.map_or(millis, |cur| cur.max(millis)));
             }
@@ -455,6 +476,107 @@ impl SemanticFactStore {
                 if jaccard >= FACT_DEDUP_JACCARD_FALLBACK {
                     return Ok(Some(fact));
                 }
+            }
+        }
+
+        Ok(best_match.map(|(_, fact)| fact))
+    }
+
+    /// Find an ACTIVE fact that directly contradicts the incoming one.
+    ///
+    /// This is the other half of the polarity gate in [`Self::find_similar`].
+    /// That gate asks "same polarity?" and refuses to merge when the answer is
+    /// no — which was correct as dedup and disastrous as knowledge management:
+    /// the negation was simply stored as a second row, so "four crew injured"
+    /// and "corrected: no crew injured" coexisted, unlinked, each ratcheting its
+    /// own confidence and extending its own half-life. Nothing ever arbitrated.
+    ///
+    /// The gates here are deliberately the SAME as `find_similar`'s — shared
+    /// entity, cosine >= `FACT_DEDUP_COSINE_THRESHOLD`, Jaccard >=
+    /// `FACT_DEDUP_JACCARD_FLOOR` — with exactly one inversion: polarity must
+    /// DIFFER. Two facts that are near-identical in embedding and wording, about
+    /// the same entities, but opposite in polarity, are a claim and its
+    /// negation. Reusing the same thresholds means contradiction detection is
+    /// exactly as conservative as dedup already is; it cannot fire on pairs the
+    /// system would not otherwise have considered "the same fact".
+    ///
+    /// Requires an embedding. The Jaccard-only fallback used by dedup is not
+    /// safe here: negation is often a one-word difference ("no", "not"), so a
+    /// pure bag-of-words score cannot distinguish a contradiction from a
+    /// paraphrase, and a false positive INVALIDATES a true fact. When no
+    /// embedder is available this returns `None` and the two rows coexist as
+    /// before — degraded, but never wrong.
+    ///
+    /// Already-invalidated facts are skipped: a superseded fact is not evidence,
+    /// so it cannot win or lose another arbitration.
+    pub fn find_contradiction(
+        &self,
+        user_id: &str,
+        fact_content: &str,
+        fact_entities: &[String],
+        new_embedding: Option<&[f32]>,
+    ) -> Result<Option<SemanticFact>> {
+        use crate::constants::{FACT_DEDUP_COSINE_THRESHOLD, FACT_DEDUP_JACCARD_FLOOR};
+        use crate::similarity::cosine_similarity;
+
+        let Some(new_emb) = new_embedding else {
+            return Ok(None);
+        };
+
+        let query_lower = fact_content.to_lowercase();
+        let query_words: std::collections::HashSet<&str> = query_lower.split_whitespace().collect();
+        let new_polarity = detect_polarity(&query_lower);
+        let new_entity_set: std::collections::HashSet<&str> =
+            fact_entities.iter().map(|s| s.as_str()).collect();
+
+        let mut best_match: Option<(f32, SemanticFact)> = None;
+
+        for fact in self.list(user_id, 1000)? {
+            if !fact.is_active() {
+                continue;
+            }
+
+            let fact_lower = fact.fact.to_lowercase();
+
+            // Polarity must DIFFER — this is the inversion.
+            if detect_polarity(&fact_lower) == new_polarity {
+                continue;
+            }
+
+            // Entity gate (identical to find_similar).
+            let existing_entity_set: std::collections::HashSet<&str> =
+                fact.related_entities.iter().map(|s| s.as_str()).collect();
+            let both_empty = new_entity_set.is_empty() && existing_entity_set.is_empty();
+            if !both_empty && new_entity_set.is_disjoint(&existing_entity_set) {
+                continue;
+            }
+
+            // Jaccard floor (identical to find_similar).
+            let fact_words: std::collections::HashSet<&str> =
+                fact_lower.split_whitespace().collect();
+            let intersection = query_words.intersection(&fact_words).count();
+            let union = query_words.union(&fact_words).count();
+            let jaccard = if union > 0 {
+                intersection as f32 / union as f32
+            } else {
+                0.0
+            };
+            if jaccard < FACT_DEDUP_JACCARD_FLOOR {
+                continue;
+            }
+
+            // Cosine gate (identical to find_similar). No stored embedding means
+            // we cannot judge safely — skip rather than guess.
+            let Ok(Some(existing_emb)) = self.get_embedding(user_id, &fact.id) else {
+                continue;
+            };
+            let cosine = cosine_similarity(new_emb, &existing_emb);
+            if cosine < FACT_DEDUP_COSINE_THRESHOLD {
+                continue;
+            }
+
+            if best_match.as_ref().is_none_or(|(s, _)| cosine > *s) {
+                best_match = Some((cosine, fact));
             }
         }
 
@@ -652,7 +774,200 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_reinforced: chrono::Utc::now(),
             fact_type: FactType::Pattern,
+            invalidated_at: None,
+            invalidated_by: None,
+            contradicts: Vec::new(),
         }
+    }
+
+    /// A `SemanticFact` exactly as serialized before the invalidation fields
+    /// existed — every field through `fact_type`, nothing after. This is the
+    /// shape of every fact already in a live RocksDB store.
+    ///
+    /// Facts used to decode with plain `try_decode`, which has no EOF
+    /// tolerance, so adding trailing fields without `FACT_DEFAULT_SUFFIX` would
+    /// have made every one of them undecodable — a total, silent loss of the
+    /// semantic layer on upgrade. This test is the guard on that.
+    #[derive(serde::Serialize)]
+    struct LegacyFactThroughFactType {
+        id: String,
+        fact: String,
+        confidence: f32,
+        support_count: usize,
+        source_memories: Vec<crate::memory::MemoryId>,
+        related_entities: Vec<String>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        last_reinforced: chrono::DateTime<chrono::Utc>,
+        fact_type: FactType,
+    }
+
+    #[test]
+    fn legacy_fact_without_invalidation_fields_still_decodes() {
+        assert_eq!(
+            FACT_DEFAULT_SUFFIX.len(),
+            3,
+            "one default per trailing field added by the invalidation increment"
+        );
+
+        let now = chrono::Utc::now();
+        let legacy = LegacyFactThroughFactType {
+            id: "legacy-1".to_string(),
+            fact: "the reactor was scrammed at 04:12".to_string(),
+            confidence: 0.77,
+            support_count: 5,
+            source_memories: vec![crate::memory::MemoryId(uuid::Uuid::new_v4())],
+            related_entities: vec!["reactor".to_string()],
+            created_at: now,
+            last_reinforced: now,
+            fact_type: FactType::Pattern,
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+        let decoded = decode_fact(&bytes).expect("legacy fact must still decode");
+
+        // Everything that WAS on disk survives untouched.
+        assert_eq!(decoded.id, "legacy-1");
+        assert_eq!(decoded.fact, "the reactor was scrammed at 04:12");
+        assert!((decoded.confidence - 0.77).abs() < 1e-6);
+        assert_eq!(decoded.support_count, 5);
+        assert_eq!(decoded.related_entities, vec!["reactor".to_string()]);
+        assert_eq!(decoded.source_memories.len(), 1);
+
+        // ...and the new fields backfill to "never contradicted".
+        assert_eq!(decoded.invalidated_at, None);
+        assert_eq!(decoded.invalidated_by, None);
+        assert!(decoded.contradicts.is_empty());
+        assert!(
+            decoded.is_active(),
+            "a pre-invalidation fact must read as active, not as suppressed"
+        );
+    }
+
+    #[test]
+    fn current_fact_round_trips_invalidation_state() {
+        let (store, _dir) = create_test_store();
+        let mut fact = create_test_fact("f-inv", "no crew were injured");
+        let now = chrono::Utc::now();
+        fact.invalidate(Some("f-winner"), now);
+
+        store.store("u", &fact).unwrap();
+        let back = store.get("u", "f-inv").unwrap().expect("stored");
+
+        assert!(!back.is_active());
+        assert_eq!(
+            back.invalidated_at.map(|t| t.timestamp()),
+            Some(now.timestamp())
+        );
+        assert_eq!(back.invalidated_by.as_deref(), Some("f-winner"));
+        assert_eq!(back.contradicts, vec!["f-winner".to_string()]);
+        // Provenance to source memories must survive invalidation — the trust
+        // chain does not break just because the claim was superseded.
+        assert_eq!(back.source_memories, fact.source_memories);
+    }
+
+    #[test]
+    fn invalidate_is_idempotent_and_keeps_the_first_timestamp() {
+        let mut fact = create_test_fact("f", "no crew were injured");
+        let first = chrono::Utc::now();
+        let later = first + chrono::Duration::days(3);
+
+        fact.invalidate(Some("winner-a"), first);
+        fact.invalidate(Some("winner-a"), later);
+        assert_eq!(
+            fact.invalidated_at.map(|t| t.timestamp()),
+            Some(first.timestamp()),
+            "the audit trail records when belief stopped, not when it was re-noticed"
+        );
+        assert_eq!(
+            fact.contradicts.len(),
+            1,
+            "re-linking the same opponent must not duplicate"
+        );
+    }
+
+    #[test]
+    fn find_contradiction_requires_an_embedding() {
+        // Negation is often a one-word difference, so a bag-of-words score
+        // cannot tell a contradiction from a paraphrase — and a false positive
+        // INVALIDATES a true fact. Without an embedder the answer is "no
+        // contradiction", never a guess.
+        let (store, _dir) = create_test_store();
+        let claim = create_test_fact("c1", "four crew were injured in the incident");
+        store.store("u", &claim).unwrap();
+
+        let found = store
+            .find_contradiction(
+                "u",
+                "no crew were injured in the incident",
+                &["rust".into()],
+                None,
+            )
+            .unwrap();
+        assert!(found.is_none(), "no embedding ⇒ no arbitration");
+    }
+
+    #[test]
+    fn find_contradiction_matches_opposite_polarity_and_skips_same_polarity() {
+        let (store, _dir) = create_test_store();
+
+        // Identical embeddings isolate the polarity gate: everything else the
+        // real pipeline checks (entity overlap, cosine, Jaccard) is satisfied,
+        // so only polarity can decide the outcome.
+        let emb = vec![0.5_f32; 8];
+
+        let claim = create_test_fact("c1", "four crew were injured in the incident");
+        store.store("u", &claim).unwrap();
+        store.store_embedding("u", "c1", &emb).unwrap();
+
+        // Opposite polarity, same entities, near-identical wording ⇒ contradiction.
+        let hit = store
+            .find_contradiction(
+                "u",
+                "four crew were not injured in the incident",
+                &["rust".into()],
+                Some(&emb),
+            )
+            .unwrap();
+        assert_eq!(
+            hit.map(|f| f.id),
+            Some("c1".to_string()),
+            "a negated restatement of the same claim is a contradiction"
+        );
+
+        // Same polarity ⇒ that is dedup's job, not arbitration's.
+        let miss = store
+            .find_contradiction(
+                "u",
+                "four crew were injured in the incident today",
+                &["rust".into()],
+                Some(&emb),
+            )
+            .unwrap();
+        assert!(miss.is_none(), "same polarity must never be arbitrated");
+    }
+
+    #[test]
+    fn find_contradiction_ignores_already_invalidated_facts() {
+        // A superseded claim is not evidence, so it can neither win nor lose a
+        // new arbitration. This is what stops a corrected fact and its
+        // correction from trading places on every consolidation cycle.
+        let (store, _dir) = create_test_store();
+        let emb = vec![0.5_f32; 8];
+
+        let mut dead = create_test_fact("dead", "four crew were injured in the incident");
+        dead.invalidate(Some("winner"), chrono::Utc::now());
+        store.store("u", &dead).unwrap();
+        store.store_embedding("u", "dead", &emb).unwrap();
+
+        let found = store
+            .find_contradiction(
+                "u",
+                "four crew were not injured in the incident",
+                &["rust".into()],
+                Some(&emb),
+            )
+            .unwrap();
+        assert!(found.is_none(), "dead rows are out of the arbitration");
     }
 
     #[test]

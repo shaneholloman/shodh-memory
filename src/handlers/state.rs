@@ -3829,6 +3829,7 @@ impl MultiUserMemoryManager {
                         evidence_span,
                         typed_by,
                     }],
+                    promoted_at: None,
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {

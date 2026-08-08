@@ -493,6 +493,7 @@ pub async fn add_relationship(
         forman_curvature: None,
         endpoint_selectivity: None,
         provenance: Vec::new(),
+        promoted_at: None,
     };
 
     graph_guard

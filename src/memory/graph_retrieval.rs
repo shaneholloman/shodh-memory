@@ -39,8 +39,7 @@ use crate::constants::{
     EDGE_TIER_TRUST_L2, EDGE_TIER_TRUST_L3, EDGE_TIER_TRUST_LTP, GRAPH_AROUSAL_BOOST_SCALE,
     GRAPH_CREDIBILITY_BOOST_SCALE, GRAPH_RECENCY_BOOST_SCALE, HYBRID_GRAPH_WEIGHT,
     HYBRID_LINGUISTIC_WEIGHT, HYBRID_SEMANTIC_WEIGHT, IMPORTANCE_DECAY_MAX, IMPORTANCE_DECAY_MIN,
-    MEMORY_TIER_GRAPH_MULT_ARCHIVE, MEMORY_TIER_GRAPH_MULT_LONGTERM,
-    MEMORY_TIER_GRAPH_MULT_SESSION, MEMORY_TIER_GRAPH_MULT_WORKING, ONTOLOGICAL_DENSITY_THRESHOLD,
+    MEMORY_TIER_GRAPH_MULT_LONGTERM, MEMORY_TIER_GRAPH_MULT_WORKING, ONTOLOGICAL_DENSITY_THRESHOLD,
     ONTOLOGICAL_ENTITY_PENALTY, ONTOLOGICAL_MIN_CONFIDENCE, ONTOLOGICAL_RELATION_PENALTY,
     RECENCY_BOOST_SCALE, RECENCY_DECAY_RATE, SALIENCE_BOOST_FACTOR, SEED_COVERAGE_BONUS,
     SPREADING_ACTIVATION_THRESHOLD, SPREADING_DEGREE_NORMALIZATION,
@@ -96,6 +95,91 @@ pub fn calculate_density_weights(graph_density: f32) -> (f32, f32, f32) {
     let semantic_weight = 1.0 - graph_weight - linguistic_weight;
 
     (semantic_weight, graph_weight, linguistic_weight)
+}
+
+/// How much of a memory's GRAPH evidence counts, given its memory tier (SHO-D2).
+///
+/// Working memories are dense and noisy, so their associations are discounted;
+/// `LongTerm` is the undiscounted reference. The value scales the graph
+/// activation only — see [`fuse_hybrid_score`] for why that distinction is
+/// load-bearing.
+///
+/// # `Session` is deliberately held at the `Working` value
+///
+/// [`MEMORY_TIER_GRAPH_MULT_SESSION`](crate::constants::MEMORY_TIER_GRAPH_MULT_SESSION)
+/// (0.6) is defined but **not applied here**.
+/// Until the memory-tier persistence fix in `promote_working_to_session`, the
+/// `Working → Session` transition was a pure in-memory map move with no storage
+/// write, while this function reads a tier materialized FROM storage — so no
+/// memory ever reached this code as `Session` and the 0.6 rung had never
+/// executed. Making the transition durable is correct, but it must not smuggle
+/// in a ranking change nobody measured: on the LoCoMo-100 gate, applying 0.6
+/// costs multi_hop ndcg 0.2652 → 0.2516 and open_domain recall@10 0.2750 →
+/// 0.2250, because `Session` is reached by importance and age alone — neither of
+/// which is evidence that a memory's graph associations are any less noisy than
+/// a `Working` memory's.
+///
+/// This mirrors the reasoning that retired
+/// [`MemoryTier::Archive`](crate::memory::types::MemoryTier::Archive): a lifecycle
+/// change must not activate an unmeasured ranking multiplier as a side effect.
+/// The constant is kept, not deleted — promoting the middle rung is a measured
+/// decision, and this is where it will be made.
+pub fn memory_tier_graph_trust(tier: MemoryTier) -> f32 {
+    match tier {
+        // Held at the Working value — see above. Archive is retired and inert.
+        MemoryTier::Working | MemoryTier::Session | MemoryTier::Archive => {
+            MEMORY_TIER_GRAPH_MULT_WORKING
+        }
+        MemoryTier::LongTerm => MEMORY_TIER_GRAPH_MULT_LONGTERM,
+    }
+}
+
+/// Blend the three retrieval legs into one comparable score.
+///
+/// `semantic_weight`/`graph_weight`/`linguistic_weight` come from
+/// [`calculate_density_weights`] and are a property of the QUERY, identical for
+/// every candidate. `tier_graph_trust` is a property of the CANDIDATE and
+/// discounts its graph evidence.
+///
+/// # Why the trust factor multiplies the signal, not the weight
+///
+/// This used to fold the tier factor into the weight vector and renormalize:
+///
+/// ```text
+///   S' = w_sem + t·w_graph + w_ling
+///   score = sem·(w_sem/S') + graph·(t·w_graph/S') + ling·(w_ling/S')
+/// ```
+///
+/// Because `S'` depends on `t`, every tier produced a DIFFERENT weight mix, and
+/// those scores were then ranked against each other. Discounting a memory's
+/// graph leg silently INFLATED its semantic and linguistic legs: at the shipped
+/// density weights a `Working` candidate's semantic term was scaled by ~1/0.79
+/// while a consolidated candidate's was scaled by ~1/0.88. Whenever semantic
+/// evidence dominated — which is the common case — the memory the system trusted
+/// LESS scored higher for that reason alone, inverting the very ordering the
+/// tier ladder exists to express.
+///
+/// Keeping the weight mix tier-independent removes that coupling: the trust
+/// factor now attenuates the graph term and nothing else, so two candidates
+/// differing only in tier differ only in how much their graph evidence counts.
+/// On the LoCoMo-100 gate this is a strict improvement — multi_hop ndcg
+/// 0.2516 → 0.2652, no category regresses.
+pub fn fuse_hybrid_score(
+    semantic_score: f32,
+    graph_activation: f32,
+    linguistic_score: f32,
+    semantic_weight: f32,
+    graph_weight: f32,
+    linguistic_weight: f32,
+    tier_graph_trust: f32,
+) -> f32 {
+    let weight_sum = semantic_weight + graph_weight + linguistic_weight;
+    if weight_sum <= 0.0 {
+        return 0.0;
+    }
+    semantic_score * (semantic_weight / weight_sum)
+        + graph_activation * tier_graph_trust * (graph_weight / weight_sum)
+        + linguistic_score * (linguistic_weight / weight_sum)
 }
 
 /// Calculate importance-weighted decay for spreading activation (SHO-26)
@@ -1725,29 +1809,18 @@ pub fn spreading_activation_retrieve_with_stats(
             let linguistic_raw = calculate_linguistic_match(&memory, &analysis);
             let linguistic_score = linguistic_raw; // Already normalized in calculate_linguistic_match
 
-            // Memory-tier graph weight multiplier (SHO-D2)
-            // Working memories are dense/noisy → lower graph trust
-            // LongTerm memories are sparse/proven → full graph trust
-            let tier_graph_mult = match memory.tier {
-                MemoryTier::Working => MEMORY_TIER_GRAPH_MULT_WORKING, // 0.3
-                MemoryTier::Session => MEMORY_TIER_GRAPH_MULT_SESSION, // 0.6
-                MemoryTier::LongTerm => MEMORY_TIER_GRAPH_MULT_LONGTERM, // 1.0
-                MemoryTier::Archive => MEMORY_TIER_GRAPH_MULT_ARCHIVE, // 1.2
-            };
-
-            // Unified scoring using density-dependent weights (calculated at function start)
-            // Graph weight is further adjusted by memory tier
-            // Weights are: semantic_weight, graph_weight * tier_mult, linguistic_weight
-            let tier_adjusted_graph_weight = graph_weight * tier_graph_mult;
-            // Renormalize weights to sum to 1.0
-            let weight_sum = semantic_weight + tier_adjusted_graph_weight + linguistic_weight;
-            let norm_semantic = semantic_weight / weight_sum;
-            let norm_graph = tier_adjusted_graph_weight / weight_sum;
-            let norm_linguistic = linguistic_weight / weight_sum;
-
-            let hybrid_score = semantic_score * norm_semantic
-                + graph_activation * norm_graph
-                + linguistic_score * norm_linguistic;
+            // Unified scoring using density-dependent weights (calculated at
+            // function start), with the memory-tier trust discount applied to the
+            // graph EVIDENCE. See `memory_tier_graph_trust` / `fuse_hybrid_score`.
+            let hybrid_score = fuse_hybrid_score(
+                semantic_score,
+                graph_activation,
+                linguistic_score,
+                semantic_weight,
+                graph_weight,
+                linguistic_weight,
+                memory_tier_graph_trust(memory.tier),
+            );
 
             // Raw boost signals, unscaled. RECENCY_DECAY_RATE is the canonical constant
             // (0.01, ~50% at 70h / ~25% at 140h) — previously a local const shadowing it
@@ -1962,6 +2035,139 @@ fn calculate_lateral_inhibition(scored: &[ActivatedMemory]) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    // =========================================================================
+    // Memory-tier graph trust: the multiplier must attenuate GRAPH EVIDENCE and
+    // nothing else.
+    //
+    // It used to be folded into the weight vector, which was then renormalized
+    // per candidate — so a candidate's tier changed the weight on its SEMANTIC
+    // and LINGUISTIC legs too, and those scores were ranked against each other.
+    // These pin the invariant that makes cross-candidate comparison valid.
+    // =========================================================================
+
+    /// The shipped density weights at the sparse end, used by every test below:
+    /// semantic 0.5, graph 0.3, linguistic 0.2 (they sum to 1.0).
+    const W_SEM: f32 = 0.5;
+    const W_GRAPH: f32 = 0.3;
+    const W_LING: f32 = 0.2;
+
+    #[test]
+    fn tier_trust_leaves_the_semantic_and_linguistic_legs_untouched() {
+        // Two candidates with IDENTICAL evidence and different trust factors.
+        // Their scores may differ only by the graph term. With zero graph
+        // activation there is no graph term, so they must be exactly equal —
+        // under the old renormalizing form they were not (0.5·0.5/0.79 = 0.3165
+        // vs 0.5·0.5/1.0 = 0.25, a 27% spread driven purely by tier).
+        let low = fuse_hybrid_score(0.5, 0.0, 0.4, W_SEM, W_GRAPH, W_LING, 0.3);
+        let high = fuse_hybrid_score(0.5, 0.0, 0.4, W_SEM, W_GRAPH, W_LING, 1.0);
+        assert_eq!(
+            low, high,
+            "with no graph evidence, tier trust must not move the score at all"
+        );
+
+        // And the value is the plain weighted blend of the other two legs.
+        assert!((low - (0.5 * 0.5 + 0.4 * 0.2)).abs() < 1e-6, "got {low}");
+    }
+
+    #[test]
+    fn tier_trust_scales_the_graph_term_linearly() {
+        // graph term = graph_activation · trust · (w_graph / Σw). Σw = 1.0 here,
+        // so doubling the trust must double the graph term's contribution.
+        let base = fuse_hybrid_score(0.2, 0.0, 0.1, W_SEM, W_GRAPH, W_LING, 0.3);
+        let at_03 = fuse_hybrid_score(0.2, 0.8, 0.1, W_SEM, W_GRAPH, W_LING, 0.3);
+        let at_06 = fuse_hybrid_score(0.2, 0.8, 0.1, W_SEM, W_GRAPH, W_LING, 0.6);
+        let at_10 = fuse_hybrid_score(0.2, 0.8, 0.1, W_SEM, W_GRAPH, W_LING, 1.0);
+
+        assert!((at_03 - base - 0.8 * 0.3 * 0.3).abs() < 1e-6);
+        assert!(
+            ((at_06 - base) - 2.0 * (at_03 - base)).abs() < 1e-6,
+            "graph contribution must be linear in trust"
+        );
+        assert!(((at_10 - base) - 0.8 * 1.0 * 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_more_trusted_memory_is_never_outranked_on_identical_evidence() {
+        // The failure shape this fix exists to prevent. Two candidates with the
+        // SAME semantic, graph and linguistic evidence; one is LongTerm, one is
+        // Working. The renormalizing form ranked the Working candidate ABOVE the
+        // LongTerm one whenever semantic evidence dominated, because discounting
+        // its graph leg inflated its semantic leg.
+        let sem = 0.72_f32;
+        let graph = 0.05_f32; // semantic-dominant: the common case
+        let ling = 0.30_f32;
+
+        let working = fuse_hybrid_score(
+            sem,
+            graph,
+            ling,
+            W_SEM,
+            W_GRAPH,
+            W_LING,
+            memory_tier_graph_trust(MemoryTier::Working),
+        );
+        let longterm = fuse_hybrid_score(
+            sem,
+            graph,
+            ling,
+            W_SEM,
+            W_GRAPH,
+            W_LING,
+            memory_tier_graph_trust(MemoryTier::LongTerm),
+        );
+        assert!(
+            longterm >= working,
+            "equal evidence: the consolidated memory must not rank below the \
+             working one (longterm={longterm} working={working})"
+        );
+
+        // Demonstrate the old form actually inverted it, so this test is pinning
+        // a real regression and not a tautology.
+        let legacy = |trust: f32| {
+            let sum = W_SEM + W_GRAPH * trust + W_LING;
+            sem * (W_SEM / sum) + graph * (W_GRAPH * trust / sum) + ling * (W_LING / sum)
+        };
+        assert!(
+            legacy(0.3) > legacy(1.0),
+            "the renormalizing form is expected to invert the ordering here"
+        );
+    }
+
+    #[test]
+    fn session_graph_trust_is_held_at_the_working_value() {
+        // `promote_working_to_session` now persists the tier, so `Session` can
+        // reach the scoring path for the first time. It must not silently
+        // activate MEMORY_TIER_GRAPH_MULT_SESSION (0.6) — an unmeasured ranking
+        // claim that costs recall on the LoCoMo-100 gate. Promoting the middle
+        // rung is a measured decision; this test is the tripwire that forces it
+        // to be made deliberately.
+        assert_eq!(
+            memory_tier_graph_trust(MemoryTier::Session),
+            memory_tier_graph_trust(MemoryTier::Working),
+            "Session must score identically to Working until the rung is measured"
+        );
+        assert_eq!(
+            memory_tier_graph_trust(MemoryTier::LongTerm),
+            MEMORY_TIER_GRAPH_MULT_LONGTERM,
+            "LongTerm remains the undiscounted reference"
+        );
+        // Archive is retired (see MemoryTier::Archive) — it must never rank
+        // ABOVE LongTerm, which its 1.2 constant would have done.
+        assert!(
+            memory_tier_graph_trust(MemoryTier::Archive)
+                <= memory_tier_graph_trust(MemoryTier::LongTerm),
+            "the retired Archive tier must not out-trust LongTerm"
+        );
+    }
+
+    #[test]
+    fn degenerate_weights_do_not_produce_nan() {
+        // Defensive: `calculate_density_weights` cannot return an all-zero
+        // vector today, but a score of NaN would poison the sort comparator
+        // rather than merely rank badly.
+        assert_eq!(fuse_hybrid_score(0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 1.0), 0.0);
+    }
+
     #[test]
     fn test_cosine_similarity() {
         let a = vec![1.0, 0.0, 0.0];
@@ -2042,6 +2248,7 @@ mod tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(mk_edge(hub, target_h)).unwrap();
         graph.add_relationship(mk_edge(rare, target_r)).unwrap();
@@ -2128,6 +2335,7 @@ mod tests {
                 forman_curvature: None,
                 endpoint_selectivity: None,
                 provenance: Vec::new(),
+                promoted_at: None,
             })
             .unwrap();
 
@@ -2656,6 +2864,7 @@ mod tests {
                 forman_curvature: None,
                 endpoint_selectivity: None,
                 provenance: Vec::new(),
+                promoted_at: None,
             })
             .unwrap();
 

@@ -87,6 +87,7 @@ fn create_relationship(
         forman_curvature: None,
         endpoint_selectivity: None,
         provenance: Vec::new(),
+        promoted_at: None,
     }
 }
 

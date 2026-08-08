@@ -340,6 +340,7 @@ pub fn import_graph_relationships(
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
 
         match graph.add_relationship(edge) {

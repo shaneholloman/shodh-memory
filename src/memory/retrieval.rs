@@ -1726,18 +1726,12 @@ impl TrackedRetrieval {
     }
 }
 
-/// Feedback record for a retrieval
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetrievalFeedback {
-    /// Which retrieval this feedback is for
-    pub retrieval_id: String,
-    /// The outcome
-    pub outcome: RetrievalOutcome,
-    /// Optional task context (what was the user trying to do)
-    pub task_context: Option<String>,
-    /// When feedback was provided
-    pub feedback_at: chrono::DateTime<chrono::Utc>,
-}
+// `RetrievalFeedback` was removed. It was a serializable record of a retrieval
+// outcome that nothing constructed, nothing stored and nothing read — the
+// feedback loop it appeared to serve is `MemorySystem::reinforce_recall_tracked`
+// working from a `TrackedRetrieval` and a `RetrievalOutcome` directly. A public
+// type that looks like a persistence format but has no writer is a standing
+// invitation to build against a path that does not exist.
 
 impl RetrievalEngine {
     // ========================================================================

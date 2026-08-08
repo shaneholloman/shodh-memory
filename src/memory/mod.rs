@@ -152,7 +152,7 @@ pub use crate::memory::replay::{
 use crate::memory::retrieval::RetrievalEngine;
 pub use crate::memory::retrieval::{
     AnticipatoryPrefetch, IndexHealth, MemoryGraphStats, PrefetchContext, PrefetchReason,
-    PrefetchResult, ReinforcementStats, RetrievalFeedback, RetrievalOutcome, TrackedRetrieval,
+    PrefetchResult, ReinforcementStats, RetrievalOutcome, TrackedRetrieval,
 };
 pub use crate::memory::segmentation::{
     AtomicMemory, DeduplicationEngine, DeduplicationResult, InputSource, SegmentationEngine,
@@ -2564,6 +2564,14 @@ impl MemorySystem {
                             self.get_facts_for_graph_entities(user_id, &entity_names, 5)
                         {
                             for fact in &facts {
+                                // An invalidated fact is no longer knowledge, so
+                                // it must not lift its source memories. Without
+                                // this, correcting a fact would leave the
+                                // superseded claim still boosting retrieval —
+                                // the invalidation would be cosmetic.
+                                if !fact.is_active() {
+                                    continue;
+                                }
                                 if fact.confidence < 0.5 || fact.support_count < 3 {
                                     continue;
                                 }
@@ -6212,9 +6220,17 @@ impl MemorySystem {
 
     /// Consolidate memories based on Cowan's model (importance + time, not size)
     ///
-    /// Tier promotion criteria:
-    /// - Working → Session: importance >= 0.4 AND age >= 5 minutes
-    /// - Session → LongTerm: importance >= 0.6 AND age >= 1 hour
+    /// Tier promotion criteria, resolved to the values the code actually uses
+    /// (the previous version of this comment stated 0.4/5 min and 0.6/1 hour —
+    /// all four numbers were wrong):
+    /// - Working → Session: importance >= `TIER_PROMOTION_WORKING_IMPORTANCE`
+    ///   (0.35, graph-adjusted) AND age >= `TIER_PROMOTION_WORKING_AGE_SECS`
+    ///   (1800 s = 30 min)
+    /// - Session → LongTerm: importance >= `TIER_PROMOTION_SESSION_IMPORTANCE`
+    ///   (0.5, graph-adjusted) AND age >= `TIER_PROMOTION_SESSION_AGE_SECS`
+    ///   (86400 s = 24 h)
+    ///
+    /// `LongTerm` is terminal — see [`Memory::promote`].
     fn consolidate_if_needed(&self) -> Result<()> {
         // Promote eligible memories from working to session (importance + time based)
         self.promote_working_to_session()?;
@@ -6259,18 +6275,54 @@ impl MemorySystem {
         }
 
         let count = to_promote.len();
+
+        // Build the promoted copies and PERSIST them BEFORE taking the tier
+        // locks.
+        //
+        // This write is the fix for a silent correctness hole. Every memory is
+        // written to `long_term_memory` at insert (see `store`/`upsert`), so the
+        // persisted record starts life with `tier: Working`. Working→Session used
+        // to be a pure in-memory map move with NO storage write, while the one
+        // place recall reads tier — `graph_retrieval`'s memory-tier multiplier —
+        // materializes memories from STORAGE, not from these maps. The persisted
+        // tier was therefore almost always `Working`, so nearly everything scored
+        // at the 0.3 multiplier and the 0.6 `Session` branch was effectively
+        // unreachable. Session→LongTerm already rewrote the record; this makes
+        // the first transition durable too.
+        //
+        // `tier` is already a field of `MemoryFlat`, so this is a write-on-
+        // transition fix, not a schema change — no postcard migration needed.
+        //
+        // Persisting outside the locks keeps a RocksDB write off the critical
+        // section that holds BOTH tier maps. The failure mode is benign and
+        // deliberately chosen: if the store succeeds and the map move then fails,
+        // storage says `Session` (what recall reads — the correct answer) while
+        // the in-memory map still says `Working`, and the next cycle simply
+        // re-promotes idempotently. The reverse order would leave the persisted
+        // record stale, which is the bug being fixed.
+        //
+        // Cost: this runs on the per-request path as well as background
+        // maintenance, but only for memories that actually cross the threshold
+        // (importance + 30 min age), and the function early-returns when nothing
+        // is eligible — so it is one write per memory per lifetime, not per
+        // request.
+        let mut promoted: Vec<Memory> = Vec::with_capacity(count);
+        for memory in &to_promote {
+            let mut promoted_memory = (**memory).clone();
+            promoted_memory.promote(); // Working -> Session
+            self.long_term_memory.store(&promoted_memory)?;
+            promoted.push(promoted_memory);
+        }
+
         let mut working = self.working_memory.write();
         let mut session = self.session_memory.write();
 
-        for memory in &to_promote {
+        for (memory, promoted_memory) in to_promote.iter().zip(promoted) {
             // Log promotion
             self.logger
                 .write()
                 .log_promoted(&memory.id, "working", "session", count);
 
-            // Clone out of Arc and update tier before session storage
-            let mut promoted_memory = (**memory).clone();
-            promoted_memory.promote(); // Working -> Session
             session.add(promoted_memory)?;
             working.remove(&memory.id)?;
         }
@@ -8245,6 +8297,7 @@ impl MemorySystem {
                             forman_curvature: None,
                             endpoint_selectivity: None,
                             provenance,
+                            promoted_at: None,
                         };
                         if graph_guard.add_relationship(edge).is_ok() {
                             edges_added += 1;
@@ -8625,6 +8678,7 @@ impl MemorySystem {
                             forman_curvature: None,
                             endpoint_selectivity: None,
                             provenance,
+                            promoted_at: None,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {
@@ -8966,6 +9020,30 @@ impl MemorySystem {
                             embedding.as_deref(),
                         ) {
                             Ok(Some(mut existing)) => {
+                                // A superseded claim absorbs its own re-derivations
+                                // WITHOUT coming back to life: no support, no
+                                // confidence boost, no `last_reinforced` refresh.
+                                //
+                                // This is what makes correction stable. The wrong
+                                // claim usually stays in the corpus (the memory
+                                // saying "four crew injured" is still there), so it
+                                // is re-extracted on every heavy cycle. If it were
+                                // treated as a NEW fact it would meet the
+                                // correction in `find_contradiction` again, and
+                                // with equal support the newcomer rule would flip
+                                // the verdict — the two claims would trade places
+                                // forever. Matching it back onto its own dead row
+                                // ends that: it is recognised, ignored, and left to
+                                // decay on the base half-life.
+                                if !existing.is_active() {
+                                    tracing::debug!(
+                                        fact_id = %existing.id,
+                                        superseded_by = ?existing.invalidated_by,
+                                        "Skipping reinforcement of an invalidated fact"
+                                    );
+                                    continue;
+                                }
+
                                 // Extend source memories — track if any genuinely new
                                 let mut new_sources_added = false;
                                 for src in &fact.source_memories {
@@ -9017,7 +9095,92 @@ impl MemorySystem {
                                 }
                             }
                             _ => {
-                                truly_new.push((fact.clone(), embedding));
+                                // No merge candidate. Before accepting this as a
+                                // brand-new fact, check whether it CONTRADICTS an
+                                // existing one — this is the case the polarity
+                                // gate in `find_similar` silently created two
+                                // unlinked rows for.
+                                //
+                                // Arbitration rule, stated explicitly because it
+                                // decides which of two conflicting claims the
+                                // system believes:
+                                //
+                                //   The NEWER fact wins unless the existing one is
+                                //   better supported, where "better supported"
+                                //   means strictly greater `support_count`.
+                                //
+                                // Recency is the default because a contradiction
+                                // arriving later is usually a CORRECTION, and the
+                                // whole point of this change is that correction
+                                // must be possible. Support overrides recency
+                                // because a single stray extraction should not
+                                // overturn a claim independently attested many
+                                // times. Confidence is deliberately NOT the tie
+                                // breaker: it is a ratchet that rises with every
+                                // re-derivation, so using it would make the older
+                                // claim progressively harder to correct — exactly
+                                // the "well-supported wrong fact is immortal"
+                                // failure being fixed. Ties go to the newcomer.
+                                //
+                                // The loser is INVALIDATED, not deleted: the
+                                // correction keeps an auditable record of what it
+                                // replaced, and `source_memories` on both rows
+                                // keeps the trust chain back to the episodes
+                                // intact.
+                                let contradiction = self
+                                    .fact_store
+                                    .find_contradiction(
+                                        user_id,
+                                        &fact.fact,
+                                        &fact.related_entities,
+                                        embedding.as_deref(),
+                                    )
+                                    .unwrap_or(None);
+
+                                if let Some(mut existing) = contradiction {
+                                    let incoming_wins =
+                                        fact.support_count >= existing.support_count;
+
+                                    if incoming_wins {
+                                        let mut winner = fact.clone();
+                                        winner.link_contradiction(&existing.id);
+                                        existing.invalidate(Some(&winner.id), now);
+
+                                        if let Err(e) = self.fact_store.update(user_id, &existing) {
+                                            tracing::debug!(
+                                                "Failed to invalidate contradicted fact: {e}"
+                                            );
+                                        }
+                                        tracing::info!(
+                                            superseded = %existing.id,
+                                            winner = %winner.id,
+                                            "Fact contradiction: newer claim supersedes"
+                                        );
+                                        truly_new.push((winner, embedding));
+                                    } else {
+                                        // The established claim is better attested.
+                                        // Record the link on BOTH sides and store the
+                                        // newcomer already invalidated, so the
+                                        // disagreement is visible rather than lost.
+                                        let mut loser = fact.clone();
+                                        loser.invalidate(Some(&existing.id), now);
+                                        existing.link_contradiction(&loser.id);
+
+                                        if let Err(e) = self.fact_store.update(user_id, &existing) {
+                                            tracing::debug!(
+                                                "Failed to link contradiction on winner: {e}"
+                                            );
+                                        }
+                                        tracing::info!(
+                                            rejected = %loser.id,
+                                            winner = %existing.id,
+                                            "Fact contradiction: better-supported claim holds"
+                                        );
+                                        truly_new.push((loser, embedding));
+                                    }
+                                } else {
+                                    truly_new.push((fact.clone(), embedding));
+                                }
                             }
                         }
                     }
@@ -10153,9 +10316,22 @@ impl MemorySystem {
                 // Exponential half-life decay: confidence × 0.5^(elapsed / half_life)
                 // Half-life grows linearly with support_count — each corroborating source
                 // is genuine evidence that the fact is stable knowledge.
+                //
+                // EXCEPT once the fact has been contradicted. Support-extended
+                // half-life is what made a wrong fact the most durable object in
+                // the system: the more often it was re-derived, the longer it
+                // survived. An invalidated fact therefore loses that extension
+                // entirely and decays on the base half-life alone, so it ages out
+                // instead of outliving its correction. (It is not deleted on the
+                // spot — the audit trail of what a correction replaced is worth
+                // keeping until ordinary disuse removes it.)
                 let elapsed = (days_since_reinforcement - FACT_DECAY_GRACE_DAYS) as f64;
-                let half_life = FACT_DECAY_HALF_LIFE_BASE_DAYS
-                    + (fact.support_count as f64 * FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS);
+                let support_extension = if fact.is_active() {
+                    fact.support_count as f64 * FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS
+                } else {
+                    0.0
+                };
+                let half_life = FACT_DECAY_HALF_LIFE_BASE_DAYS + support_extension;
                 let decay_factor = (0.5_f64).powf(elapsed / half_life) as f32;
                 fact.confidence = (confidence_before * decay_factor).max(0.0);
 
@@ -10506,6 +10682,7 @@ mod companion_injection_tests {
                 evidence_span: None,
                 typed_by: None,
             }],
+            promoted_at: None,
         };
         graph.add_relationship(edge).expect("add edge");
     }
@@ -10534,6 +10711,7 @@ mod companion_injection_tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(edge).expect("add edge");
     }
@@ -10761,6 +10939,7 @@ mod companion_rerank_tests {
             forman_curvature: None,
             endpoint_selectivity: None,
             provenance: Vec::new(),
+            promoted_at: None,
         };
         graph.add_relationship(edge).expect("add edge");
     }

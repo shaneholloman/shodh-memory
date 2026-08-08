@@ -130,7 +130,10 @@ fn test_promote_session_to_longterm() {
 }
 
 #[test]
-fn test_promote_longterm_to_archive() {
+fn test_promote_longterm_is_terminal() {
+    // The LongTerm → Archive arrow was removed. No production path drove it,
+    // and Archive's documented job (compressed archival) already happens on
+    // entry to LongTerm via `should_compress` → `MemoryCompressor::compress`.
     let mut memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
@@ -142,11 +145,18 @@ fn test_promote_longterm_to_archive() {
     );
     memory.tier = MemoryTier::LongTerm;
     memory.promote();
-    assert_eq!(memory.tier, MemoryTier::Archive);
+    assert_eq!(
+        memory.tier,
+        MemoryTier::LongTerm,
+        "LongTerm is terminal — promote() must not invent an Archive"
+    );
 }
 
 #[test]
 fn test_promote_archive_stays_archive() {
+    // Archive is a RETIRED variant, kept only so that a postcard record
+    // carrying discriminant 3 still decodes. Nothing assigns it, and promote()
+    // must leave it alone rather than silently rewriting it to another tier.
     let mut memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
@@ -161,40 +171,109 @@ fn test_promote_archive_stays_archive() {
     assert_eq!(memory.tier, MemoryTier::Archive);
 }
 
-#[test]
-fn test_demote_archive_to_longterm() {
-    let mut memory = Memory::new(
-        MemoryId(Uuid::new_v4()),
-        Experience::default(),
-        0.5,
-        None,
-        None,
-        None,
-        None, // created_at
-    );
-    memory.tier = MemoryTier::Archive;
-    memory.demote();
-    assert_eq!(memory.tier, MemoryTier::LongTerm);
+// `demote()` was removed — it had zero production callers, nothing in the
+// system produces the signal it would need, and tier is a retrieval input
+// (the graph-leg multiplier), so demotion would flap a memory's rank between
+// recalls for any memory sitting near a threshold. The four per-step demotion
+// tests that lived here tested only that removed method.
+
+// =============================================================================
+// TIER TRANSITIONS MUST BE DURABLE
+//
+// Every memory is written to long-term storage at insert, so the persisted
+// record starts life with `tier: Working`. Working→Session used to be a pure
+// in-memory map move with NO storage write, while the one place recall reads
+// tier — the memory-tier graph multiplier in `graph_retrieval` — materializes
+// memories from STORAGE. The persisted tier was therefore almost always
+// `Working`, so nearly everything scored at the 0.3 multiplier and the 0.6
+// `Session` branch was effectively unreachable.
+//
+// These tests pin the write, not the in-memory move.
+// =============================================================================
+
+/// Build an experience that comfortably clears the promotion importance bar.
+///
+/// `TIER_PROMOTION_WORKING_IMPORTANCE` is 0.35. A `Decision` contributes 0.3 on
+/// the type factor and >50 words contributes 0.25 on richness, so this clears it
+/// with margin — the test is about the storage write, and it must not become
+/// vacuous because the importance heuristic drifted a little.
+fn promotable_experience(content_seed: &str) -> Experience {
+    let body = std::iter::repeat(content_seed)
+        .take(60)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Experience {
+        content: format!("Decision: {body}"),
+        experience_type: ExperienceType::Decision,
+        ..Default::default()
+    }
 }
 
 #[test]
-fn test_demote_longterm_to_session() {
-    let mut memory = Memory::new(
-        MemoryId(Uuid::new_v4()),
-        Experience::default(),
-        0.5,
-        None,
-        None,
-        None,
-        None, // created_at
+fn working_to_session_promotion_is_persisted_not_just_moved_in_memory() {
+    let (system, _tmp) = setup_memory_system();
+
+    // Control: a memory younger than TIER_PROMOTION_WORKING_AGE_SECS (1800s) is
+    // not eligible, so it must still persist as Working. Before this fix, EVERY
+    // memory looked like this forever, whatever its real tier.
+    let fresh_id = system
+        .remember(promotable_experience("not yet eligible"), None)
+        .expect("remember failed");
+    assert_eq!(
+        system
+            .get_memory(&fresh_id)
+            .expect("memory should be in storage")
+            .tier,
+        MemoryTier::Working,
+        "a memory inside the 30-minute window persists as Working"
     );
-    memory.tier = MemoryTier::LongTerm;
-    memory.demote();
-    assert_eq!(memory.tier, MemoryTier::Session);
+
+    // Subject: backdate past the age threshold so the memory is eligible.
+    // `remember` itself runs `consolidate_if_needed` on the request path, so
+    // this is already promoted by the time it returns; `run_maintenance` is the
+    // background path and must agree.
+    let created_at = chrono::Utc::now() - chrono::Duration::seconds(3600);
+    let id = system
+        .remember(
+            promotable_experience("durable tier transition"),
+            Some(created_at),
+        )
+        .expect("remember failed");
+
+    system
+        .run_maintenance(1.0, "default", false)
+        .expect("maintenance failed");
+
+    // The assertion that matters: STORAGE, not the in-memory map, says Session.
+    // `get_memory` reads long-term storage, which is exactly what recall's tier
+    // multiplier materializes from.
+    let after = system
+        .get_memory(&id)
+        .expect("memory should still be stored");
+    assert_eq!(
+        after.tier,
+        MemoryTier::Session,
+        "Working→Session must be written through to storage, not only moved between maps"
+    );
+
+    // ...and the control is still Working, so the write is driven by the
+    // promotion criteria rather than being unconditional.
+    assert_eq!(
+        system
+            .get_memory(&fresh_id)
+            .expect("memory should be in storage")
+            .tier,
+        MemoryTier::Working,
+        "an ineligible memory must not be swept along"
+    );
 }
 
 #[test]
-fn test_demote_session_to_working() {
+fn session_tier_survives_a_serialization_round_trip() {
+    // `tier` is already a field of `MemoryFlat`, so persisting the transition
+    // needed no schema change — but nothing pinned the Session value, only
+    // LongTerm. If Session ever failed to round-trip, the promotion write above
+    // would be silently undone on read.
     let mut memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
@@ -202,28 +281,72 @@ fn test_demote_session_to_working() {
         None,
         None,
         None,
-        None, // created_at
+        None,
     );
     memory.tier = MemoryTier::Session;
-    memory.demote();
-    assert_eq!(memory.tier, MemoryTier::Working);
+
+    let bytes =
+        bincode::serde::encode_to_vec(&memory, bincode::config::standard()).expect("serialize");
+    let (decoded, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+            .expect("deserialize");
+    assert_eq!(decoded.tier, MemoryTier::Session);
 }
 
 #[test]
-fn test_demote_working_stays_working() {
-    let mut memory = Memory::new(
-        MemoryId(Uuid::new_v4()),
-        Experience::default(),
-        0.5,
-        None,
-        None,
-        None,
-        None, // created_at
+fn every_live_tier_maps_to_a_distinct_graph_multiplier() {
+    // The declared ladder: three live tiers, three DIFFERENT graph-leg weights,
+    // strictly increasing with consolidation.
+    //
+    // NOTE what this pins and what it does not. It pins the CONSTANTS, not the
+    // retrieval path. `graph_retrieval::memory_tier_graph_trust` deliberately
+    // holds `Session` at the `Working` value: the promotion write above made the
+    // 0.6 rung reachable for the very first time, and measured on the
+    // LoCoMo-100 gate it costs recall (multi_hop ndcg 0.2652 -> 0.2516,
+    // open_domain recall@10 0.2750 -> 0.2250). Promoting the middle rung is a
+    // measured decision; `session_graph_trust_is_held_at_the_working_value` is
+    // the tripwire that forces it to be made deliberately. The ladder stays
+    // declared here so the value survives for whoever calibrates it.
+    use shodh_memory::constants::{
+        MEMORY_TIER_GRAPH_MULT_LONGTERM, MEMORY_TIER_GRAPH_MULT_SESSION,
+        MEMORY_TIER_GRAPH_MULT_WORKING,
+    };
+    assert!(
+        MEMORY_TIER_GRAPH_MULT_WORKING < MEMORY_TIER_GRAPH_MULT_SESSION
+            && MEMORY_TIER_GRAPH_MULT_SESSION < MEMORY_TIER_GRAPH_MULT_LONGTERM,
+        "tier trust must be strictly increasing: {MEMORY_TIER_GRAPH_MULT_WORKING} < \
+         {MEMORY_TIER_GRAPH_MULT_SESSION} < {MEMORY_TIER_GRAPH_MULT_LONGTERM}"
     );
-    memory.tier = MemoryTier::Working;
-    memory.demote();
-    assert_eq!(memory.tier, MemoryTier::Working);
 }
+
+// FACT CORRECTION — NOT COVERED END TO END. See the handoff.
+//
+// The arbitration path (contradiction detection -> invalidation -> consumers
+// honouring it) is unit-tested at the store level in `src/memory/facts.rs`, but
+// there is deliberately NO end-to-end test here, because the one written first
+// passed VACUOUSLY: driving `remember` with aged memories and then
+// `run_maintenance(.., is_heavy = true)` extracts ZERO facts in this harness, so
+// every assertion about contradictions was trivially satisfied. Both a
+// declarative corpus and a pattern-shaped one produced facts = 0.
+//
+// A passing test that exercises nothing is worse than an absent one, so it was
+// removed rather than left to look like coverage.
+//
+// The cause was then isolated, and it is NOT any of the obvious gates:
+//   * `fact_extraction_needed` starts `true`, so the heavy cycle does run it.
+//   * The incremental watermark is NOT the filter — instrumenting
+//     `memory/mod.rs` showed `all=2, new_since_watermark=2,
+//     watermark=1970-01-01`, i.e. both aged memories reach the consolidator.
+//   * Thresholds are not the filter either. Calling
+//     `SemanticConsolidator::with_thresholds(..)` directly on the same two
+//     memories yields `facts=0` at (min_support 2, min_age 7), (1, 7) AND
+//     (1, 0).
+//
+// So the candidate EXTRACTOR produces no candidates for plain declarative
+// sentences — consolidation never gets anything to cluster. An end-to-end fact
+// test therefore needs corpus text the extractor actually recognises, and
+// establishing what that is belongs to the fact-extraction layer, not to the
+// invalidation work.
 
 #[test]
 fn test_tier_full_cycle() {
@@ -237,22 +360,16 @@ fn test_tier_full_cycle() {
         None, // created_at
     );
 
-    // Promote all the way
+    // Promote all the way — the ladder is monotonic and saturates at LongTerm.
     assert_eq!(memory.tier, MemoryTier::Working);
     memory.promote();
     assert_eq!(memory.tier, MemoryTier::Session);
     memory.promote();
     assert_eq!(memory.tier, MemoryTier::LongTerm);
     memory.promote();
-    assert_eq!(memory.tier, MemoryTier::Archive);
+    assert_eq!(memory.tier, MemoryTier::LongTerm, "terminal, not Archive");
 
-    // Demote all the way
-    memory.demote();
-    assert_eq!(memory.tier, MemoryTier::LongTerm);
-    memory.demote();
-    assert_eq!(memory.tier, MemoryTier::Session);
-    memory.demote();
-    assert_eq!(memory.tier, MemoryTier::Working);
+    // There is no way back down: `demote()` was removed (see above).
 }
 
 // =============================================================================
@@ -693,32 +810,7 @@ fn test_batch_promote() {
     }
 }
 
-#[test]
-fn test_batch_demote() {
-    let mut memories: Vec<Memory> = (0..10)
-        .map(|_| {
-            let mut m = Memory::new(
-                MemoryId(Uuid::new_v4()),
-                Experience::default(),
-                0.5,
-                None,
-                None,
-                None,
-                None, // created_at
-            );
-            m.tier = MemoryTier::Session;
-            m
-        })
-        .collect();
-
-    for m in &mut memories {
-        m.demote();
-    }
-
-    for m in &memories {
-        assert_eq!(m.tier, MemoryTier::Working);
-    }
-}
+// `test_batch_demote` removed with `demote()` — see the rationale above.
 
 #[test]
 fn test_heterogeneous_tier_batch() {
@@ -751,11 +843,15 @@ fn test_heterogeneous_tier_batch() {
         m.promote();
     }
 
-    // Check each moved up (or stayed at Archive)
+    // Each moved up one step, except the two terminal/retired tiers which hold.
     assert_eq!(memories[0].1.tier, MemoryTier::Session);
     assert_eq!(memories[1].1.tier, MemoryTier::LongTerm);
-    assert_eq!(memories[2].1.tier, MemoryTier::Archive);
-    assert_eq!(memories[3].1.tier, MemoryTier::Archive);
+    assert_eq!(memories[2].1.tier, MemoryTier::LongTerm, "terminal");
+    assert_eq!(
+        memories[3].1.tier,
+        MemoryTier::Archive,
+        "retired, untouched"
+    );
 }
 
 // =============================================================================
@@ -774,17 +870,11 @@ fn test_tier_after_many_operations() {
         None, // created_at
     );
 
-    // Many promotions (should cap at Archive)
+    // Many promotions saturate at the terminal tier and stay there.
     for _ in 0..100 {
         memory.promote();
     }
-    assert_eq!(memory.tier, MemoryTier::Archive);
-
-    // Many demotions (should cap at Working)
-    for _ in 0..100 {
-        memory.demote();
-    }
-    assert_eq!(memory.tier, MemoryTier::Working);
+    assert_eq!(memory.tier, MemoryTier::LongTerm);
 }
 
 #[test]
