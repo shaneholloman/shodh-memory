@@ -9742,6 +9742,25 @@ impl MemorySystem {
                 .find_similar(user_id, &fact.fact, &fact.related_entities, emb_ref)
             {
                 Ok(Some(mut existing)) => {
+                    // An invalidated fact absorbs its own re-derivations WITHOUT
+                    // coming back to life — the same guard the maintenance path
+                    // applies. `find_similar` deliberately still MATCHES dead
+                    // rows (that is what stops a corrected claim and its
+                    // correction trading places every cycle), so without this
+                    // check the on-demand path would refresh `last_reinforced`
+                    // on a superseded claim and hand it a fresh half-life. The
+                    // wrong fact usually stays in the corpus and is re-extracted
+                    // forever, so this is not a corner case; it was simply
+                    // unreachable while the candidate extractor produced nothing.
+                    if !existing.is_active() {
+                        tracing::debug!(
+                            fact_id = %existing.id,
+                            superseded_by = ?existing.invalidated_by,
+                            "distill_facts: skipping reinforcement of an invalidated fact"
+                        );
+                        continue;
+                    }
+
                     // Pattern completion: reinforce existing trace.
                     // Only increment support_count when genuinely new source
                     // memories contribute evidence. Prevents same memories

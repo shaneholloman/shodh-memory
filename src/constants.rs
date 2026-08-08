@@ -648,6 +648,23 @@ pub const CONSOLIDATION_JACCARD_THRESHOLD: f32 = 0.45;
 /// - Prevents one verbose memory from dominating the candidate pool
 pub const CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY: usize = 5;
 
+/// Minimum non-stop-words a sentence must carry to be a declarative fact
+/// candidate (`SemanticConsolidator::extract_salient_statement`).
+///
+/// Justification:
+/// - Raised 3 -> 4 as the deliberate offset for removing the entity-match gate
+///   from the declarative extractor. That gate rejected every sentence unless
+///   NER had emitted a span it literally contained, so it took the entire
+///   semantic layer to zero whenever NER was silent; corroboration
+///   (`CONSOLIDATION_MIN_SUPPORT`, >= 2 distinct memories) is the filter that
+///   replaces it, and this floor is the cheap structural half.
+/// - Four non-stop-words is the smallest bar that requires a clause rather than
+///   a caption: at three, a 20-character heading ("Bridge collapse update")
+///   still qualifies.
+/// - Not higher: real declarative sentences in news/technical prose routinely
+///   sit at 5-8 content words, and a floor of 5 starts discarding them.
+pub const CONSOLIDATION_SALIENT_MIN_CONTENT_WORDS: usize = 4;
+
 /// Grace period before any fact decay begins (days)
 ///
 /// Facts are immune to decay for this period after last reinforcement.
@@ -3127,6 +3144,7 @@ pub const COMPANION_SCORE_FACTOR: f32 = 0.5;
 // | CONSOLIDATION_MIN_AGE_DAYS    | memory/compression.rs | consolidate_semantic_facts()      |
 // | CONSOLIDATION_JACCARD_THRESHOLD | memory/compression.rs | group_candidates_by_similarity()  |
 // | CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY | memory/compression.rs | extract_fact_candidates() |
+// | CONSOLIDATION_SALIENT_MIN_CONTENT_WORDS | memory/compression.rs | extract_salient_statement() |
 // | FACT_DECAY_GRACE_DAYS              | memory/mod.rs, compression.rs | fact decay grace period     |
 // | FACT_DECAY_HALF_LIFE_BASE_DAYS     | memory/mod.rs, compression.rs | fact decay half-life base  |
 // | FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS | memory/mod.rs, compression.rs | fact decay per support  |
