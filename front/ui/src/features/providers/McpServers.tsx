@@ -189,19 +189,19 @@ function ServerRow({ server }: { server: McpServerInfo }) {
 }
 
 export function McpServers() {
-  const servers =
-    useQuery({
-      queryKey: ["seat-mcp-servers"],
-      queryFn: ({ signal }) => listMcpServers(signal),
-      staleTime: 10_000,
-      // A server can go away without anyone touching this screen — the seat
-      // notices immediately, and a poll this cheap (a local process, a few
-      // hundred bytes) is what carries that to the page someone is already
-      // looking at. There is no push channel for it and inventing one for a
-      // status list would be a lot of machinery for a 15-second delay.
-      refetchInterval: 15_000,
-    }).data?.servers ?? [];
+  const query = useQuery({
+    queryKey: ["seat-mcp-servers"],
+    queryFn: ({ signal }) => listMcpServers(signal),
+    staleTime: 10_000,
+    // A server can go away without anyone touching this screen — the seat
+    // notices immediately, and a poll this cheap (a local process, a few
+    // hundred bytes) is what carries that to the page someone is already
+    // looking at. There is no push channel for it and inventing one for a
+    // status list would be a lot of machinery for a 15-second delay.
+    refetchInterval: 15_000,
+  });
 
+  const servers = query.data?.servers ?? [];
   const connected = servers.filter((server) => server.status === "ready");
   const reachableTools = connected.reduce((total, server) => total + server.tool_count, 0);
   const down = servers.length - connected.length;
@@ -213,7 +213,7 @@ export function McpServers() {
           id="mcp-servers-heading"
           className="text-muted-foreground/70 text-[10px] tracking-wide uppercase"
         >
-          Tool servers ({servers.length})
+          Tool servers{query.data ? ` (${servers.length})` : ""}
         </h3>
         <InfoHint label="Tool servers">
           Programs and endpoints that publish tools your agent can call — files,
@@ -232,7 +232,25 @@ export function McpServers() {
         </InfoHint>
       </div>
 
-      {servers.length === 0 ? (
+      {/* Three states that look identical if you only ever read `data`, and
+          two of them are statements about the user's configuration that would
+          be FALSE: a request still in flight, and a request that failed. The
+          latter is the worse one — it persists, and it tells someone their
+          servers are not configured when in truth the seat could not be
+          asked. Kept apart, in the idiom the provider list above already
+          uses. */}
+      {query.isPending ? (
+        <p className="text-muted-foreground border-border border-b px-4 py-3 text-[12px]">
+          Listing tool servers…
+        </p>
+      ) : query.isError ? (
+        <p className="text-destructive border-border border-b px-4 py-3 text-[12px] leading-relaxed">
+          Could not ask the seat which tool servers it has
+          {query.error instanceof Error ? `: ${query.error.message}` : "."} This
+          says nothing about the servers themselves — they may well be
+          connected.
+        </p>
+      ) : servers.length === 0 ? (
         <p className="text-muted-foreground border-border border-b px-4 py-3 text-[12px] leading-relaxed">
           No tool servers are configured. The seat reads them from the JSON file
           named by <span className="mono">SEAT_MCP_SERVERS</span> — a command to
