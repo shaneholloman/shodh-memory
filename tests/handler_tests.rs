@@ -2078,7 +2078,10 @@ async fn lineage_trace_depth_is_hop_distance_not_edge_count() {
     // The explicit fan is three edges. Automatic extraction may add more, so
     // assert a floor rather than an exact count — the point of the test is the
     // relationship between depth and edges, not the edge total.
-    assert!(edges >= 3, "expected at least the three fan-out edges: {body}");
+    assert!(
+        edges >= 3,
+        "expected at least the three fan-out edges: {body}"
+    );
     assert_eq!(
         depth, 1,
         "one hop was requested and one hop was walked; depth reported {depth} \
