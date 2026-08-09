@@ -175,6 +175,45 @@ export interface ProviderInfo {
   local: boolean;
 }
 
+/** seat/src/mcp.ts `McpTransportKind` — which wire a tool server is reached
+ *  over. "stdio" is a program the seat starts on this machine; "http" is the
+ *  current remote transport (streamable HTTP); "sse" is the superseded one,
+ *  still the only thing some deployed servers speak. */
+export type McpTransportKind = "stdio" | "http" | "sse";
+
+/** seat/src/mcp.ts `McpServerStatus`. "failed" and "disconnected" are kept
+ *  apart on purpose: one never came up, the other was working and went away,
+ *  and they do not have the same remedy. */
+export type McpServerStatus = "connecting" | "ready" | "failed" | "disconnected";
+
+/** seat/src/mcp.ts `McpToolInfo` — a tool as its server DESCRIBES it. Nothing
+ *  in this shape says the tool has ever been called. */
+export interface McpToolInfo {
+  name: string;
+  title: string | null;
+  description: string | null;
+}
+
+/** seat/src/mcp.ts `McpServerInfo` — GET /seat/v1/mcp/servers. Header values
+ *  and URL query strings are stripped by the seat; only header names and the
+ *  scheme/host/path reach here. */
+export interface McpServerInfo {
+  name: string;
+  status: McpServerStatus;
+  transport: McpTransportKind;
+  tool_count: number;
+  tools: McpToolInfo[];
+  error: string | null;
+  endpoint: string | null;
+  command: string | null;
+  auth_header_names: string[];
+  server_name: string | null;
+  server_version: string | null;
+  connected_at: string | null;
+  tools_listed_at: string | null;
+  last_attempt_at: string | null;
+}
+
 /** OAuth-bridge stream frames — seat/src/server.ts handleOAuthStart. */
 export type OAuthFlowEvent =
   | {
@@ -305,7 +344,10 @@ export interface SeatHealthResponse {
   seat: "ok";
   backend: { ok: boolean; detail: string };
   conversations: number;
-  mcp_servers: { name: string; tool_count: number }[];
+  /** seat/src/mcp.ts `McpServerHealth`. This route is unauthenticated, so it
+   *  carries liveness only — endpoints and connection errors are on
+   *  GET /seat/v1/mcp/servers, behind the seat's bearer token. */
+  mcp_servers: { name: string; status: McpServerStatus; tool_count: number }[];
 }
 
 /** Reachability of the seat process, distinguished the same way the backend's

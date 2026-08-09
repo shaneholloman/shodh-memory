@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { McpServers } from "./McpServers";
 import { OAuthFlow } from "./OAuthFlow";
 
 /**
@@ -284,6 +285,10 @@ export function ProvidersView({ seat }: { seat: SeatReachability }) {
                 : null}
             </>
           )}
+          {/* The other half of "what can my agent reach": model endpoints
+              above, the tool servers it can act through below. One question,
+              so one screen. */}
+          <McpServers />
         </ScrollArea>
       </div>
     </div>
