@@ -13,7 +13,8 @@ use crate::constants::{
     COMPRESSION_IMPORTANCE_LOW, CONSOLIDATION_CLUSTER_SIZE_CAP, CONSOLIDATION_JACCARD_THRESHOLD,
     CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY, CONSOLIDATION_MIN_AGE_DAYS, CONSOLIDATION_MIN_SUPPORT,
     CONSOLIDATION_MIN_SUPPORT_LARGE, CONSOLIDATION_MIN_SUPPORT_MEDIUM,
-    CONSOLIDATION_MIN_SUPPORT_SMALL, MAX_COMPRESSION_RATIO, MAX_DECOMPRESSED_SIZE,
+    CONSOLIDATION_MIN_SUPPORT_SMALL, CONSOLIDATION_SALIENT_MIN_CONTENT_WORDS,
+    MAX_COMPRESSION_RATIO, MAX_DECOMPRESSED_SIZE,
 };
 use crate::embeddings::keywords::KeywordExtractor;
 
@@ -339,7 +340,16 @@ impl CompressionPipeline {
                 ));
             }
 
-            let experience: Experience = crate::serialization::decode_raw(&decompressed)?;
+            let mut experience: Experience = crate::serialization::decode_raw(&decompressed)?;
+
+            // `Experience::toponyms` is `#[serde(skip)]` — it rides at the tail
+            // of `MemoryFlat` rather than inside the `Experience` encoding, so
+            // it is NOT in this blob. The compressed memory kept it on its outer
+            // experience (compress_lz4 clones the memory and only adds metadata
+            // keys), so carry it across; otherwise decompression would silently
+            // drop resolved places and LZ4 compression would stop being
+            // lossless, contrary to `is_lossless`.
+            experience.toponyms = memory.experience.toponyms.clone();
 
             // Restore the memory
             let mut restored = memory.clone();
@@ -416,6 +426,78 @@ pub struct SemanticFact {
     pub last_reinforced: chrono::DateTime<chrono::Utc>,
     /// Category of fact (preference, capability, relationship, procedure)
     pub fact_type: FactType,
+
+    // =========================================================================
+    // Invalidation / contradiction (trailing fields — postcard-positional).
+    //
+    // Before these, a fact could never be CORRECTED, only out-waited.
+    // `RelationshipEdge` has carried `invalidated_at` + `invalidate_relationship`
+    // + traversal that honours it for a long time; none of that machinery
+    // extended to facts. Worse, the polarity check in `find_similar` is a DEDUP
+    // guard: a claim and its negation did not merge, so they coexisted as two
+    // rows, unlinked, each ratcheting its own confidence and each extending its
+    // own half-life. The better supported a wrong fact was, the more durable it
+    // became.
+    //
+    // These mirror the edge pattern. `#[serde(default)]` plus
+    // `FACT_DEFAULT_SUFFIX` let facts written before they existed decode.
+    // =========================================================================
+    /// When this fact was superseded. `Some` means it must not influence
+    /// retrieval, must not accrue further support, and must not extend its
+    /// half-life — but it is RETAINED, not deleted, so the correction has an
+    /// auditable "what it replaced".
+    #[serde(default)]
+    pub invalidated_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Provenance of the invalidation: the id of the fact that superseded this
+    /// one. `None` alongside `Some(invalidated_at)` means it was invalidated
+    /// directly rather than by a competing fact.
+    #[serde(default)]
+    pub invalidated_by: Option<String>,
+
+    /// Ids of facts this one is in direct contradiction with, in both
+    /// directions — the surviving fact records what it superseded, and the
+    /// superseded one records its victor. This is the LINK the polarity guard
+    /// never created.
+    #[serde(default)]
+    pub contradicts: Vec<String>,
+}
+
+impl SemanticFact {
+    /// True when this fact still counts as knowledge.
+    ///
+    /// The single predicate every consumer must go through — scoring, half-life
+    /// decay, support accrual and narrative building. An invalidated fact stays
+    /// in the store for audit but stops being evidence.
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.invalidated_at.is_none()
+    }
+
+    /// Mark this fact as superseded by `winner_id` at `now`.
+    ///
+    /// Idempotent: re-invalidating keeps the FIRST invalidation timestamp, so
+    /// the audit trail records when the fact stopped being believed, not the
+    /// last time something noticed.
+    pub fn invalidate(&mut self, winner_id: Option<&str>, now: chrono::DateTime<chrono::Utc>) {
+        if self.invalidated_at.is_none() {
+            self.invalidated_at = Some(now);
+            self.invalidated_by = winner_id.map(|s| s.to_string());
+        }
+        if let Some(id) = winner_id {
+            if !self.contradicts.iter().any(|c| c == id) {
+                self.contradicts.push(id.to_string());
+            }
+        }
+    }
+
+    /// Record a contradiction link without invalidating (used on the winning
+    /// side, which stays active but must remember what it displaced).
+    pub fn link_contradiction(&mut self, other_id: &str) {
+        if !self.contradicts.iter().any(|c| c == other_id) {
+            self.contradicts.push(other_id.to_string());
+        }
+    }
 }
 
 /// Types of semantic facts
@@ -620,6 +702,9 @@ impl SemanticConsolidator {
                     created_at: now,
                     last_reinforced: now,
                     fact_type,
+                    invalidated_at: None,
+                    invalidated_by: None,
+                    contradicts: Vec::new(),
                 };
 
                 result.new_fact_ids.push(fact.id.clone());
@@ -729,12 +814,29 @@ impl SemanticConsolidator {
 
     // ── Multi-Extractor Pipeline ────────────────────────────────────────────
 
-    /// Extract fact candidates from a single memory using type-gated extractors.
+    /// Extract fact candidates from a single memory.
     ///
-    /// Models prefrontal selective attention: not all extractors run on all
-    /// memory types. Operational traces (Context, Command, CodeEdit, FileAccess,
-    /// Search) produce zero candidates. Low-importance Observation/Conversation
-    /// memories are filtered to prevent auto-ingest noise from becoming facts.
+    /// Models prefrontal selective attention: operational traces (Context,
+    /// Command, CodeEdit, FileAccess, Search) are execution logs rather than
+    /// knowledge and produce zero candidates outright.
+    ///
+    /// Everything past that reject runs two layers. Four SPECIALIST extractors
+    /// stay type-gated, because each looks for a distinct rhetorical shape and
+    /// only certain experience types plausibly carry it: procedures in
+    /// Decision/Learning/Task, definitions in Learning/Discovery/Pattern,
+    /// failure patterns in Error/…, stated preferences in
+    /// Decision/Conversation. One GENERAL declarative extractor then runs on
+    /// every surviving type, because a plain factual sentence has no rhetorical
+    /// marker to gate on and belongs to no single experience type. Without that
+    /// second layer the pipeline was four keyword banks and nothing else, so
+    /// ordinary declarative prose — the bulk of what users actually store —
+    /// produced no candidates at all.
+    ///
+    /// Low-importance memories are no longer suppressed here: importance scales
+    /// candidate CONFIDENCE, and `is_knowledge_worthy` (which enumerates the
+    /// actual auto-ingest noise: session lifecycle, tool logs, todo chatter,
+    /// protocol fragments) is what rejects noise, by naming it rather than by
+    /// proxying it through a score the default experience type cannot reach.
     fn extract_fact_candidates(&self, memory: &Memory) -> Vec<(String, f32)> {
         let mut candidates = Vec::new();
         let content = &memory.experience.content;
@@ -827,13 +929,46 @@ impl SemanticConsolidator {
             }
         }
 
-        // Salient fallback: Observation only, importance-gated, requires entity match
-        if *exp_type == ExperienceType::Observation && importance >= 0.5 {
-            if let Some(fact) = self.extract_salient_statement(content, &memory.experience.entities)
-            {
-                if Self::is_fact_shaped(&fact) {
-                    candidates.push((fact, importance * 0.6));
-                }
+        // Declarative extractor: the general path, and the ONLY route an ordinary
+        // factual sentence has. It runs on every experience type that survived the
+        // operational reject above.
+        //
+        // It used to read `*exp_type == ExperienceType::Observation && importance
+        // >= 0.5`, and `extract_salient_statement` additionally refused any
+        // sentence that did not literally contain one of `experience.entities`.
+        // Three filters in series on the only general route, every one of them
+        // failing CLOSED, which is why ordinary corpora minted zero facts and the
+        // whole downstream semantic layer — clustering, reinforcement, and the
+        // contradiction/invalidation machinery — ran on an empty input:
+        //
+        //   * TYPE. `remember` defaults `memory_type` to `Observation`
+        //     (`handlers::remember::parse_experience_type`), so the default type
+        //     was the only one served. `Conversation`, `Task` and `Intention`
+        //     reached ZERO extractors for plain prose, because the other four are
+        //     keyword banks — copula markers, error nouns, sentence-initial
+        //     imperative verbs, first-person preference markers — that a sentence
+        //     like "Initial reports said four crew members were injured in the
+        //     collapse" matches none of.
+        //   * IMPORTANCE. `calculate_importance` scores `Observation` with the
+        //     0.05 `_` catch-all type weight, so a rich 15-word observation with
+        //     three entities lands near 0.23. The DEFAULT experience type could
+        //     not clear a 0.5 bar — the gate was unreachable for the population it
+        //     was written to serve.
+        //   * ENTITIES. The entity requirement depended on NER emission, an
+        //     upstream signal that is empty for whole classes of records; when it
+        //     emits nothing, the semantic layer silently produces nothing.
+        //
+        // Both surviving signals are now WEIGHTS rather than gates: `importance`
+        // still scales this candidate's confidence, and entity mentions still rank
+        // which sentence is chosen. What decides whether a candidate becomes a
+        // FACT is corroboration — `CONSOLIDATION_MIN_SUPPORT` requires the same
+        // pattern from at least two DISTINCT memories. That is the filter the
+        // architecture documents (constants.rs, the BCM sliding threshold), it is
+        // strictly stronger evidence than "an optional upstream field was
+        // non-empty", and it cannot be zeroed by that field going missing.
+        if let Some(fact) = self.extract_salient_statement(content, &memory.experience.entities) {
+            if Self::is_fact_shaped(&fact) {
+                candidates.push((fact, importance * 0.6));
             }
         }
 
@@ -1103,12 +1238,33 @@ impl SemanticConsolidator {
         None
     }
 
-    /// Extract the most information-dense sentence that mentions at least one entity.
+    /// Extract the most information-dense declarative sentence from `content`.
     ///
-    /// Hardened: requires at least 1 entity match. A sentence with zero entity
-    /// mentions is not domain-relevant — it's generic prose that should not
-    /// become a stored fact. This prevents the salient fallback from capturing
-    /// boilerplate like "The system is working correctly".
+    /// Entity mentions RANK sentences here; they no longer gate them. The
+    /// previous contract returned `None` unless the winning sentence literally
+    /// contained one of `entities`, on the reasoning that a sentence with no
+    /// entity mention is generic prose. The reasoning is sound and the mechanism
+    /// is not: `entities` is populated by NER upstream, so the rule reads "reject
+    /// all knowledge whenever an optional enrichment step produced nothing". It
+    /// fails closed, silently, for the entire corpus at once — which is exactly
+    /// what happened, and it took the clustering, reinforcement and
+    /// contradiction/invalidation layers down with it, since none of them can act
+    /// on an input that is always empty.
+    ///
+    /// What replaces it is not a weaker bar but a differently placed one. The
+    /// structural filters are unchanged and self-contained — the 20..=200 char
+    /// window, the content-word floor below, `is_fact_shaped` and
+    /// `is_knowledge_worthy` at the call site — and above them sits
+    /// `CONSOLIDATION_MIN_SUPPORT`, which mints nothing until the same pattern
+    /// arrives from at least two DISTINCT memories. "Two independent memories say
+    /// this" is stronger evidence of domain relevance than "an NER pass found a
+    /// span", and unlike the entity gate it degrades gracefully: a corpus with no
+    /// entities yields fewer facts, not zero.
+    ///
+    /// When entities ARE present they still do real work — `entity_bonus` biases
+    /// selection toward the sentence that actually names the domain objects, so a
+    /// working NER pass improves WHICH sentence is chosen without ever deciding
+    /// WHETHER one is.
     fn extract_salient_statement(&self, content: &str, entities: &[String]) -> Option<String> {
         let sentences = Self::split_sentences(content);
         let entity_lower: Vec<String> = entities.iter().map(|e| e.to_lowercase()).collect();
@@ -1134,20 +1290,25 @@ impl SemanticConsolidator {
                 .filter(|w| !w.is_empty() && !self.keyword_extractor.is_stop_word(w))
                 .count();
 
-            // Require at least 3 content words for a meaningful statement
-            if content_words < 3 {
+            // Content-word floor. Raised 3 -> 4 as the deliberate offset for the
+            // removed entity gate: a proposition worth storing names at least a
+            // subject, a predicate and something predicated of it, and at three
+            // non-stop-words a 20-char fragment can still be a caption or a
+            // heading. Four is the smallest floor that requires an actual clause
+            // and it costs nothing on real prose (`CONSOLIDATION_MIN_SUPPORT`
+            // remains the filter that decides what is minted).
+            if content_words < CONSOLIDATION_SALIENT_MIN_CONTENT_WORDS {
                 continue;
             }
 
-            // Entity mentions — must have at least 1 to be domain-relevant
+            // Entity mentions are a RANKING signal, never a gate — see the fn doc.
+            // A sentence that names a known entity outranks one that does not, but
+            // an empty `entities` list (NER unavailable or silent) leaves ranking
+            // to content density instead of suppressing the sentence entirely.
             let entity_match_count = entity_lower
                 .iter()
                 .filter(|e| lower.contains(e.as_str()))
                 .count();
-
-            if entity_match_count == 0 {
-                continue;
-            }
 
             let entity_bonus = entity_match_count as f32 * 2.0;
             let score = content_words as f32 + entity_bonus;
@@ -1767,6 +1928,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_reinforced: chrono::Utc::now() - chrono::Duration::days(10),
             fact_type: FactType::Pattern,
+            invalidated_at: None,
+            invalidated_by: None,
+            contradicts: Vec::new(),
         };
         let memory = create_test_memory("reinforcing memory", 0.7);
 
@@ -1792,6 +1956,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_reinforced: chrono::Utc::now(),
             fact_type: FactType::Pattern,
+            invalidated_at: None,
+            invalidated_by: None,
+            contradicts: Vec::new(),
         };
         assert!(!consolidator.should_decay_fact(&recent_fact));
 
@@ -1805,6 +1972,9 @@ mod tests {
             created_at: chrono::Utc::now() - chrono::Duration::days(365),
             last_reinforced: chrono::Utc::now() - chrono::Duration::days(100),
             fact_type: FactType::Pattern,
+            invalidated_at: None,
+            invalidated_by: None,
+            contradicts: Vec::new(),
         };
         assert!(consolidator.should_decay_fact(&old_fact));
     }
@@ -2088,6 +2258,266 @@ mod tests {
         assert!(SemanticConsolidator::is_knowledge_worthy(
             "RocksDB column families reduce file descriptor usage by consolidating multiple stores"
         ));
+    }
+
+    // ── Declarative candidate extraction ────────────────────────────────────
+    //
+    // The regression these pin: the candidate layer produced NOTHING for plain
+    // declarative sentences, so consolidation never had input to cluster, no
+    // facts were minted on ordinary corpora, and the contradiction/invalidation
+    // machinery downstream sat idle. Each test below isolates one of the gates
+    // that caused it.
+
+    /// The demo-corpus sentence, with NO NER entities at all.
+    ///
+    /// This is the exact shape that produced zero candidates: the general
+    /// extractor refused any sentence that did not literally contain one of
+    /// `experience.entities`, so an empty entity list suppressed the entire
+    /// semantic layer. Entities are now a ranking signal, so extraction is
+    /// independent of whether NER emitted anything.
+    #[test]
+    fn declarative_sentence_yields_a_candidate_with_no_ner_entities() {
+        let consolidator = SemanticConsolidator::new();
+        let memory = create_typed_memory(
+            "Initial reports said four crew members were injured in the bridge collapse.",
+            0.3,
+            ExperienceType::Observation,
+            vec![], // NER emitted nothing — the live production condition
+        );
+
+        let candidates = consolidator.extract_fact_candidates(&memory);
+
+        assert!(
+            !candidates.is_empty(),
+            "a plain declarative sentence must mint a candidate without NER entities"
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|(t, _)| t.contains("four crew members were injured")),
+            "the candidate must be the real sentence, got {candidates:?}"
+        );
+    }
+
+    /// The type gate was the second failure in series: `remember` defaults to
+    /// `Observation`, and the declarative extractor ran on `Observation` alone,
+    /// so `Conversation`, `Task` and `Intention` reached ZERO extractors for
+    /// ordinary prose — the other four extractors are keyword banks this
+    /// sentence matches none of.
+    #[test]
+    fn declarative_extractor_runs_on_every_non_operational_type() {
+        let consolidator = SemanticConsolidator::new();
+        let sentence =
+            "Initial reports said four crew members were injured in the bridge collapse.";
+
+        for exp_type in [
+            ExperienceType::Observation,
+            ExperienceType::Conversation,
+            ExperienceType::Task,
+            ExperienceType::Intention,
+            ExperienceType::Decision,
+            ExperienceType::Learning,
+            ExperienceType::Discovery,
+            ExperienceType::Pattern,
+            ExperienceType::Error,
+        ] {
+            let memory = create_typed_memory(sentence, 0.3, exp_type.clone(), vec![]);
+            let candidates = consolidator.extract_fact_candidates(&memory);
+            assert!(
+                !candidates.is_empty(),
+                "{exp_type:?} must produce a declarative candidate; it produced none"
+            );
+        }
+    }
+
+    /// The general extractor must NOT reopen the operational types. Execution
+    /// traces are logs, not knowledge, and they are rejected before any
+    /// extractor runs.
+    #[test]
+    fn operational_types_still_produce_no_candidates() {
+        let consolidator = SemanticConsolidator::new();
+        let sentence =
+            "Initial reports said four crew members were injured in the bridge collapse.";
+
+        for exp_type in [
+            ExperienceType::Context,
+            ExperienceType::Command,
+            ExperienceType::CodeEdit,
+            ExperienceType::FileAccess,
+            ExperienceType::Search,
+        ] {
+            let memory = create_typed_memory(sentence, 0.9, exp_type.clone(), vec![]);
+            assert!(
+                consolidator.extract_fact_candidates(&memory).is_empty(),
+                "{exp_type:?} is an execution trace and must stay silent"
+            );
+        }
+    }
+
+    /// The third failure in series: the extractor demanded `importance >= 0.5`,
+    /// but `calculate_importance` gives `Observation` — the DEFAULT experience
+    /// type — the 0.05 catch-all type weight, so a realistic observation lands
+    /// near 0.23 and could never clear the bar. Importance now scales the
+    /// candidate's confidence instead of deciding whether it exists.
+    #[test]
+    fn low_importance_no_longer_suppresses_declarative_extraction() {
+        let consolidator = SemanticConsolidator::new();
+        let memory = create_typed_memory(
+            "Initial reports said four crew members were injured in the bridge collapse.",
+            0.23, // what a real default-typed observation actually scores
+            ExperienceType::Observation,
+            vec![],
+        );
+
+        let candidates = consolidator.extract_fact_candidates(&memory);
+        assert!(
+            !candidates.is_empty(),
+            "a below-0.5 importance must lower confidence, not erase the candidate"
+        );
+
+        // ...and importance still does its real job: it weights confidence.
+        let low = candidates[0].1;
+        let high_memory = create_typed_memory(
+            "Initial reports said four crew members were injured in the bridge collapse.",
+            0.9,
+            ExperienceType::Observation,
+            vec![],
+        );
+        let high = consolidator.extract_fact_candidates(&high_memory)[0].1;
+        assert!(
+            high > low,
+            "importance must still rank candidates: {high} should exceed {low}"
+        );
+    }
+
+    /// Entities rank, they do not gate. With entities present the sentence that
+    /// mentions one is selected over a denser one that does not; with entities
+    /// absent, selection falls back to content density instead of returning
+    /// nothing.
+    #[test]
+    fn entity_mentions_rank_sentences_rather_than_gating_them() {
+        let consolidator = SemanticConsolidator::new();
+        // The two sentences share an identical tail, so sentence 2 carries
+        // exactly ONE more content word than sentence 1 whatever the stop-word
+        // list contains. Density alone therefore picks sentence 2; a single
+        // entity hit (+2.0) is enough to flip the choice to sentence 1.
+        let content = "The Dali blocked the shipping channel for weeks. \
+                       The salvage barge blocked the shipping channel for weeks.";
+
+        let with_entity = create_typed_memory(
+            content,
+            0.6,
+            ExperienceType::Observation,
+            vec!["Dali".to_string()],
+        );
+        let picked = consolidator.extract_fact_candidates(&with_entity);
+        assert!(
+            picked.iter().any(|(t, _)| t.contains("Dali")),
+            "an entity mention must outrank raw density, got {picked:?}"
+        );
+
+        let without_entity = create_typed_memory(content, 0.6, ExperienceType::Observation, vec![]);
+        let fallback = consolidator.extract_fact_candidates(&without_entity);
+        assert!(
+            !fallback.is_empty(),
+            "with no entities the densest sentence must still be extracted"
+        );
+        assert!(
+            fallback.iter().any(|(t, _)| t.contains("salvage barge")),
+            "without an entity signal, density decides; got {fallback:?}"
+        );
+    }
+
+    /// Pins `CONSOLIDATION_SALIENT_MIN_CONTENT_WORDS`, the structural half of
+    /// what replaced the entity gate. Three content words still admits a
+    /// caption; four requires a clause.
+    #[test]
+    fn content_word_floor_separates_a_caption_from_a_clause() {
+        assert_eq!(
+            CONSOLIDATION_SALIENT_MIN_CONTENT_WORDS, 4,
+            "this test pins the floor; update both together"
+        );
+
+        let consolidator = SemanticConsolidator::new();
+        // State the stop-word assumptions the fixtures rely on, so a change to
+        // the stop-word list fails HERE with a readable reason.
+        for w in ["the", "and", "in"] {
+            assert!(
+                consolidator.keyword_extractor.is_stop_word(w),
+                "fixture assumes '{w}' is a stop word"
+            );
+        }
+        for w in ["barge", "tugboat", "harbor", "sank"] {
+            assert!(
+                !consolidator.keyword_extractor.is_stop_word(w),
+                "fixture assumes '{w}' is a content word"
+            );
+        }
+
+        // 3 content words (barge, tugboat, harbor) — long enough for every other
+        // gate, so the floor is the only thing that can reject it.
+        let caption = "The barge and the tugboat in the harbor";
+        assert!(
+            caption.len() >= 25,
+            "must clear is_knowledge_worthy on length"
+        );
+        assert!(consolidator
+            .extract_salient_statement(caption, &[])
+            .is_none());
+
+        // 4 content words — the same fixture plus a predicate.
+        let clause = "The barge and the tugboat in the harbor sank";
+        assert_eq!(
+            consolidator.extract_salient_statement(clause, &[]),
+            Some(clause.to_string()),
+            "four content words is a clause and must be extracted"
+        );
+    }
+
+    /// The whole point of extracting candidates: repeated mentions must reach
+    /// the support threshold and mint a fact, while a single mention must not.
+    /// `CONSOLIDATION_MIN_SUPPORT` is the corroboration filter that replaced the
+    /// entity gate, so this is the test that shows it carrying the load.
+    #[test]
+    fn repeated_declarative_mentions_reach_the_support_threshold() {
+        let consolidator = SemanticConsolidator::with_thresholds(2, 0);
+
+        let m1 = create_typed_memory(
+            "Initial reports said four crew members were injured in the bridge collapse.",
+            0.3,
+            ExperienceType::Observation,
+            vec![],
+        );
+        let m2 = create_typed_memory(
+            "Early reports said four crew members were injured in the bridge collapse.",
+            0.3,
+            ExperienceType::Observation,
+            vec![],
+        );
+
+        // One mention is an anecdote — no fact.
+        let single = consolidator.consolidate(std::slice::from_ref(&m1));
+        assert_eq!(
+            single.facts_extracted, 0,
+            "a single mention must not mint a fact: {:?}",
+            single.new_facts
+        );
+
+        // Two independent mentions are corroboration — a fact.
+        let paired = consolidator.consolidate(&[m1, m2]);
+        assert!(
+            paired.facts_extracted >= 1,
+            "two corroborating memories must mint a fact, got {}",
+            paired.facts_extracted
+        );
+        assert!(
+            paired
+                .new_facts
+                .iter()
+                .any(|f| f.fact.contains("crew members were injured")),
+            "the minted fact must be the real sentence, got {:?}",
+            paired.new_facts
+        );
     }
 
     #[test]

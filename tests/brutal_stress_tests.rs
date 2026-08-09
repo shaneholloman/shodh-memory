@@ -683,9 +683,14 @@ fn test_brutal_graph_maintenance_cycles() {
 
     // Verify graph still works
     let stats = system.graph_stats();
+    // The original assertion (`node_count > 0 || edge_count >= 0`) was a
+    // tautology on unsigned types — unfalsifiable, and a deny-level clippy
+    // error. The real invariant this test can hold: edges cannot exist
+    // without nodes to connect.
     assert!(
-        stats.node_count > 0 || stats.edge_count >= 0,
-        "Graph should be intact"
+        stats.edge_count == 0 || stats.node_count > 0,
+        "graph has {} edges but no nodes",
+        stats.edge_count
     );
 }
 
@@ -1298,9 +1303,15 @@ fn test_brutal_graph_consistency() {
         handle.join().expect("Thread panicked");
     }
 
-    // Verify graph is still valid
+    // Verify graph is still valid. The original (`node_count >= 0` on an
+    // unsigned type) was unfalsifiable; the holdable invariant is the same
+    // one as above — edges require nodes.
     let stats = system.graph_stats();
-    assert!(stats.node_count >= 0, "Graph should have valid node count");
+    assert!(
+        stats.edge_count == 0 || stats.node_count > 0,
+        "graph has {} edges but no nodes",
+        stats.edge_count
+    );
 }
 
 /// Test rapid creation and deletion simulation (via importance decay)

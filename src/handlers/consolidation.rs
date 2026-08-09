@@ -710,7 +710,11 @@ pub async fn get_consolidation_report(
             })?
             .with_timezone(&chrono::Utc)
     } else {
-        now - chrono::Duration::hours(1)
+        // Default window is 24h. Consolidation cycles run on multi-hour
+        // schedules, so the previous 1h default reported "no activity" on
+        // stores that consolidated earlier the same day — and clients already
+        // document this default as 24 hours.
+        now - chrono::Duration::hours(24)
     };
 
     let until = if let Some(until_str) = &req.until {

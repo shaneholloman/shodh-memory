@@ -541,6 +541,11 @@ impl LegacyExperienceV1 {
             ner_entities: Vec::new(),
             cooccurrence_pairs: Vec::new(),
             importance_override: None,
+            // Pre-dates toponym resolution by several schema versions. Left
+            // empty rather than resolved on read: resolution belongs at
+            // remember time, and silently minting coordinates during a legacy
+            // decode would make old records look like they always had them.
+            toponyms: Vec::new(),
         }
     }
 }
@@ -696,6 +701,23 @@ impl LegacyMemoryV2 {
 ///
 /// Returns (Memory, needs_migration) where needs_migration=true means the data
 /// was in a legacy format and should be re-written for future performance.
+/// Postcard defaults for every trailing `MemoryFlat` field added after the
+/// postcard cutover (#192), in field order: `toponyms: Vec<Toponym>` (empty =
+/// varint `0x00`).
+///
+/// `parent_id` is NOT listed: it was added in January, before the April
+/// postcard cutover, so every postcard-era record already carries it.
+///
+/// `decode_raw_compat` appends these one at a time, so a record missing any
+/// suffix of these fields decodes (postcard has no `#[serde(default)]` EOF
+/// tolerance). Keep in sync with any new trailing field — and note that this
+/// mechanism ONLY works for fields appended at the end of `MemoryFlat`. A field
+/// added to `Experience` instead lands mid-payload, where an old record decodes
+/// to silently wrong values rather than failing; that is why
+/// `Experience::toponyms` is `#[serde(skip)]` and carried at the `MemoryFlat`
+/// tail.
+const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00];
+
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
 
@@ -703,10 +725,14 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     if let Some((version, payload)) = crate::serialization::unwrap_sho(data) {
         match version {
             SHO_VERSION_POSTCARD => {
-                // Current format: postcard — single decode, no fallback
-                let memory: Memory = crate::serialization::decode_raw(payload)
-                    .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
-                Ok((memory, false))
+                // Current format: postcard, tolerating records written before
+                // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed.
+                let (memory, defaulted): (Memory, bool) =
+                    crate::serialization::decode_raw_compat(payload, MEMORY_DEFAULT_SUFFIX)
+                        .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
+                // `defaulted` marks the record for rewrite in the current schema,
+                // the same signal the legacy-format branches return.
+                Ok((memory, defaulted))
             }
             SHO_VERSION_BINCODE2 => {
                 // Legacy SHO v1: bincode 2.x — decode and mark for migration
