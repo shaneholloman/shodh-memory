@@ -718,10 +718,32 @@ fn personalized_pagerank(
     // different index assignment reorders the power-iteration matrix-vector
     // sums, and f32 addition is non-associative, so the stationary masses wobble
     // by a few ULPs between recall repeats — enough to flip near-tie episode
-    // ranks across the final-sort quantization boundary. Sorting makes the node
-    // ordering, and therefore the PPR result, bit-reproducible.
-    let mut frontier: Vec<Uuid> = seeds.keys().copied().collect();
-    frontier.sort_unstable();
+    // ranks across the final-sort quantization boundary.
+    //
+    // Sort by entity NAME, not by Uuid: a Uuid sort is deterministic within one
+    // process but entity UUIDs are re-rolled by every ingest, so across two
+    // ingests of the same corpus it is a random permutation — the RH-12
+    // cross-repeat determinism guard sees the resulting ULP wobble. Names are a
+    // pure function of graph content; uuid stays as the total-order fallback
+    // for the pathological duplicate-name case.
+    let mut frontier: Vec<Uuid> = {
+        let mut named: Vec<(String, Uuid)> = seeds
+            .keys()
+            .map(|u| {
+                (
+                    graph
+                        .get_entity(u)
+                        .ok()
+                        .flatten()
+                        .map(|e| e.name)
+                        .unwrap_or_default(),
+                    *u,
+                )
+            })
+            .collect();
+        named.sort_unstable();
+        named.into_iter().map(|(_, u)| u).collect()
+    };
     let mut visited: HashSet<Uuid> = frontier.iter().copied().collect();
     for &s in &frontier {
         ppr_intern(s, &mut nodes, &mut node_idx, &mut adj);
@@ -851,10 +873,15 @@ fn personalized_pagerank(
         w / mention_count as f32
     };
     let mut p = vec![0.0_f32; n];
-    let weighted: Vec<(usize, f32)> = seeds
+    let mut weighted: Vec<(usize, f32)> = seeds
         .iter()
         .filter_map(|(u, w)| node_idx.get(u).map(|&i| (i, spec_weight(u, *w))))
         .collect();
+    // `seeds` is a HashMap, so `weighted` arrives in per-process-random order
+    // and `zsum` (a non-associative f32 sum) would differ in its last bits
+    // between two ingests of the same corpus. Pin the summation order to the
+    // interned node index, which is repeat-stable (name-sorted frontier).
+    weighted.sort_unstable_by_key(|(i, _)| *i);
     let zsum: f32 = weighted.iter().map(|(_, w)| *w).sum::<f32>().max(1e-9);
     for (i, w) in weighted {
         p[i] += w / zsum;
@@ -1723,11 +1750,17 @@ pub fn spreading_activation_retrieve_with_stats(
     // activated entities sums their activations via `current.0 +=` below.
     // f32 addition is non-associative, so iterating `activation_map` in
     // per-process-random HashMap order yields slightly different episode
-    // scores and flips near-tie graph-leg ranks between repeats. Sort the
-    // source entities by Uuid to pin the summation order. This is the
+    // scores and flips near-tie graph-leg ranks between repeats. This is the
     // dominant query-time residual: episode score IS the graph-leg ranking.
+    //
+    // Sort by activation VALUE, not by Uuid: entity UUIDs are re-rolled by
+    // every ingest, so a uuid order is deterministic in-process but a random
+    // permutation across two ingests of the same corpus (the RH-12 guard's
+    // comparison). A value order is a pure function of repeat-stable data,
+    // and the uuid fallback among EQUAL values is harmless for determinism:
+    // swapping equal addends leaves every f32 partial sum bit-identical.
     let mut activation_entries: Vec<(&Uuid, &f32)> = activation_map.iter().collect();
-    activation_entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    activation_entries.sort_unstable_by(|a, b| b.1.total_cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
     for (entity_uuid, entity_activation) in activation_entries {
         let episodes = graph.get_episodes_by_entity(entity_uuid)?;
@@ -1874,8 +1907,23 @@ pub fn spreading_activation_retrieve_with_stats(
         }
     }
 
-    // Step 6: Sort by final score (descending)
-    scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
+    // Step 6: Sort by final score (descending).
+    //
+    // Content tie-break: without one, equal-score candidates keep the
+    // `activated_memories` HashMap iteration order — random per process AND
+    // per ingest — and the truncations below (cap 200, then graph_leg_k) cut
+    // through equal-score plateaus, so leg MEMBERSHIP would differ between
+    // two ingests of the same corpus (RH-12 guard). Content is repeat-stable
+    // and unique per store (#109 content-hash dedup at remember()), so this
+    // is a total order.
+    scored_memories.sort_by(|a, b| {
+        b.final_score.total_cmp(&a.final_score).then_with(|| {
+            a.memory
+                .experience
+                .content
+                .cmp(&b.memory.experience.content)
+        })
+    });
 
     // Bound the candidate set before the O(n²) lateral-inhibition pass below. The caller
     // keeps only the top ~200 graph candidates anyway, so this loses nothing — but without
@@ -1892,8 +1940,15 @@ pub fn spreading_activation_retrieve_with_stats(
         for (i, penalty) in penalties.iter().enumerate() {
             scored_memories[i].final_score -= penalty;
         }
-        // Re-sort after inhibition reweighting
-        scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
+        // Re-sort after inhibition reweighting (same total order as Step 6).
+        scored_memories.sort_by(|a, b| {
+            b.final_score.total_cmp(&a.final_score).then_with(|| {
+                a.memory
+                    .experience
+                    .content
+                    .cmp(&b.memory.experience.content)
+            })
+        });
     }
 
     // Step 7: Apply limit. Default = query.max_results, which makes the graph leg a
