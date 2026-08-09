@@ -37,6 +37,12 @@ import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 import { DrainController } from "./drain";
 import {
+  decorateTool,
+  isReadOnlyTool,
+  TOOL_OUTPUT_SCHEMAS,
+  type ToolDefinition,
+} from "./tool-metadata";
+import {
   shodhDataRoot,
   loadOrCreatePersistedApiKey,
   publishSharedApiKey,
@@ -552,6 +558,96 @@ function getType(m: Memory): string {
   return m.memory_type || m.experience?.memory_type || m.experience?.experience_type || 'Observation';
 }
 
+// =============================================================================
+// STRUCTURED OUTPUT HELPERS
+//
+// These build the `structuredContent` payloads that accompany (never replace)
+// the formatted text, matching the schemas declared in ./tool-metadata.ts.
+// Undefined-valued keys are dropped so the payload carries only what the
+// backend actually returned rather than a wall of nulls.
+// =============================================================================
+
+/** Drop undefined-valued keys so optional schema fields stay genuinely absent. */
+function compact(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined && v !== null) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Structured form of a memory, matching the MEMORY_ITEM schema fragment.
+ *
+ * `full` mirrors the tool's own full_content flag so the structured body is
+ * exactly the body the text rendered — a consumer reading structuredContent
+ * must not silently get a different amount of text than the human-readable
+ * channel. `content_truncated` states which it is, so a consumer never has to
+ * guess whether it holds the whole memory.
+ */
+function structuredMemory(m: Memory, full: boolean = false): Record<string, unknown> {
+  const body = getContent(m);
+  const truncated = !full && body.length > MEMORY_PREVIEW_MAX;
+  return compact({
+    id: m.id,
+    content: truncated ? body.slice(0, MEMORY_PREVIEW_MAX) : body,
+    content_truncated: truncated,
+    memory_type: getType(m),
+    tags: m.experience?.tags,
+    score: m.score,
+    importance: m.importance,
+    created_at: m.created_at,
+    tier: m.tier,
+  });
+}
+
+/** Wire shape of a todo as returned by /api/todos/* — only the fields projected. */
+interface TodoWire {
+  id?: string;
+  seq_num?: number;
+  project_prefix?: string | null;
+  project?: string | null;
+  content?: string;
+  status?: string;
+  priority?: string;
+  due_date?: string | null;
+  created_at?: string;
+  score?: number;
+  similarity_score?: number | null;
+}
+
+/**
+ * Structured form of a todo, matching the TODO_ITEM schema fragment.
+ *
+ * This is a PROJECTION, not a pass-through: the wire todo carries the full
+ * embedding vector (hundreds of floats) and the entire comment thread, and
+ * echoing those into structuredContent would dwarf the text channel it is
+ * meant to complement.
+ *
+ * `short_id` mirrors `Todo::short_id()` in src/memory/types.rs exactly —
+ * "{project_prefix|SHO}-{seq_num}" when seq_num > 0, otherwise "SHO-{first 4
+ * chars of the uuid}".
+ */
+function structuredTodo(t: TodoWire): Record<string, unknown> {
+  const shortId =
+    t.seq_num && t.seq_num > 0
+      ? `${t.project_prefix || "SHO"}-${t.seq_num}`
+      : t.id
+        ? `SHO-${t.id.slice(0, 4)}`
+        : undefined;
+  return compact({
+    id: t.id,
+    short_id: shortId,
+    content: t.content,
+    status: t.status,
+    priority: t.priority,
+    project: t.project ?? undefined,
+    score: t.score ?? t.similarity_score ?? undefined,
+    created_at: t.created_at,
+    due_date: t.due_date ?? undefined,
+  });
+}
+
 // Helper: Sleep for retry delays
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -645,6 +741,14 @@ function formatSurfacedMemories(memories: SurfacedMemory[]): string {
 function streamToolCall(toolName: string, args: Record<string, unknown>, resultText: string): void {
   // Skip ingesting memory management tools to avoid noise
   if (["remember", "recall", "forget", "list_memories"].includes(toolName)) return;
+
+  // Tools annotated readOnlyHint:true must not modify the store, and this path
+  // fires on EVERY call (tool output is essentially always over the streaming
+  // minimum), so without the gate every read tool would write a "Tool: X /
+  // Result: ..." memory. That is also circular by this function's own stated
+  // intent — recording what the store already knows back into the store.
+  // Conversation capture stays the job of proactive_context and the hooks.
+  if (isReadOnlyTool(toolName)) return;
 
   const argsStr = JSON.stringify(args, null, 2);
   const content = `Tool: ${toolName}\nInput: ${argsStr}\nResult: ${resultText.slice(0, 1000)}${resultText.length > 1000 ? "..." : ""}`;
@@ -740,6 +844,26 @@ interface LineageEdgeWire {
   branch_id: string | null;
   created_at: string;
   reinforcement_count: number;
+}
+
+/**
+ * Structured form of a lineage edge, matching the LINEAGE_EDGE schema fragment.
+ *
+ * The wire calls the identifier `id`; both the formatted text and
+ * validate_causal_link's parameter call it `edge_id`, so the structured channel
+ * follows the surface rather than the wire.
+ */
+function structuredLineageEdge(edge: LineageEdgeWire): Record<string, unknown> {
+  return {
+    edge_id: edge.id,
+    from: edge.from,
+    to: edge.to,
+    relation: edge.relation,
+    confidence: edge.confidence,
+    source: edge.source,
+    created_at: edge.created_at,
+    reinforcement_count: edge.reinforcement_count,
+  };
 }
 
 function formatLineageEdge(
@@ -849,10 +973,13 @@ const server = new Server(
   }
 );
 
-// List available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
+// Tool definitions. Behavioural annotations (readOnlyHint/destructiveHint/
+// idempotentHint/openWorldHint, plus a display title) and output schemas are
+// NOT written inline here — they live in ./tool-metadata.ts as a single source
+// of truth, because the read-only set also gates ambient memory ingestion
+// (see autoStreamContext / streamToolCall). decorateTool() merges them in and
+// throws if a tool is missing an entry, so the two can never drift.
+const TOOL_DEFINITIONS: ToolDefinition[] = [
       {
         name: "remember",
         description: "Store a memory for future recall. Use this to remember important information, decisions, user preferences, project context, or anything you want to recall later.",
@@ -2051,14 +2178,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["memory_ids", "outcome"],
         },
       },
-    ],
-  };
+];
+
+// List available tools, decorated with annotations and output schemas.
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  return { tools: TOOL_DEFINITIONS.map(decorateTool) };
 });
 
 // Auto-stream context from tool arguments (captures conversation intent)
 function autoStreamContext(toolName: string, args: Record<string, unknown>): void {
   // Skip tools that already handle their own streaming or are meta/diagnostic
   if (["proactive_context", "streaming_status", "token_status", "reset_token_session"].includes(toolName)) return;
+
+  // Tools annotated readOnlyHint:true must not modify the store. Streaming a
+  // memory here would make that annotation false — a client auto-approving
+  // "safe" tools would then silently write on every read. The annotation is the
+  // contract; this gate is what makes it true.
+  if (isReadOnlyTool(toolName)) return;
 
   // Extract meaningful context from tool arguments
   let context = "";
@@ -2112,7 +2248,19 @@ const handleCallTool = async (request: CallToolRequest) => {
   }
 
   // Result type for tool responses
-  type ToolResult = { content: { type: string; text: string }[]; isError?: boolean };
+  // Result type for tool responses.
+  //
+  // `structuredContent` is the machine-readable channel that accompanies the
+  // formatted text; `content` is always populated as well (the MCP spec expects
+  // it for backwards compatibility, and the formatted text reads better inline
+  // for small results). Any tool declaring an outputSchema MUST set this on
+  // every non-error return — the SDK client throws when an outputSchema is
+  // declared and structuredContent is absent on a successful call.
+  type ToolResult = {
+    content: { type: string; text: string }[];
+    isError?: boolean;
+    structuredContent?: Record<string, unknown>;
+  };
 
   // Inner function to execute tool logic - allows us to capture result for auto-ingest
   const executeTool = async (): Promise<ToolResult> => {
@@ -2239,6 +2387,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response }],
+          structuredContent: { id: result.id, memory_type: type, tags },
         };
       }
 
@@ -2382,6 +2531,33 @@ const handleCallTool = async (request: CallToolRequest) => {
         const stats = result.retrieval_stats;
         const lineage = result.lineage || [];
 
+        // Structured payload for both the empty and non-empty paths. A tool
+        // that declares an outputSchema must emit structuredContent on EVERY
+        // successful return, including "nothing found" — the SDK client rejects
+        // a schema'd success result that omits it.
+        const recallStructured = (): Record<string, unknown> => ({
+          query,
+          mode,
+          memories: memories.map((m) => structuredMemory(m, full_content)),
+          todos: todos.map((t) =>
+            compact({
+              id: t.id,
+              short_id: t.short_id,
+              content: t.content,
+              status: t.status,
+              priority: t.priority,
+              project: t.project,
+              score: t.score,
+              created_at: t.created_at,
+            }),
+          ),
+          lineage: lineage.map((e) =>
+            compact({ from: e.from, to: e.to, relation: e.relation, confidence: e.confidence }),
+          ),
+          memory_count: memories.length,
+          todo_count: todos.length,
+        });
+
         if (memories.length === 0 && todos.length === 0) {
           return {
             content: [
@@ -2390,6 +2566,7 @@ const handleCallTool = async (request: CallToolRequest) => {
                 text: `🐘 No memories or todos found for: "${query}"\n   Mode: ${mode}`,
               },
             ],
+            structuredContent: recallStructured(),
           };
         }
 
@@ -2550,6 +2727,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response }],
+          structuredContent: recallStructured(),
         };
       }
 
@@ -2572,9 +2750,16 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         const tagMemories = tagResult.memories || [];
 
+        const tagStructured = (): Record<string, unknown> => ({
+          tags,
+          memories: tagMemories.map((m) => structuredMemory(m, full_content)),
+          count: tagMemories.length,
+        });
+
         if (tagMemories.length === 0) {
           return {
             content: [{ type: "text", text: `No memories found matching tags: ${tags.join(", ")}` }],
+            structuredContent: tagStructured(),
           };
         }
 
@@ -2592,6 +2777,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: tagResponse.trimEnd() }],
+          structuredContent: tagStructured(),
         };
       }
 
@@ -2718,12 +2904,18 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         const memories = (result.memories || []).slice(0, limit);
 
+        const listStructured = (): Record<string, unknown> => ({
+          memories: memories.map((m) => structuredMemory(m)),
+          count: memories.length,
+        });
+
         if (memories.length === 0) {
           let response = `🐘 Memory List\n`;
           response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
           response += `No memories stored yet.`;
           return {
             content: [{ type: "text", text: response }],
+            structuredContent: listStructured(),
           };
         }
 
@@ -2765,6 +2957,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response.trimEnd() }],
+          structuredContent: listStructured(),
         };
       }
 
@@ -2783,16 +2976,24 @@ const handleCallTool = async (request: CallToolRequest) => {
       }
 
       case "memory_stats": {
+        // Wire shape of GET /api/users/{id}/stats. The tier counts and
+        // total_retrievals are returned by the current backend but were missing
+        // from this interface; they are declared here because the structured
+        // payload passes them through.
         interface MemoryStats {
           total_memories: number;
-          memory_types: Record<string, number>;
-          total_importance: number;
-          avg_importance: number;
-          average_importance: number; // API uses this name
+          memory_types?: Record<string, number>;
+          total_importance?: number;
+          avg_importance?: number;
+          average_importance?: number; // API uses this name
           graph_nodes: number;
           graph_edges: number;
-          indexed_vectors: number;
-          vector_index_count: number; // API uses this name
+          indexed_vectors?: number;
+          vector_index_count?: number; // API uses this name
+          working_memory_count?: number;
+          session_memory_count?: number;
+          long_term_memory_count?: number;
+          total_retrievals?: number;
         }
 
         const result = await apiCall<MemoryStats>(`/api/users/${encodeURIComponent(USER_ID)}/stats`, "GET");
@@ -2835,6 +3036,18 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response.trimEnd() }],
+          structuredContent: compact({
+            total_memories: result.total_memories ?? 0,
+            working_memory_count: result.working_memory_count,
+            session_memory_count: result.session_memory_count,
+            long_term_memory_count: result.long_term_memory_count,
+            vector_index_count: indexedCount,
+            average_importance: avgImportance,
+            total_retrievals: result.total_retrievals,
+            graph_nodes: result.graph_nodes,
+            graph_edges: result.graph_edges,
+            memory_types: result.memory_types,
+          }),
         };
       }
 
@@ -2869,6 +3082,13 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response }],
+          structuredContent: {
+            is_healthy: result.is_healthy,
+            total_storage: result.total_storage,
+            total_indexed: result.total_indexed,
+            orphaned_count: result.orphaned_count,
+            orphaned_ids: result.orphaned_ids || [],
+          },
         };
       }
 
@@ -3006,6 +3226,20 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response.trimEnd() }],
+          structuredContent: {
+            backups: (result.backups || []).map((b) =>
+              compact({
+                backup_id: b.backup_id,
+                created_at: b.created_at,
+                backup_type: b.backup_type,
+                size_bytes: b.size_bytes,
+                memory_count: b.memory_count,
+                checksum: b.checksum,
+                sequence_number: b.sequence_number,
+              }),
+            ),
+            count: result.count ?? (result.backups || []).length,
+          },
         };
       }
 
@@ -3199,8 +3433,20 @@ const handleCallTool = async (request: CallToolRequest) => {
         // including <task-notification> XML which overwhelms BM25 and embedding.
         const cleanedContext = stripSystemNoise(context).slice(0, MAX_CONTEXT_LENGTH);
         if (cleanedContext.length < PROACTIVE_MIN_CONTEXT_LENGTH) {
+          // Returns before the backend call, so nothing was surfaced and
+          // nothing was ingested regardless of the auto_ingest argument.
           return {
             content: [{ type: "text", text: "No relevant memories surfaced (context too short after cleaning).\n\n[Latency: 0.0ms]" }],
+            structuredContent: {
+              memories: [],
+              detected_entities: [],
+              todos: [],
+              facts: [],
+              count: 0,
+              // Returns before the backend call, so nothing could be ingested
+              // whatever the argument said.
+              ingest_requested: false,
+            },
           };
         }
 
@@ -3249,6 +3495,53 @@ const handleCallTool = async (request: CallToolRequest) => {
         const entities = result.detected_entities || [];
 
         const facts = result.relevant_facts || [];
+
+        // Shared by the "nothing surfaced" and the fully-populated returns.
+        //
+        // `ingest_requested` echoes the argument rather than claiming an
+        // outcome. The backend spawns the ingest in a background task and waits
+        // only 50ms to read the id back (handlers/recall.rs), so
+        // `ingested_memory_id` is frequently absent for contexts that WERE
+        // stored — deriving a boolean "auto_ingested" from it would report
+        // false while a memory was being written.
+        const proactiveStructured = (): Record<string, unknown> => ({
+          memories: memories.map((m) => {
+            const body = m.content ?? "";
+            const truncated = !full_content && body.length > MEMORY_PREVIEW_MAX;
+            return compact({
+              id: m.id,
+              content: truncated ? body.slice(0, MEMORY_PREVIEW_MAX) : body,
+              content_truncated: truncated,
+              memory_type: m.memory_type,
+              score: m.score,
+              importance: m.importance,
+              tags: m.tags,
+              relevance_reason: m.relevance_reason,
+              matched_entities: m.matched_entities,
+              created_at: m.created_at,
+            });
+          }),
+          detected_entities: entities.map((e) => compact({ name: e.name, entity_type: e.entity_type })),
+          todos: (result.relevant_todos || []).map((t) =>
+            compact({
+              id: t.id,
+              short_id: t.short_id,
+              content: t.content,
+              status: t.status,
+              priority: t.priority,
+              project: t.project ?? undefined,
+              score: t.similarity_score ?? undefined,
+            }),
+          ),
+          facts: facts.map((f) =>
+            compact({ id: f.id, fact: f.fact, confidence: f.confidence, support_count: f.support_count }),
+          ),
+          count: memories.length,
+          ingest_requested: auto_ingest,
+          ...(result.ingested_memory_id ? { ingested_memory_id: result.ingested_memory_id } : {}),
+          ...(result.latency_ms !== undefined ? { latency_ms: result.latency_ms } : {}),
+        });
+
         if (memories.length === 0 && result.reminder_count === 0 && result.todo_count === 0 && facts.length === 0) {
           const entityList = entities.length > 0
             ? `\n\nDetected entities: ${entities.map(e => `"${e.name}" (${e.entity_type})`).join(', ')}`
@@ -3266,6 +3559,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
           return {
             content: [{ type: "text", text: emptyText }],
+            structuredContent: proactiveStructured(),
           };
         }
 
@@ -3417,6 +3711,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: responseText }],
+          structuredContent: proactiveStructured(),
         };
       }
 
@@ -3972,9 +4267,27 @@ const handleCallTool = async (request: CallToolRequest) => {
           status: status === "all" ? null : status,
         });
 
+        const remindersStructured = (): Record<string, unknown> => ({
+          status_filter: status,
+          reminders: (result.reminders || []).map((r) =>
+            compact({
+              id: r.id,
+              content: r.content,
+              status: r.status,
+              trigger_type: r.trigger_type,
+              due_at: r.due_at ?? undefined,
+              created_at: r.created_at,
+              priority: r.priority,
+              overdue_seconds: r.overdue_seconds ?? undefined,
+            }),
+          ),
+          count: result.count ?? (result.reminders || []).length,
+        });
+
         if (result.count === 0) {
           return {
             content: [{ type: "text", text: `No ${status === "all" ? "" : status + " "}reminders found.` }],
+            structuredContent: remindersStructured(),
           };
         }
 
@@ -3998,6 +4311,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response }],
+          structuredContent: remindersStructured(),
         };
       }
 
@@ -4090,6 +4404,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: result.formatted }],
+          structuredContent: structuredTodo(result.todo as TodoWire),
         };
       }
 
@@ -4119,7 +4434,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         interface ListTodosResponse {
           success: boolean;
-          todos: unknown[];
+          todos: TodoWire[];
           projects: unknown[];
           formatted: string;
           count: number;
@@ -4139,6 +4454,11 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: result.formatted }],
+          structuredContent: {
+            todos: (result.todos || []).map(structuredTodo),
+            count: (result.todos || []).length,
+            ...(result.count !== undefined ? { total: result.count } : {}),
+          },
         };
       }
 
@@ -4270,9 +4590,29 @@ const handleCallTool = async (request: CallToolRequest) => {
       }
 
       case "list_projects": {
+        // `projects` arrives as (Project, ProjectStats) tuples — see
+        // handlers/todos.rs list_projects — hence the pair type.
+        interface ProjectWire {
+          id?: string;
+          name?: string;
+          prefix?: string | null;
+          description?: string | null;
+          status?: string;
+          parent_id?: string | null;
+        }
+        interface ProjectStatsWire {
+          total?: number;
+          backlog?: number;
+          todo?: number;
+          in_progress?: number;
+          blocked?: number;
+          done?: number;
+          cancelled?: number;
+        }
         interface ListProjectsResponse {
           success: boolean;
-          projects: unknown[];
+          count?: number;
+          projects: [ProjectWire, ProjectStatsWire][];
           formatted: string;
         }
 
@@ -4280,8 +4620,24 @@ const handleCallTool = async (request: CallToolRequest) => {
           user_id: USER_ID,
         });
 
+        const projectPairs = result.projects || [];
+
         return {
           content: [{ type: "text", text: result.formatted }],
+          structuredContent: {
+            projects: projectPairs.map(([p, stats]) =>
+              compact({
+                id: p?.id,
+                name: p?.name,
+                prefix: p?.prefix ?? undefined,
+                description: p?.description ?? undefined,
+                status: p?.status,
+                parent_id: p?.parent_id ?? undefined,
+                stats: stats ? compact({ ...stats }) : undefined,
+              }),
+            ),
+            count: result.count ?? projectPairs.length,
+          },
         };
       }
 
@@ -4324,8 +4680,10 @@ const handleCallTool = async (request: CallToolRequest) => {
       }
 
       case "todo_stats": {
+        // Flat status counts (UserTodoStats), passed through as-is rather than
+        // reshaped — a renaming layer would drift from the backend.
         interface TodoStatsResponse {
-          stats: unknown;
+          stats: Record<string, number>;
           formatted: string;
         }
 
@@ -4335,6 +4693,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: result.formatted }],
+          structuredContent: { total: 0, ...(result.stats || {}) },
         };
       }
 
@@ -4343,7 +4702,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         interface ListSubtasksResponse {
           success: boolean;
-          todos: unknown[];
+          todos: TodoWire[];
           formatted: string;
         }
 
@@ -4352,8 +4711,15 @@ const handleCallTool = async (request: CallToolRequest) => {
           "GET"
         );
 
+        const subtasks = result.todos || [];
+
         return {
           content: [{ type: "text", text: result.formatted }],
+          structuredContent: {
+            parent_id,
+            subtasks: subtasks.map(structuredTodo),
+            count: subtasks.length,
+          },
         };
       }
 
@@ -4388,10 +4754,18 @@ const handleCallTool = async (request: CallToolRequest) => {
       case "list_todo_comments": {
         const { todo_id } = args as { todo_id: string };
 
+        interface CommentWire {
+          id?: string;
+          content?: string;
+          author?: string;
+          comment_type?: string;
+          created_at?: string;
+          updated_at?: string | null;
+        }
         interface CommentListResponse {
           success: boolean;
           count: number;
-          comments: unknown[];
+          comments: CommentWire[];
           formatted: string;
         }
 
@@ -4400,8 +4774,23 @@ const handleCallTool = async (request: CallToolRequest) => {
           "GET"
         );
 
+        const comments = result.comments || [];
+
         return {
           content: [{ type: "text", text: result.formatted }],
+          structuredContent: {
+            todo_id,
+            comments: comments.map((c) =>
+              compact({
+                id: c.id,
+                content: c.content,
+                author: c.author,
+                comment_type: c.comment_type,
+                created_at: c.created_at,
+              }),
+            ),
+            count: result.count ?? comments.length,
+          },
         };
       }
 
@@ -4492,8 +4881,11 @@ const handleCallTool = async (request: CallToolRequest) => {
         }
 
         if (!memory) {
+          // Reported as a successful call rather than an error (unchanged
+          // behaviour); the structured payload says so explicitly.
           return {
             content: [{ type: "text", text: `Memory not found: ${memory_id}` }],
+            structuredContent: { found: false, id: memory_id },
           };
         }
 
@@ -4519,6 +4911,21 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         return {
           content: [{ type: "text", text: response }],
+          structuredContent: compact({
+            found: true,
+            id: memory.id,
+            // read_memory's whole purpose is the untruncated body, so the
+            // structured channel carries it in full too.
+            content: memory.experience.content,
+            memory_type: memory.experience.experience_type,
+            entities: memory.experience.entities,
+            created_at: memory.created_at,
+            importance: memory.importance,
+            tier: memory.tier,
+            parent_id: memory.parent_id,
+            children_ids: memory.children_ids,
+            children_count: memory.children_count,
+          }),
         };
       }
 
@@ -4579,6 +4986,20 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         const edges = trace.edges || [];
 
+        // The text render caps how many edges it prints; the structured payload
+        // deliberately does not — a consumer parsing it should see the whole
+        // traced chain, not the display subset.
+        const traceStructured = (): Record<string, unknown> =>
+          compact({
+            memory_id: trace.root ?? resolvedId,
+            direction,
+            root_cause_id: rootCause?.root_cause_id ?? undefined,
+            edges: edges.map(structuredLineageEdge),
+            path: trace.path,
+            depth_reached: trace.depth,
+            edge_count: edges.length,
+          });
+
         if (edges.length === 0) {
           const hint = direction === "both"
             ? "This memory has no causal edges at all yet."
@@ -4588,6 +5009,7 @@ const handleCallTool = async (request: CallToolRequest) => {
               type: "text",
               text: `🔗 No causal edges found ${direction} from ${resolvedId} (depth ${depth}).\n${hint}\nEdges are inferred automatically at ingest from type + entity overlap + temporal order, or recorded explicitly with add_causal_link.`,
             }],
+            structuredContent: traceStructured(),
           };
         }
 
@@ -4625,7 +5047,7 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         response += `\nUse read_memory for full content, validate_causal_link (edge_id + confirm/reject) to curate an edge.`;
 
-        return { content: [{ type: "text", text: response }] };
+        return { content: [{ type: "text", text: response }], structuredContent: traceStructured() };
       }
 
       case "list_causal_edges": {
@@ -4657,12 +5079,21 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         const edges = edgesResult.edges || [];
 
+        const edgesStructured = (): Record<string, unknown> =>
+          compact({
+            edges: edges.map(structuredLineageEdge),
+            count: edges.length,
+            total: stats?.total_edges,
+            stats: stats ? { ...stats } : undefined,
+          });
+
         if (edges.length === 0) {
           return {
             content: [{
               type: "text",
               text: `🔗 The causal lineage graph is empty.\nEdges are inferred automatically at ingest (memory type + entity overlap + temporal order) and can be added explicitly with add_causal_link.`,
             }],
+            structuredContent: edgesStructured(),
           };
         }
 
@@ -4697,7 +5128,9 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         response += `Use trace_lineage(memory_id) for the chain around one memory; validate_causal_link(edge_id, verdict) to confirm or reject an inferred edge.`;
 
-        return { content: [{ type: "text", text: response }] };
+        // `edges` has been sorted and truncated to edgeLimit above, so the
+        // structured payload carries exactly the edges the text lists.
+        return { content: [{ type: "text", text: response }], structuredContent: edgesStructured() };
       }
 
       case "add_causal_link": {
@@ -4839,8 +5272,19 @@ const handleCallTool = async (request: CallToolRequest) => {
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           if (msg.includes("API error 404")) {
+            // Reported as a successful call rather than an error (unchanged
+            // behaviour); `found: false` carries that in the structured channel.
             return {
               content: [{ type: "text", text: `Entity not found in the knowledge graph: "${entity_name}" (no exact, case-insensitive, stemmed, or substring match). Use list_entities to see what the graph knows.` }],
+              structuredContent: {
+                query: entity_name,
+                found: false,
+                max_depth: depth,
+                entities: [],
+                relationships: [],
+                entity_count: 0,
+                relationship_count: 0,
+              },
             };
           }
           throw e;
@@ -4916,7 +5360,47 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         response += `\nUse explore_entity on a neighbor to keep walking, or recall to read the memories behind a relationship's context.`;
 
-        return { content: [{ type: "text", text: response }] };
+        // The text render caps entities at 30 and typed relationships at 20;
+        // the structured payload carries the full traversal so a consumer is
+        // not silently handed a display subset.
+        return {
+          content: [{ type: "text", text: response }],
+          structuredContent: compact({
+            query: entity_name,
+            found: true,
+            matched_entity: origin?.name,
+            max_depth: depth,
+            entities: sortedEntities.map((t) =>
+              compact({
+                id: t.entity.uuid,
+                name: t.entity.name,
+                entity_type: t.entity.fine_type || t.entity.labels.join("/") || "Concept",
+                labels: t.entity.labels,
+                salience: t.entity.salience,
+                mention_count: t.entity.mention_count,
+                kb_id: t.entity.kb_id ?? undefined,
+                hop_distance: t.hop_distance,
+              }),
+            ),
+            relationships: liveRels.map((r) => {
+              const relType = formatRelationType(r.relation_type);
+              return compact({
+                id: r.uuid,
+                from: nameById.get(r.from_entity) || r.from_entity,
+                to: nameById.get(r.to_entity) || r.to_entity,
+                from_id: r.from_entity,
+                to_id: r.to_entity,
+                relation_type: relType,
+                strength: r.strength,
+                context: r.context || undefined,
+                typed: !GENERIC_TYPES.has(relType),
+              });
+            }),
+            entity_count: entities.length,
+            relationship_count: liveRels.length,
+            invalidated_count: invalidatedCount,
+          }),
+        };
       }
 
       case "list_entities": {
@@ -4948,6 +5432,7 @@ const handleCallTool = async (request: CallToolRequest) => {
         if (all.length === 0) {
           return {
             content: [{ type: "text", text: `🕸 The knowledge graph has no entities yet.\nEntities are extracted automatically as memories are stored — remember something first.` }],
+            structuredContent: { entities: [], count: 0, total: 0 },
           };
         }
 
@@ -4962,7 +5447,27 @@ const handleCallTool = async (request: CallToolRequest) => {
         }
         response += `\nUse explore_entity(entity_name) to walk any of these.`;
 
-        return { content: [{ type: "text", text: response }] };
+        return {
+          content: [{ type: "text", text: response }],
+          structuredContent: {
+            entities: ranked.map((e) =>
+              compact({
+                id: e.uuid,
+                name: e.name,
+                entity_type: e.fine_type || e.labels.join("/") || "Concept",
+                labels: e.labels,
+                salience: e.salience,
+                mention_count: e.mention_count,
+              }),
+            ),
+            count: ranked.length,
+            // Entities seen in this page. The server truncates at
+            // SERVER_FETCH_LIMIT before ordering, so when `all` is exactly that
+            // size the real graph may hold more — same caveat the text renders
+            // as a trailing "+".
+            total: all.length,
+          },
+        };
       }
 
       // =======================================================================
@@ -4997,13 +5502,35 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         const anomalies = result.anomalies || [];
 
+        const anomaliesStructured = (): Record<string, unknown> => ({
+          min_sigma: result.min_sigma,
+          anomalies: anomalies.map((a) =>
+            compact({
+              memory_id: a.memory_id,
+              content_preview: a.content_preview,
+              max_abs_z: a.max_abs_z,
+              flagged: a.flagged,
+              explanation: a.explanation || undefined,
+              entities: a.entities,
+              created_at: a.created_at,
+            }),
+          ),
+          count: anomalies.length,
+          flagged_count: anomalies.filter((a) => a.flagged).length,
+          episodes_scored: result.episodes_scored,
+          baseline_window: result.baseline_window,
+        });
+
         if (anomalies.length === 0) {
           // The endpoint returns an empty feed (not z-scores against noise)
           // below its minimum baseline of scored episodes.
           const reason = result.episodes_scored < 10
             ? `Only ${result.episodes_scored} scored episode(s) exist — deviation needs a baseline of at least 10 before z-scores mean anything.`
             : `${result.episodes_scored} episodes scored against a window of ${result.baseline_window}; none deviate from the baseline.`;
-          return { content: [{ type: "text", text: `📈 No anomalies.\n${reason}` }] };
+          return {
+            content: [{ type: "text", text: `📈 No anomalies.\n${reason}` }],
+            structuredContent: anomaliesStructured(),
+          };
         }
 
         const flaggedCount = anomalies.filter((a) => a.flagged).length;
@@ -5028,7 +5555,10 @@ const handleCallTool = async (request: CallToolRequest) => {
 
         response += `Use read_memory(memory_id) for full content, trace_lineage(memory_id) to see what an anomalous memory caused or was caused by.`;
 
-        return { content: [{ type: "text", text: response.trimEnd() }] };
+        return {
+          content: [{ type: "text", text: response.trimEnd() }],
+          structuredContent: anomaliesStructured(),
+        };
       }
 
       case "search_facts": {
@@ -5072,12 +5602,32 @@ const handleCallTool = async (request: CallToolRequest) => {
         const result = await apiCall<{ facts: FactWire[]; total: number }>(endpoint, "POST", body);
         const facts = result.facts || [];
 
+        const factsStructured = (): Record<string, unknown> =>
+          compact({
+            query: query && query.trim().length > 0 ? query.trim() : undefined,
+            entity: entity && entity.trim().length > 0 ? entity.trim() : undefined,
+            facts: facts.map((f) =>
+              compact({
+                id: f.id,
+                fact: f.fact,
+                fact_type: f.fact_type,
+                confidence: f.confidence,
+                support_count: f.support_count,
+                related_entities: f.related_entities,
+                created_at: f.created_at,
+                invalidated_at: f.invalidated_at ?? undefined,
+              }),
+            ),
+            count: facts.length,
+          });
+
         if (facts.length === 0) {
           return {
             content: [{
               type: "text",
               text: `📚 No ${heading}.\nSemantic facts distill out of episodic memories during consolidation — a young or recently imported corpus may have none yet. Try recall for the underlying episodic memories, or fact_narratives for topic clusters.`,
             }],
+            structuredContent: factsStructured(),
           };
         }
 
@@ -5095,7 +5645,10 @@ const handleCallTool = async (request: CallToolRequest) => {
         }
         response += `Facts are confidence-scored distillations; use recall to read the episodic memories behind them.`;
 
-        return { content: [{ type: "text", text: response.trimEnd() }] };
+        return {
+          content: [{ type: "text", text: response.trimEnd() }],
+          structuredContent: factsStructured(),
+        };
       }
 
       // =======================================================================
@@ -5205,6 +5758,17 @@ const handleCallTool = async (request: CallToolRequest) => {
       const percentUsed = Math.round(tokenStatus.percent * 100);
       const warning = `⚠️ CONTEXT ALERT: ${percentUsed}% of token budget used (${tokenStatus.tokens.toLocaleString()}/${tokenStatus.budget.toLocaleString()}). Consider starting a new session or running consolidation.\n\n`;
       result.content[0].text = warning + result.content[0].text;
+    }
+
+    // A tool that declares an outputSchema must return structuredContent on
+    // every successful path — the SDK client rejects the result otherwise, and
+    // the error it raises names the schema, not the code path that skipped it.
+    // Log the tool name here so the cause is obvious in the server's stderr.
+    if (TOOL_OUTPUT_SCHEMAS[name] && !result.isError && !result.structuredContent) {
+      console.error(
+        `[shodh-memory] BUG: tool "${name}" declares an outputSchema but returned no structuredContent. ` +
+          `Clients validating structured output will reject this result.`,
+      );
     }
 
     // Add _meta with token status to response
