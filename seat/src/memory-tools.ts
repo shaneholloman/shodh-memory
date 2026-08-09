@@ -113,10 +113,17 @@ const LINEAGE_RELATION_PROSE: Record<string, string> = {
 const LINEAGE_RENDER_CAP = 8;
 
 /**
- * Render the causal edges among the returned memories, plus a bounded hint at
- * how many causal links lead OUTSIDE the result set — the outside count is an
- * invitation to keep tracing (recall again or use a lineage tool), which the
- * measured chain-case failures never did.
+ * Render the causal edges among the returned memories.
+ *
+ * Within-results only, and deliberately so: /api/recall's lineage payload
+ * contains exclusively edges whose BOTH endpoints are in the returned set
+ * (verified empirically against a seeded store — every edge across 20+
+ * recalls had both endpoints among the results), so there is no
+ * outside-the-results information here to expand. Chain links that fall
+ * outside the result set need the lineage trace endpoints; on the probed
+ * corpus the binding constraint was the inferred graph itself (the
+ * drift→strike edge was absent in 7 of 7 user graphs), which no seat-side
+ * rendering can repair.
  */
 function formatLineage(edges: RecallLineageEdge[], returned: RecallMemory[]): string[] {
 	const returnedIds = new Set(returned.map((memory) => memory.id));
@@ -125,9 +132,6 @@ function formatLineage(edges: RecallLineageEdge[], returned: RecallMemory[]): st
 		.filter((edge) => returnedIds.has(edge.from) && returnedIds.has(edge.to))
 		.sort((a, b) => b.confidence - a.confidence)
 		.slice(0, LINEAGE_RENDER_CAP);
-	const outsideCount = causal.filter(
-		(edge) => returnedIds.has(edge.from) !== returnedIds.has(edge.to),
-	).length;
 
 	const lines: string[] = [];
 	if (inside.length > 0) {
@@ -135,11 +139,6 @@ function formatLineage(edges: RecallLineageEdge[], returned: RecallMemory[]): st
 		for (const edge of inside) {
 			lines.push(`- [mem:${shortId(edge.from)}] ${LINEAGE_RELATION_PROSE[edge.relation]} [mem:${shortId(edge.to)}]`);
 		}
-	}
-	if (outsideCount > 0) {
-		lines.push(
-			`${outsideCount} causal link${outsideCount === 1 ? "" : "s"} lead beyond these results — recall the linked topic or use a lineage tool to follow the chain.`,
-		);
 	}
 	return lines;
 }
