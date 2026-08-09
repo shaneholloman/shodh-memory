@@ -969,7 +969,14 @@ fn test_adaptive_memory_workflow() {
     assert!(stats.memories_processed > 0);
 
     let graph_stats = system.graph_stats();
-    assert!(graph_stats.node_count > 0 || graph_stats.edge_count >= 0);
+    // Was `node_count > 0 || edge_count >= 0`. `edge_count` is unsigned, so
+    // `>= 0` is a tautology and the whole disjunction could never fail. This
+    // test remembers memories and reinforces a tracked recall, so the graph is
+    // expected to hold nodes by now — assert that instead of nothing.
+    assert!(
+        graph_stats.node_count > 0,
+        "reinforced recall should have populated the graph: {graph_stats:?}"
+    );
 
     let prefetch = AnticipatoryPrefetch::new();
     let ctx = PrefetchContext {
@@ -998,7 +1005,13 @@ fn test_graph_maintenance() {
     system.graph_maintenance();
 
     let stats = system.graph_stats();
-    assert!(stats.node_count >= 0);
+    // `node_count` is unsigned, so the old `>= 0` asserted nothing. Two
+    // memories were remembered and reinforced above, so maintenance must leave
+    // nodes behind rather than empty the graph.
+    assert!(
+        stats.node_count > 0,
+        "graph_maintenance should not empty the graph: {stats:?}"
+    );
 }
 
 #[test]
