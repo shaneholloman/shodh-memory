@@ -560,6 +560,12 @@ pub struct CausalFactLink {
 pub struct ConsolidationResult {
     /// Number of memories processed
     pub memories_processed: usize,
+    /// Number of memories that passed the age gate (`min_age_days`) and were
+    /// actually run through extraction. Callers use this to detect that part
+    /// of the corpus is still aging in: when it is smaller than the input,
+    /// memories exist that will only become consolidatable on a LATER cycle,
+    /// so extraction must run again even if nothing new is written.
+    pub memories_eligible: usize,
     /// Number of new facts extracted
     pub facts_extracted: usize,
     /// Number of existing facts reinforced
@@ -589,6 +595,18 @@ pub struct SemanticConsolidator {
 struct PatternCluster {
     /// Stemmed token set representing this cluster (union of all members)
     stem_set: HashSet<String>,
+    /// Negation polarity of the centroid (see `facts::detect_polarity`).
+    ///
+    /// A cluster means "the same claim restated" — the definition
+    /// `SemanticFactStore::find_similar` enforces at dedup time, where
+    /// polarity is a hard gate. Clustering must enforce the same invariant:
+    /// negation is often a one-word difference ("no", "not"), so a claim and
+    /// its correction usually share enough stems to clear the Jaccard
+    /// threshold. Without this gate they merge into ONE cluster, a single
+    /// representative is minted, and the contradiction machinery downstream
+    /// never sees the losing side — the correction is silently swallowed at
+    /// extraction, before arbitration could record it.
+    polarity: bool,
     /// All candidate entries: (pattern_text, memory_id, confidence)
     members: Vec<(String, MemoryId, f32)>,
 }
@@ -641,10 +659,16 @@ impl SemanticConsolidator {
             .iter()
             .filter(|m| (now - m.created_at).num_days() >= self.min_age_days)
             .collect();
+        result.memories_eligible = eligible.len();
 
         if eligible.is_empty() {
             return result;
         }
+
+        // Memory creation times, needed twice: to order candidates before
+        // clustering and to order minted facts before ingest (see below).
+        let created_by_id: HashMap<&MemoryId, chrono::DateTime<chrono::Utc>> =
+            eligible.iter().map(|m| (&m.id, m.created_at)).collect();
 
         // Phase 1: Extract candidates using multi-extractor pipeline
         let mut all_candidates: Vec<(String, MemoryId, f32)> = Vec::new();
@@ -658,6 +682,25 @@ impl SemanticConsolidator {
         if all_candidates.is_empty() {
             return result;
         }
+
+        // Deterministic clustering: greedy cluster assignment depends on
+        // candidate order, and the input arrives in storage iteration order —
+        // random UUIDs, so two ingests of the same corpus clustered (and
+        // minted) differently. Anchor on (evidence age, text): the same
+        // corpus always clusters the same way, and cluster centroids freeze
+        // at the EARLIEST phrasing of a claim, which is also the natural
+        // anchor for "later restatements corroborate the original".
+        all_candidates.sort_by(|a, b| {
+            let ta = created_by_id
+                .get(&a.1)
+                .copied()
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+            let tb = created_by_id
+                .get(&b.1)
+                .copied()
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+            ta.cmp(&tb).then_with(|| a.0.cmp(&b.0))
+        });
 
         // Phase 2: Group by stemmed-token Jaccard similarity
         let clusters =
@@ -712,6 +755,34 @@ impl SemanticConsolidator {
                 result.facts_extracted += 1;
             }
         }
+
+        // Order minted facts by the recency of their newest supporting memory,
+        // OLDEST CLAIM FIRST. Callers ingest facts in this order, and
+        // `SemanticFactStore::ingest_candidate` resolves a contradiction tie
+        // in favour of the incoming candidate — so ingest order is the
+        // recency signal arbitration acts on. Without this sort the order was
+        // storage iteration order (random UUIDs): a batch containing both a
+        // claim and its later correction — exactly what a bulk-seeded store
+        // produces — settled on whichever side happened to be ingested last,
+        // a coin flip per store. With it, the side supported by the newest
+        // evidence is ingested last and wins, which is the documented
+        // "recency is the default because a later contradiction is usually a
+        // correction" policy applied to batches.
+        let newest_evidence = |fact: &SemanticFact| {
+            fact.source_memories
+                .iter()
+                .filter_map(|id| created_by_id.get(id).copied())
+                .max()
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+        };
+        result.new_facts.sort_by(|a, b| {
+            newest_evidence(a)
+                .cmp(&newest_evidence(b))
+                // Text tie-break: same-instant cohorts (bulk seeds) must
+                // still ingest in a repeatable order.
+                .then_with(|| a.fact.cmp(&b.fact))
+        });
+        result.new_fact_ids = result.new_facts.iter().map(|f| f.id.clone()).collect();
 
         result
     }
@@ -768,6 +839,7 @@ impl SemanticConsolidator {
             if tokens.is_empty() {
                 continue;
             }
+            let polarity = crate::memory::facts::detect_polarity(&pattern.to_lowercase());
 
             // Find best matching cluster (that hasn't hit the size cap)
             let mut best_idx = None;
@@ -775,6 +847,11 @@ impl SemanticConsolidator {
             for (i, cluster) in clusters.iter().enumerate() {
                 // Skip full clusters — they no longer accept members
                 if cluster.members.len() >= CONSOLIDATION_CLUSTER_SIZE_CAP {
+                    continue;
+                }
+                // A negated statement is never a restatement of the claim it
+                // negates — see the polarity note on `PatternCluster`.
+                if cluster.polarity != polarity {
                     continue;
                 }
                 let sim = Self::jaccard_similarity(&tokens, &cluster.stem_set);
@@ -795,6 +872,7 @@ impl SemanticConsolidator {
                 // Create new cluster with this candidate as centroid
                 clusters.push(PatternCluster {
                     stem_set: tokens,
+                    polarity,
                     members: vec![(pattern.clone(), memory_id.clone(), *confidence)],
                 });
             }
@@ -2526,5 +2604,368 @@ mod tests {
         assert!(SemanticConsolidator::is_knowledge_worthy(
             "The router configuration in src/handlers/router.rs defines all API endpoint routes for the server"
         ));
+    }
+
+    /// The 74-memory demonstration corpus from `seat/eval/seed-demo-corpus.mjs`,
+    /// verbatim (content, experience type). This is the "realistic corpus" that
+    /// held zero facts in production; the stage-count test below pins where in
+    /// the pipeline candidates exist and what the corroboration policy keeps.
+    const DEMO_CORPUS: &[(&str, ExperienceType)] = &[
+        ("Container ship Dali lost propulsion at 01:24 local time because an electrical breaker tripped during departure from the Port of Baltimore.", ExperienceType::Observation),
+        ("The loss of propulsion led to the Dali drifting off the channel heading despite the crew dropping anchor.", ExperienceType::Observation),
+        ("The drifting vessel struck a support pier of the Francis Scott Key Bridge, which triggered the collapse of the main truss spans into the Patapsco River.", ExperienceType::Observation),
+        ("Because the wreckage blocked the shipping channel, the Port of Baltimore suspended all vessel traffic.", ExperienceType::Decision),
+        ("The port suspension halted roll-on/roll-off automobile shipments, so Maersk rerouted its services to the Port of New York and New Jersey.", ExperienceType::Decision),
+        ("Overflow automobile volume was diverted south to the Port of Virginia at Norfolk as a result of the closure.", ExperienceType::Decision),
+        ("Coal exports from the CSX Curtis Bay terminal stopped for six weeks because bulk carriers could not transit the blocked channel.", ExperienceType::Observation),
+        ("NTSB chair Jennifer Homendy stated the investigation would examine the Dali's electrical system, after inspectors recovered the voyage data recorder.", ExperienceType::Observation),
+        ("Synergy Marine Group, the ship manager, confirmed the crew reported electrical failures during port inspections in the days before departure.", ExperienceType::Observation),
+        ("Captain Maynard of the pilots association credited the pilot's mayday call with stopping bridge traffic, which prevented further casualties.", ExperienceType::Learning),
+        ("The bridge lacked pier protection dolphins that current design standards require, a factor engineers said contributed to the total collapse.", ExperienceType::Learning),
+        ("Salvage crews used the floating crane Chesapeake 1000 to cut the collapsed truss sections for channel clearance.", ExperienceType::Task),
+        ("Initial reports said four crew members were injured in the collapse.", ExperienceType::Observation),
+        ("Corrected report: no crew members aboard the Dali were injured; the casualties were road workers on the bridge deck.", ExperienceType::Observation),
+        ("The Vamana index rebuild cut recall latency from 340ms to 92ms on the evaluation corpus.", ExperienceType::Learning),
+        ("Routine port-state inspection of the Dali at Seagirt noted an intermittent low-voltage alarm on the main switchboard; the crew reset it and the inspector logged it as resolved.", ExperienceType::Observation),
+        ("Electrician's shift note: reefer bank on the Dali's forward feeder showed voltage sag twice during cargo operations, within tolerance but recurring.", ExperienceType::Observation),
+        ("Synergy Marine deferred the Dali's switchboard breaker overhaul to the next scheduled dry dock to avoid a berth overstay.", ExperienceType::Decision),
+        ("Gate scale check: container MSKU-4471820 declared 4,200 kg on the manifest but weighed 28,650 kg at the Seagirt in-gate; flagged for VGM re-verification.", ExperienceType::Observation),
+        ("Drayage truck T-118 carrying an export reefer pinged 40 km off its assigned corridor near Annapolis during the evening run.", ExperienceType::Observation),
+        ("MSC Brianna completed cargo operations at Seagirt berth 3 and departed on the evening tide.", ExperienceType::Observation),
+        ("Crane STS-07 at Seagirt completed its 4,000-hour preventive maintenance; hoist brake pads replaced.", ExperienceType::Observation),
+        ("Morning shift moved 1,847 containers at Seagirt, slightly above the 30-day average.", ExperienceType::Observation),
+        ("Evergreen Ever Focus assigned to Seagirt berth 2 for Thursday arrival, draft 12.8 metres.", ExperienceType::Observation),
+        ("Fog delayed pilot boardings in the Craighill Channel for two hours before conditions lifted.", ExperienceType::Observation),
+        ("Customs placed a documentation hold on 12 containers from the CMA CGM Argentina pending broker corrections.", ExperienceType::Observation),
+        ("Dundalk Marine Terminal handled 3,200 imported vehicles this week, in line with forecast.", ExperienceType::Observation),
+        ("Longshore gang 14 set a terminal record with 42 crane moves per hour on the night shift.", ExperienceType::Observation),
+        ("The Wallenius Wilhelmsen Tosca discharged heavy machinery at Dundalk without incident.", ExperienceType::Observation),
+        ("Berth 1 at Seagirt scheduled for fender replacement next month; no vessel impact expected.", ExperienceType::Task),
+        ("Reefer monitoring rounds found all 240 plugged units within temperature spec.", ExperienceType::Observation),
+        ("The harbor tug Bridget McAllister returned to service after routine engine overhaul.", ExperienceType::Observation),
+        ("Chesapeake Bay pilots reported normal transit conditions; visibility eight nautical miles.", ExperienceType::Observation),
+        ("Weekly safety briefing covered updated lashing procedures for high-cube containers.", ExperienceType::Learning),
+        ("CSX intermodal ramp turned 96% of import boxes within 48 hours this week.", ExperienceType::Observation),
+        ("Empty container yard at Fairfield reached 78% utilization; repositioning plan drafted.", ExperienceType::Observation),
+        ("Maersk Kensington arrived at Seagirt berth 4 with 2,900 import containers.", ExperienceType::Observation),
+        ("Gate cameras at Dundalk upgraded to read damaged container door labels.", ExperienceType::Observation),
+        ("Thunderstorm forecast prompted crane wind-speed monitoring; operations continued below limits.", ExperienceType::Observation),
+        ("Hapag-Lloyd Atlanta Express completed bunkering at anchorage before berthing.", ExperienceType::Observation),
+        ("Terminal operating system patched overnight; gate transactions resumed at 05:00 without backlog.", ExperienceType::Observation),
+        ("Crane STS-04 flagged a slew-drive vibration reading at the high end of normal; monitoring continued.", ExperienceType::Observation),
+        ("Quarterly emissions report filed: terminal equipment idle time down 9% year over year.", ExperienceType::Observation),
+        ("Two export soybean trains unloaded at the CNX Marine Terminal on schedule.", ExperienceType::Observation),
+        ("Vessel traffic service logged 31 deep-draft transits through the main channel this week.", ExperienceType::Observation),
+        ("Warehouse C at Point Breeze passed its annual fire-suppression inspection.", ExperienceType::Observation),
+        ("ZIM Baltimore sailed for Norfolk after a routine eight-hour port call.", ExperienceType::Observation),
+        ("Chassis pool availability tightened to 91%; provider notified per service agreement.", ExperienceType::Observation),
+        ("Pilot association scheduled semi-annual bridge-team simulator training for member pilots.", ExperienceType::Learning),
+        ("Seagirt yard block E re-striped; reefer rows gained four additional plug positions.", ExperienceType::Observation),
+        ("The Atlantic Container Line Atlantic Sun loaded project cargo bound for Antwerp.", ExperienceType::Observation),
+        ("Random cargo exam rate held at 3.1% for the month, unchanged from prior period.", ExperienceType::Observation),
+        ("Tug assist requirements reviewed for vessels over 300 metres; no changes recommended.", ExperienceType::Learning),
+        ("Marine terminal lighting audit found six fixtures below lux spec in the Dundalk rail yard.", ExperienceType::Observation),
+        ("COSCO Development windowed for Saturday arrival; berth 3 turn time projected at 22 hours.", ExperienceType::Observation),
+        ("Monthly draft survey of the Curtis Bay coal pier showed silting within dredge tolerance.", ExperienceType::Observation),
+        ("Breakbulk crew discharged wind turbine blades at North Locust Point over two shifts.", ExperienceType::Observation),
+        ("Ship chandler deliveries consolidated to a single gate window to reduce congestion.", ExperienceType::Decision),
+        ("Crane operator recertification completed for 28 operators; two scheduled for retest.", ExperienceType::Observation),
+        ("The Grimaldi Grande Baltimora loaded 1,100 export vehicles at Dundalk.", ExperienceType::Observation),
+        ("Water taxi service resumed its harbor route after seasonal maintenance.", ExperienceType::Observation),
+        ("Line handlers reported a parted stern line on the bulk carrier Ocean Prosperity; replaced without delay to sailing.", ExperienceType::Observation),
+        ("Port administration approved the fiscal-year dredging budget for the access channels.", ExperienceType::Decision),
+        ("Refrigerated cargo volumes rose 14% month over month, led by poultry exports.", ExperienceType::Observation),
+        ("Security drill simulated an unauthorized gate entry; response time met the standard.", ExperienceType::Observation),
+        ("The container freight station cleared its LCL backlog ahead of the holiday weekend.", ExperienceType::Observation),
+        ("Rail dwell for export coal at Curtis Bay averaged 2.1 days, best quarter in two years.", ExperienceType::Observation),
+        ("Evergreen Ever Focus departed berth 2 after a 19-hour turn, one hour ahead of window.", ExperienceType::Observation),
+        ("Stevedore payroll system migration completed; no missed shifts reported.", ExperienceType::Observation),
+        ("Harbor survey vessel completed side-scan mapping of anchorage B.", ExperienceType::Observation),
+        ("Seagirt gate processed 4,102 truck transactions, a seasonal high, with average turn under 40 minutes.", ExperienceType::Observation),
+    ];
+
+    fn demo_corpus_memories(age_days: i64) -> Vec<Memory> {
+        DEMO_CORPUS
+            .iter()
+            .map(|(content, exp_type)| {
+                let experience = Experience {
+                    content: content.to_string(),
+                    experience_type: exp_type.clone(),
+                    entities: Vec::new(),
+                    ..Default::default()
+                };
+                Memory::new(
+                    MemoryId(Uuid::new_v4()),
+                    experience,
+                    0.3,
+                    None,
+                    None,
+                    None,
+                    Some(chrono::Utc::now() - chrono::Duration::days(age_days)),
+                )
+            })
+            .collect()
+    }
+
+    /// Stage-by-stage instrumentation of the consolidation pipeline on the
+    /// demo corpus. Prints the counts (run with --nocapture) and pins the
+    /// two facts about this corpus that the zero-facts investigation
+    /// established:
+    ///  1. The extractor DOES propose candidates from realistic prose
+    ///     (world 3, "extraction gap", is false).
+    ///  2. Corroboration (min_support >= 2) is what decides how many facts a
+    ///     unique-statement corpus mints — few, and that is the documented
+    ///     policy, not a defect.
+    #[test]
+    fn demo_corpus_stage_counts() {
+        let consolidator = SemanticConsolidator::new();
+        let memories = demo_corpus_memories(8); // older than CONSOLIDATION_MIN_AGE_DAYS
+
+        // Stage 1: candidate extraction per memory.
+        let mut all_candidates: Vec<(String, MemoryId, f32)> = Vec::new();
+        let mut memories_with_candidates = 0usize;
+        for m in &memories {
+            let extracted = consolidator.extract_fact_candidates(m);
+            if !extracted.is_empty() {
+                memories_with_candidates += 1;
+            }
+            for (pattern, confidence) in extracted {
+                all_candidates.push((pattern, m.id.clone(), confidence));
+            }
+        }
+
+        // Stage 2: clustering.
+        let clusters = consolidator
+            .group_candidates_by_similarity(&all_candidates, CONSOLIDATION_JACCARD_THRESHOLD);
+        let corroborated = clusters
+            .iter()
+            .filter(|c| c.members.len() >= CONSOLIDATION_MIN_SUPPORT_SMALL)
+            .count();
+
+        // Stage 3: full pipeline.
+        let result = consolidator.consolidate(&memories);
+
+        println!("── demo corpus stage counts ──");
+        println!("memories:                  {}", memories.len());
+        println!("memories with candidates:  {memories_with_candidates}");
+        println!("candidates proposed:       {}", all_candidates.len());
+        println!("clusters:                  {}", clusters.len());
+        println!("clusters >= min_support:   {corroborated}");
+        println!("facts minted:              {}", result.facts_extracted);
+        for f in &result.new_facts {
+            println!(
+                "  fact [{:?}] ({} sources): {}",
+                f.fact_type,
+                f.source_memories.len(),
+                f.fact
+            );
+        }
+
+        // The extractor proposes from the majority of the corpus: zero facts
+        // can never again be blamed on "nothing is proposed".
+        assert!(
+            memories_with_candidates >= DEMO_CORPUS.len() / 2,
+            "extractor should propose candidates from most of the demo corpus, \
+             got {memories_with_candidates}/{}",
+            DEMO_CORPUS.len()
+        );
+        assert!(
+            all_candidates.len() >= memories_with_candidates,
+            "at least one candidate per proposing memory"
+        );
+        // Facts minted equals corroborated clusters — corroboration is the
+        // deciding filter, nothing downstream of it silently drops facts.
+        assert_eq!(
+            result.facts_extracted, corroborated,
+            "every corroborated cluster must mint exactly one fact"
+        );
+    }
+
+    /// A claim and its negation share most of their content stems — negation
+    /// is often a one-word difference — so without a polarity gate they clear
+    /// the Jaccard threshold and merge into ONE cluster, minting a single
+    /// representative fact. The losing side never reaches the store, so the
+    /// contradiction/invalidation machinery has nothing to arbitrate: the
+    /// correction is silently swallowed at extraction time. Clustering must
+    /// keep opposite-polarity candidates apart so BOTH sides mint and
+    /// `ingest_candidate` can record the supersession.
+    #[test]
+    fn contradicting_statements_never_share_a_cluster() {
+        let consolidator = SemanticConsolidator::new();
+        let mems: Vec<Memory> = [
+            "Initial reports said four crew members were injured in the bridge collapse.",
+            "Early reports said four crew members were injured in the bridge collapse.",
+            "Corrected reports confirm no crew members were injured in the bridge collapse.",
+            "Later reports confirm no crew members were injured in the bridge collapse.",
+        ]
+        .iter()
+        .map(|content| {
+            let experience = Experience {
+                content: content.to_string(),
+                experience_type: ExperienceType::Observation,
+                entities: Vec::new(),
+                ..Default::default()
+            };
+            Memory::new(
+                MemoryId(Uuid::new_v4()),
+                experience,
+                0.8,
+                None,
+                None,
+                None,
+                Some(chrono::Utc::now() - chrono::Duration::days(8)),
+            )
+        })
+        .collect();
+
+        let result = consolidator.consolidate(&mems);
+        assert_eq!(
+            result.facts_extracted, 2,
+            "claim and correction must mint as SEPARATE facts, got {:?}",
+            result.new_facts
+        );
+        assert!(
+            result
+                .new_facts
+                .iter()
+                .any(|f| f.fact.contains("four crew members were injured")),
+            "the claim side must mint: {:?}",
+            result.new_facts
+        );
+        assert!(
+            result
+                .new_facts
+                .iter()
+                .any(|f| f.fact.contains("no crew members were injured")),
+            "the correction side must mint: {:?}",
+            result.new_facts
+        );
+    }
+
+    /// Minted facts are ordered by the recency of their newest supporting
+    /// memory, oldest claim first: callers ingest in this order, and
+    /// contradiction arbitration favours the incoming candidate on equal
+    /// support, so the LAST-ingested side — the one backed by the newest
+    /// evidence — wins. Without the sort, batch order was storage iteration
+    /// order (random UUIDs) and a bulk-seeded claim/correction pair settled
+    /// on a coin flip.
+    #[test]
+    fn minted_facts_are_ordered_by_evidence_recency() {
+        let consolidator = SemanticConsolidator::new();
+        let mem = |content: &str, days: i64| {
+            let experience = Experience {
+                content: content.to_string(),
+                experience_type: ExperienceType::Observation,
+                entities: Vec::new(),
+                ..Default::default()
+            };
+            Memory::new(
+                MemoryId(Uuid::new_v4()),
+                experience,
+                0.8,
+                None,
+                None,
+                None,
+                Some(chrono::Utc::now() - chrono::Duration::days(days)),
+            )
+        };
+        // Deliberately interleave: newest pair first in input order.
+        let mems = vec![
+            mem(
+                "Corrected reports confirm no crew members were injured in the bridge collapse.",
+                20,
+            ),
+            mem(
+                "Initial reports said four crew members were injured in the bridge collapse.",
+                40,
+            ),
+            mem(
+                "Later reports confirm no crew members were injured in the bridge collapse.",
+                20,
+            ),
+            mem(
+                "Early reports said four crew members were injured in the bridge collapse.",
+                40,
+            ),
+        ];
+
+        let result = consolidator.consolidate(&mems);
+        assert_eq!(result.facts_extracted, 2);
+        assert!(
+            result.new_facts[0]
+                .fact
+                .contains("four crew members were injured"),
+            "older claim must be first (ingested first, displaced last): {:?}",
+            result.new_facts
+        );
+        assert!(
+            result.new_facts[1]
+                .fact
+                .contains("no crew members were injured"),
+            "newest-evidence side must be last (wins the arbitration tie): {:?}",
+            result.new_facts
+        );
+        assert_eq!(
+            result.new_fact_ids,
+            result
+                .new_facts
+                .iter()
+                .map(|f| f.id.clone())
+                .collect::<Vec<_>>(),
+            "new_fact_ids must track the sorted order"
+        );
+    }
+
+    /// The demo corpus produces two DIFFERENT zeros, and `memories_eligible`
+    /// is what tells them apart:
+    ///
+    ///  * Fresh corpus, default thresholds: the age gate
+    ///    (CONSOLIDATION_MIN_AGE_DAYS) filters everything out —
+    ///    `memories_eligible == 0`. Zero facts because nothing was LOOKED AT.
+    ///    (The defect the investigation found was one layer up: the
+    ///    extraction watermark advanced past these age-ineligible memories,
+    ///    so they stayed unconsolidatable even after aging past the gate.
+    ///    See tests/fact_distillation_tests.rs.)
+    ///
+    ///  * Age gate lifted: every memory IS processed
+    ///    (`memories_eligible == corpus`), candidates are proposed from all
+    ///    of them, and the corpus STILL mints zero facts — measured above in
+    ///    `demo_corpus_stage_counts`, its 71 candidates form 71 singleton
+    ///    clusters. Every statement in this corpus is unique, so
+    ///    corroboration (min_support >= 2 DISTINCT memories) is never
+    ///    satisfied. That zero is the documented policy working as designed:
+    ///    minting singletons instead would turn all ~71 routine operational
+    ///    statements ("MSC Brianna completed cargo operations…") into
+    ///    permanent semantic "facts", which is noise, not knowledge.
+    #[test]
+    fn fresh_corpus_is_age_gated_not_broken() {
+        let consolidator = SemanticConsolidator::new();
+        let fresh = demo_corpus_memories(0);
+        let result = consolidator.consolidate(&fresh);
+        assert_eq!(
+            result.memories_eligible, 0,
+            "a fresh corpus must be entirely age-ineligible"
+        );
+        assert_eq!(
+            result.facts_extracted, 0,
+            "age gate must exclude a fresh corpus from consolidation"
+        );
+
+        // Age gate lifted: everything is processed; the zero that remains is
+        // the corroboration policy, not an extraction failure.
+        let eager = SemanticConsolidator::with_thresholds(CONSOLIDATION_MIN_SUPPORT, 0);
+        let eager_result = eager.consolidate(&fresh);
+        assert_eq!(
+            eager_result.memories_eligible,
+            fresh.len(),
+            "with the age gate lifted every memory must be processed"
+        );
+        assert_eq!(
+            eager_result.facts_extracted, 0,
+            "a corpus of unique statements has no corroborated claims: zero \
+             facts is the min_support policy, not a defect — if this ever \
+             mints, either the corpus gained restatements or the support \
+             policy changed, and both deserve a deliberate look"
+        );
     }
 }

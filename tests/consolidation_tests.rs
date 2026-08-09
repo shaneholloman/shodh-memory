@@ -323,21 +323,15 @@ fn every_live_tier_maps_to_a_distinct_graph_multiplier() {
 // FACT CORRECTION — END TO END
 // =============================================================================
 
-/// A creation timestamp `days` in the past, pinned to WHOLE MILLISECONDS.
+/// A creation timestamp `days` in the past, pinned to WHOLE MILLISECONDS so
+/// the value survives storage round-trips exactly and the two cohorts in the
+/// tests below stay cleanly separated in time.
 ///
-/// The incremental fact-extraction watermark is persisted as
-/// `created_at.timestamp_millis()` and the next cycle filters with a strict
-/// `created_at > watermark`. `Utc::now()` carries sub-millisecond digits, so a
-/// memory always compares as newer than the watermark it just produced and is
-/// re-consolidated on every subsequent cycle.
-///
-/// In production that is merely wasteful — dedup absorbs the re-derivation. In a
-/// two-cycle test it is fatal and silently so: cycle two re-ingests the claim
-/// memories alongside the correction, and since the two share most of their
-/// content stems they land in ONE Jaccard cluster, producing a single merged
-/// fact (observed: one fact with four source memories) instead of a claim plus a
-/// contradicting correction. Pinning the fixture to whole milliseconds makes the
-/// watermark round-trip exactly, so each cycle sees only its own cohort.
+/// (Historical note: the pinning used to be load-bearing — the incremental
+/// fact-extraction watermark stored `timestamp_millis()` and filtered with a
+/// strict `>`, so unpinned timestamps made every cycle re-process its own
+/// newest memory. The watermark is gone; extraction re-scans the full corpus
+/// every cycle and `ingest_candidate` makes re-derivation inert.)
 fn days_ago_ms(days: i64) -> chrono::DateTime<chrono::Utc> {
     let t = chrono::Utc::now() - chrono::Duration::days(days);
     chrono::DateTime::from_timestamp_millis(t.timestamp_millis()).expect("valid timestamp")
@@ -374,14 +368,16 @@ fn declarative_memory(content: &str, importance: f32) -> Experience {
 /// checked, and the identity of the extracted fact pinned, before anything about
 /// arbitration is asserted. The test cannot pass again by exercising nothing.
 ///
-/// TWO maintenance cycles, deliberately. Facts minted in one `consolidate` batch
-/// are all written AFTER the arbitration loop (`store_batch` runs once the loop
-/// finishes), so no fact in a batch can see its batch-mates in the store.
-/// Contradiction can only fire when the correction arrives on a LATER cycle than
-/// the claim — which is also how a correction arrives in the world. The
-/// incremental watermark cooperates: it advances to the newest processed
-/// memory's `created_at`, so the claim memories are excluded from cycle two by
-/// the same mechanism that admits the correction.
+/// TWO maintenance cycles, mirroring how a correction usually arrives in the
+/// world: the claim consolidates first, the correction arrives later and must
+/// displace an already-stored ACTIVE fact. Cycle two re-extracts the claim
+/// memories as well — extraction re-scans the full corpus every cycle — and
+/// `ingest_candidate` recognises that re-derivation as already-counted
+/// evidence (AlreadyAttested), so the correction is the only genuinely new
+/// candidate. Polarity-aware clustering keeps the correction out of the
+/// claim's Jaccard cluster (they share most content stems); the same-batch
+/// variant of this scenario is pinned in
+/// `tests/fact_distillation_tests.rs::bulk_seeded_correction_supersedes_claim_in_one_pass`.
 #[test]
 fn a_corrected_report_supersedes_the_initial_claim_end_to_end() {
     use shodh_memory::similarity::cosine_similarity;
@@ -389,10 +385,9 @@ fn a_corrected_report_supersedes_the_initial_claim_end_to_end() {
     let (system, _dir) = setup_memory_system();
     let user = "e2e-correction";
 
-    // Both cohorts are older than CONSOLIDATION_MIN_AGE_DAYS (7). The correction
-    // is NEWER than the claim so it clears the watermark that cycle one leaves
-    // behind, and the claim does not (the filter is a strict `>` — see
-    // `days_ago_ms` for why the millisecond pinning matters).
+    // Both cohorts are older than CONSOLIDATION_MIN_AGE_DAYS (7), so both are
+    // eligible from their first cycle. The correction is NEWER than the claim,
+    // which is what makes recency-based arbitration displace the claim.
     let claim_at = days_ago_ms(40);
     let correction_at = days_ago_ms(20);
 

@@ -146,6 +146,15 @@ pub async fn consolidate_memories(
         };
 
         // Step 2: Maintenance (replay + tier consolidation + decay)
+        //
+        // The heavy cycle re-runs fact extraction when the dirty flag is set,
+        // which can repeat the extraction Step 1 just did. That repeat is
+        // deliberate and cheap: extraction is a pure string pipeline, and
+        // `SemanticFactStore::ingest_candidate` treats re-derivation from
+        // already-counted evidence as a no-op, so the second pass cannot mint
+        // duplicates or ratchet confidence. Suppressing it would instead risk
+        // skipping the maintenance-policy pass, whose thresholds can differ
+        // from this request's.
         let decay_factor = state_clone.server_config().activation_decay_factor;
         let maintenance_result = {
             let memory = memory.clone();

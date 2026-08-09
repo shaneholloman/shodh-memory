@@ -635,8 +635,13 @@ fn test_fact_type_default() {
 
 #[test]
 fn test_consolidation_result_structure() {
+    // `memories_eligible` is deliberately different from `memories_processed`.
+    // The two are distinct counts — processed is what was looked at, eligible
+    // is what passed the age gate — and giving them the same value here would
+    // let a future swap of the two fields slip past this test.
     let result = ConsolidationResult {
         memories_processed: 10,
+        memories_eligible: 8,
         facts_extracted: 3,
         facts_reinforced: 5,
         new_fact_ids: vec!["f1".to_string(), "f2".to_string(), "f3".to_string()],
@@ -644,6 +649,7 @@ fn test_consolidation_result_structure() {
     };
 
     assert_eq!(result.memories_processed, 10);
+    assert_eq!(result.memories_eligible, 8);
     assert_eq!(result.facts_extracted, 3);
     assert_eq!(result.facts_reinforced, 5);
     assert_eq!(result.new_fact_ids.len(), 3);
