@@ -98,6 +98,9 @@ export type SeatEvent =
 			query: string;
 			memories: ProactiveSurfacedMemory[];
 			injected_memory_ids: string[];
+			/** The system-prompt block verbatim as injected this turn (null when
+			 * nothing surfaced) — what the model saw must be inspectable. */
+			injected_block: string | null;
 			feedback: FeedbackProcessed | null;
 			temporal_credits_applied: number | null;
 			took_ms: number;

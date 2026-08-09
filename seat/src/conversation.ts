@@ -614,34 +614,38 @@ export class Conversation {
 				});
 			}
 
+			const lines = response.memories.map(
+				(memory) =>
+					`- [mem:${memoryShortId(memory.id)}] (${memory.memory_type}) ${memory.content.slice(0, 400)}`,
+			);
+			let block: string | undefined;
+			if (response.memories.length > 0) {
+				block = this.mechanisms.proactiveFraming
+					? // Sample framing: the measured failure mode is the model treating
+						// this block as the whole of memory — answering "not recorded" or
+						// stopping a chain because the next link was not in these few lines.
+						`## Memory sample (auto-surfaced — cite [mem:id] if used)\n` +
+						`These are only the ${response.memories.length} closest matches to the current message; the persistent store holds far more, and details relevant to the question may not be shown here. ` +
+						`Search it with recall_memory before concluding anything is missing, and before answering questions whose evidence these lines do not fully cover.\n` +
+						lines.join("\n")
+					: `## Possibly relevant memories (auto-surfaced — cite [mem:id] if used)\n${lines.join("\n")}`;
+			}
+
 			this.emit({
 				type: "proactive_context",
 				scope: "user",
 				query: userText,
 				memories: response.memories,
 				injected_memory_ids: response.memories.map((memory) => memory.id),
+				// The block verbatim: what the model was actually shown must be
+				// inspectable, not reconstructable.
+				injected_block: block ?? null,
 				feedback: response.feedback_processed ?? null,
 				temporal_credits_applied: response.temporal_credits_applied ?? null,
 				took_ms: Date.now() - startedAt,
 			});
 
-			if (response.memories.length === 0) return undefined;
-			const lines = response.memories.map(
-				(memory) =>
-					`- [mem:${memoryShortId(memory.id)}] (${memory.memory_type}) ${memory.content.slice(0, 400)}`,
-			);
-			if (!this.mechanisms.proactiveFraming) {
-				return `## Possibly relevant memories (auto-surfaced — cite [mem:id] if used)\n${lines.join("\n")}`;
-			}
-			// Sample framing: the measured failure mode is the model treating
-			// this block as the whole of memory — answering "not recorded" or
-			// stopping a chain because the next link was not in these few lines.
-			return (
-				`## Memory sample (auto-surfaced — cite [mem:id] if used)\n` +
-				`These are only the ${response.memories.length} closest matches to the current message; the persistent store holds far more, and details relevant to the question may not be shown here. ` +
-				`Search it with recall_memory before concluding anything is missing, and before answering questions whose evidence these lines do not fully cover.\n` +
-				lines.join("\n")
-			);
+			return block;
 		} catch (error) {
 			// Momentum loop is an enhancement; its failure must not block the turn.
 			// Un-drained tool actions stay queued for the next attempt.
