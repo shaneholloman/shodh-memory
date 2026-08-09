@@ -24,7 +24,7 @@ client (SSE) ──► SeatServer (node:http)
                     │
                     ├─ Conversation ── pi Agent (loop, tools, streaming)
                     │     ├─ memory tools (native HTTP → Rust backend)
-                    │     ├─ MCP bridge tools (stdio, any MCP server)
+                    │     ├─ MCP host tools (stdio / streamable HTTP / SSE)
                     │     └─ learning loops (see below)
                     │
                     ├─ ShodhBackend ── HTTP client for the Rust API
@@ -141,6 +141,8 @@ Revert semantics are honest about what the backend supports:
 | DELETE | `/v1/providers/{id}/key` | remove the stored key; env-var auth, if present, remains |
 | POST | `/v1/providers/{id}/oauth/start` | run pi's browser-OAuth login for the provider; SSE stream of `oauth_notify` (auth URLs, device codes, progress), `oauth_prompt` (pasted codes, selections), `oauth_complete`/`oauth_error`. One at a time per provider; disconnecting aborts |
 | POST | `/v1/providers/{id}/oauth/input` | `{prompt_id, value}` — answer a pending login prompt |
+| GET | `/v1/mcp/servers` | every configured MCP server: status, transport, tool list, connection error, endpoint (query-stripped) and the NAMES of any auth headers sent |
+| POST | `/v1/mcp/servers/{name}/reconnect` | re-run one server's connection; returns its post-attempt state, failure included |
 | GET | `/v1/conversations?user_id` | persisted session list with turn counts and accumulated token/cost totals |
 | POST | `/v1/conversations` | `{user_id, provider, model, system_prompt?}` |
 | GET | `/v1/conversations/{id}` | metadata + transcript + durable events (evidence replay) |
@@ -173,17 +175,61 @@ that membership is what makes them keyless, billed as `none` and flagged
 per provider, so registering another local endpoint is a one-line change plus
 its base-URL config knob.
 
-## MCP bridge
+## MCP host
 
-pi has no MCP client (its README: "No MCP"), so `src/mcp.ts` bridges MCP
-servers into the agent loop: stdio transport, `listTools` → pi `AgentTool`s
-named `mcp__<server>__<tool>`, plain JSON Schema passed through (pi's
-validator handles non-TypeBox schemas). Configure with
-`SEAT_MCP_SERVERS=/path/to/servers.json`:
+pi has no MCP client (its README: "No MCP"), so `src/mcp.ts` is the seat's
+own: it connects to MCP servers, lists their tools, and exposes each one to the
+agent loop as a pi `AgentTool` named `mcp__<server>__<tool>` with the server's
+plain JSON Schema passed through (pi's validator handles non-TypeBox schemas).
+Configure with `SEAT_MCP_SERVERS=/path/to/servers.json`:
 
 ```json
-{ "servers": [ { "name": "shodh-memory", "command": "node", "args": ["mcp-server/dist/index.js"] } ] }
+{
+  "servers": [
+    { "name": "shodh-memory", "command": "node", "args": ["mcp-server/dist/index.js"] },
+    { "name": "issues", "url": "https://mcp.example.com/mcp",
+      "headerEnv": { "Authorization": "ISSUES_MCP_TOKEN" } }
+  ]
+}
 ```
+
+**Transports.** Three, matching what `@modelcontextprotocol/sdk` ships:
+`stdio` (a command this machine runs), streamable HTTP (`"transport": "http"`,
+the current standard for remote servers) and HTTP+SSE (`"transport": "sse"`,
+superseded and deprecated in the SDK, but still the only thing many deployed
+servers speak). A remote server defaults to `"auto"`: streamable HTTP first,
+falling back to SSE only on 404/405/406 — the statuses that mean "this endpoint
+does not implement that verb". A 401/403/429 or a dead host is reported as
+itself rather than retried over an older transport.
+
+**Credentials.** `headers` sets request headers verbatim; `headerEnv` maps a
+header name to an environment variable read in this process, which keeps the
+token out of the config file. A named variable that is not set fails the
+connection with the variable's name, rather than dialling out unauthenticated.
+Header **values** never leave the process: `GET /v1/mcp/servers` reports header
+NAMES, and a server's URL is reported with its query string and any userinfo
+stripped, because `?key=…` is a real way MCP endpoints are authenticated.
+
+**Lifecycle.** Every configured server is retained with a status whether or not
+it connected — `connecting`, `ready`, `failed` (never came up) or
+`disconnected` (was up, went away) — because a dead server and a server with no
+tools are indistinguishable if all you keep is a tool count. Connections are
+established behind the HTTP listener, so a hung endpoint cannot delay startup.
+A stdio server's stderr is piped and its tail is folded into the failure
+message (a child that cannot start says why there and nowhere else); the tail
+is cleared once the server is working, so a later disconnect quotes the crash
+rather than the startup banner. `notifications/tools/list_changed` re-lists
+that server's tools in place, and the agent re-reads the bridged tool set at
+the start of every turn, so a tool list is not frozen at boot.
+
+There is **no automatic reconnection loop**, deliberately. Two of the three
+ways a server dies — a command that does not exist, a credential that is not
+accepted — can never be fixed by retrying, and the third, a restarted endpoint,
+is one `POST /v1/mcp/servers/{name}/reconnect` away from a surface that is
+already showing the failure. A background retry against a crash-looping child
+would hide the problem and add load. A tool call that arrives for a server that
+is down fails with a named `McpServerUnavailableError` naming the server and
+the remedy, not a socket error from three layers down.
 
 The native memory tools remain the recall/remember path of record — they carry
 attribution that MCP text framing cannot.
@@ -202,6 +248,7 @@ attribution that MCP text framing cannot.
 | `VLLM_BASE_URL` | `http://127.0.0.1:8000/v1` | vLLM endpoint (`vllm serve` default port) |
 | `SEAT_LOCAL_CONTEXT_WINDOW` / `SEAT_LOCAL_MAX_TOKENS` | `32768` / `8192` | advertised limits for local models |
 | `SEAT_MCP_SERVERS` | — | path to MCP servers JSON |
+| `SEAT_MCP_CONNECT_TIMEOUT_MS` | `30000` | per-server budget to start, handshake and list tools (an `npx`/`uvx` server may be fetching its own package on first run) |
 | Provider keys | — | pi's env conventions (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, …) |
 
 ## Build and run

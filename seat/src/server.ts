@@ -7,6 +7,8 @@
  *   GET    /v1/providers                          provider auth status (no secrets)
  *   PUT    /v1/providers/{id}/key                 { api_key } — stored server-side
  *   DELETE /v1/providers/{id}/key                 remove stored key (env auth remains)
+ *   GET    /v1/mcp/servers                        MCP servers: status, transport, tool lists
+ *   POST   /v1/mcp/servers/{name}/reconnect       re-run one server's connection
  *   GET    /v1/conversations[?user_id]            persisted session list
  *   POST   /v1/conversations                      { user_id, provider, model, system_prompt? }
  *   GET    /v1/conversations/{id}                 state + transcript + durable events
@@ -34,7 +36,7 @@ import type { SeatConfig } from "./config.js";
 import { Conversation, ConversationBusyError, type ConversationDeps, UnknownModelError } from "./conversation.js";
 import type { SeatEvent } from "./events.js";
 import { LedgerError, type LearningLedger } from "./ledger.js";
-import type { McpHost } from "./mcp.js";
+import { type McpHost, UnknownMcpServerError } from "./mcp.js";
 import {
 	type ModelRegistry,
 	ProviderKeyUnsupportedError,
@@ -254,7 +256,8 @@ export class SeatServer {
 			backend: this.deps.backend,
 			registry: this.deps.registry,
 			ledger: this.deps.ledger,
-			mcpTools: this.deps.mcpHost.getTools(),
+			// Passed as a getter, not a snapshot: see ConversationDeps.mcpTools.
+			mcpTools: () => this.deps.mcpHost.getTools(),
 		};
 	}
 
@@ -298,6 +301,22 @@ export class SeatServer {
 				await this.handleOAuthInput(providerId, request, response);
 				return;
 			}
+		}
+		if (method === "GET" && url.pathname === "/v1/mcp/servers") {
+			sendJson(response, 200, { servers: this.deps.mcpHost.listServers() });
+			return;
+		}
+		if (
+			segments[0] === "v1" &&
+			segments[1] === "mcp" &&
+			segments[2] === "servers" &&
+			segments[3] &&
+			segments[4] === "reconnect" &&
+			segments.length === 5 &&
+			method === "POST"
+		) {
+			await this.handleMcpReconnect(decodeURIComponent(segments[3]), response);
+			return;
 		}
 		if (method === "GET" && url.pathname === "/v1/conversations") {
 			const userId = url.searchParams.get("user_id") ?? undefined;
@@ -378,8 +397,28 @@ export class SeatServer {
 			seat: "ok",
 			backend,
 			conversations: this.conversations.size,
-			mcp_servers: this.deps.mcpHost.listServers(),
+			// This route is deliberately UNAUTHENTICATED (see route()), so it
+			// carries the liveness summary only. Endpoints and connection-error
+			// text belong to GET /v1/mcp/servers, behind the bearer token: a
+			// failure message can quote the URL it failed against, and that URL
+			// is sometimes where the credential lives.
+			mcp_servers: this.deps.mcpHost.healthSummary(),
 		});
+	}
+
+	/**
+	 * Re-run one MCP server's connection. The manual half of the MCP lifecycle
+	 * — the host runs no retry loop (mcp.ts explains why), so this is how a
+	 * server that died, or whose config was just fixed, comes back. Returns the
+	 * server's post-attempt state, including the failure if it failed again.
+	 */
+	private async handleMcpReconnect(name: string, response: http.ServerResponse): Promise<void> {
+		try {
+			sendJson(response, 200, { server: await this.deps.mcpHost.reconnect(name) });
+		} catch (error) {
+			if (error instanceof UnknownMcpServerError) throw new HttpError(404, error.message);
+			throw error;
+		}
 	}
 
 	private async handleModels(url: URL, response: http.ServerResponse): Promise<void> {
