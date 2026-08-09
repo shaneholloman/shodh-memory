@@ -22,8 +22,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::types::{
-    MemoryId, Project, ProjectId, ProjectStatus, Todo, TodoComment, TodoCommentId,
-    TodoCommentType, TodoId, TodoStatus,
+    MemoryId, Project, ProjectId, ProjectStatus, Todo, TodoComment, TodoCommentId, TodoCommentType,
+    TodoId, TodoStatus,
 };
 
 /// Minimum cosine similarity for a todo to count as a semantic match.
@@ -888,8 +888,7 @@ impl TodoStore {
                     continue;
                 }
                 if let Some(blocker) = self.get_todo(user_id, blocker_id)? {
-                    if blocker.status != TodoStatus::Done
-                        && blocker.status != TodoStatus::Cancelled
+                    if blocker.status != TodoStatus::Done && blocker.status != TodoStatus::Cancelled
                     {
                         continue 'outer; // Still blocked by something else
                     }
@@ -1873,8 +1872,14 @@ mod tests {
             "invalid direction must be an error, not a silent no-op: {err}"
         );
         // Valid directions still work
-        assert!(store.reorder_todo("test_user", &todo.id, "up").unwrap().is_some());
-        assert!(store.reorder_todo("test_user", &todo.id, "down").unwrap().is_some());
+        assert!(store
+            .reorder_todo("test_user", &todo.id, "up")
+            .unwrap()
+            .is_some());
+        assert!(store
+            .reorder_todo("test_user", &todo.id, "down")
+            .unwrap()
+            .is_some());
     }
 
     // =========================================================================

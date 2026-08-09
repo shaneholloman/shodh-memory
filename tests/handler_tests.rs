@@ -1354,22 +1354,29 @@ async fn todo_comment_ids_are_discoverable_and_usable() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "add comment: {body}");
-    let comment_id = body["comment"]["id"].as_str().expect("comment id").to_string();
+    let comment_id = body["comment"]["id"]
+        .as_str()
+        .expect("comment id")
+        .to_string();
     assert!(
-        body["formatted"].as_str().unwrap_or("").contains(&comment_id),
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&comment_id),
         "add confirmation must render the comment id: {body}"
     );
 
     let (status, body) = json_of(
         h.app(),
-        authed_get(&format!(
-            "/api/todos/{todo_id}/comments?user_id=test-user"
-        )),
+        authed_get(&format!("/api/todos/{todo_id}/comments?user_id=test-user")),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        body["formatted"].as_str().unwrap_or("").contains(&comment_id),
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&comment_id),
         "comment list must render ids: {body}"
     );
 
@@ -1441,7 +1448,10 @@ async fn subtasks_listing_renders_rows() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["count"], json!(1), "one subtask expected: {body}");
     assert!(
-        body["formatted"].as_str().unwrap_or("").contains("Child task row"),
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Child task row"),
         "formatted subtask list must render the rows, not just a count: {body}"
     );
 }
@@ -1477,7 +1487,10 @@ async fn todo_blocked_by_dependency_flow() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "create dependent: {body}");
-    let dependent_id = body["todo"]["id"].as_str().expect("dependent id").to_string();
+    let dependent_id = body["todo"]["id"]
+        .as_str()
+        .expect("dependent id")
+        .to_string();
     assert_eq!(
         body["todo"]["blocked_by"].as_array().map(|a| a.len()),
         Some(1),
@@ -1532,7 +1545,10 @@ async fn todo_blocked_by_dependency_flow() {
         "completing the last blocker must surface the dependent as unblocked: {body}"
     );
     assert!(
-        body["formatted"].as_str().unwrap_or("").contains("Unblocked"),
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Unblocked"),
         "formatted completion must mention what was unblocked: {body}"
     );
 }
@@ -1678,10 +1694,7 @@ async fn consolidation_report_defaults_to_24h_window() {
     let h = Harness::new();
     let (status, body) = json_of(
         h.app(),
-        authed_post(
-            "/api/consolidation/report",
-            json!({"user_id": "test-user"}),
-        ),
+        authed_post("/api/consolidation/report", json!({"user_id": "test-user"})),
     )
     .await;
     assert!(status.is_success(), "consolidation report: {body}");

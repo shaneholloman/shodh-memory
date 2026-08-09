@@ -507,9 +507,7 @@ async fn verify_memory_ids(
         return Ok(parsed);
     }
 
-    let memory_system = state
-        .get_user_memory(user_id)
-        .map_err(AppError::Internal)?;
+    let memory_system = state.get_user_memory(user_id).map_err(AppError::Internal)?;
     let ids_to_check = parsed.clone();
     let missing: Option<MemoryId> = tokio::task::spawn_blocking(move || {
         let guard = memory_system.read();
@@ -1509,14 +1507,12 @@ pub async fn get_todo(
         let blockers: Vec<String> = todo
             .blocked_by
             .iter()
-            .map(|bid| {
-                match state.todo_store.get_todo(&query.user_id, bid) {
-                    Ok(Some(b)) => {
-                        let status = format!("{:?}", b.status).to_lowercase();
-                        format!("{} ({})", b.short_id(), status)
-                    }
-                    _ => format!("{} (deleted)", bid.short()),
+            .map(|bid| match state.todo_store.get_todo(&query.user_id, bid) {
+                Ok(Some(b)) => {
+                    let status = format!("{:?}", b.status).to_lowercase();
+                    format!("{} ({})", b.short_id(), status)
                 }
+                _ => format!("{} (deleted)", bid.short()),
             })
             .collect();
         formatted.push_str(&format!("\n  Blocked by: {}", blockers.join(", ")));

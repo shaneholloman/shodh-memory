@@ -383,10 +383,7 @@ fn comment_type_icon(comment_type: &super::types::TodoCommentType) -> &'static s
 /// Format the comment list for a todo. Every comment line carries its id —
 /// update/delete operations require the comment id, and this rendering is the
 /// only place a client that reads formatted output can discover it.
-pub fn format_comment_list(
-    todo_short_id: &str,
-    comments: &[super::types::TodoComment],
-) -> String {
+pub fn format_comment_list(todo_short_id: &str, comments: &[super::types::TodoComment]) -> String {
     if comments.is_empty() {
         return format!("No comments on {}", todo_short_id);
     }
