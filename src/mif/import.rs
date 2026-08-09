@@ -160,6 +160,7 @@ pub fn prepare_todos(doc: &MifDocument, user_id: &str) -> Vec<Todo> {
                 embedding: None,
                 related_memory_ids,
                 external_id: t.external_id.clone(),
+                blocked_by: t.blocked_by.iter().map(|id| TodoId(*id)).collect(),
             }
         })
         .collect()
