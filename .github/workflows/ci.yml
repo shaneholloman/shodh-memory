@@ -653,6 +653,7 @@ jobs:
             --test salience_tests \
             --test spreading_activation_tests \
             --test storage_edge_case_tests \
+            --test trace_capture \
             --test universe_tests \
             --no-fail-fast 2>&1 | tee test-output.txt
 
