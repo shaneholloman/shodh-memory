@@ -154,13 +154,19 @@ jobs:
       # behind a #[cfg(feature = ...)] gate can stop compiling and no PR will
       # ever show it. Not hypothetical: the zenoh transport accrued four compile
       # errors that way (repaired in #417), and llm-parser two (repaired here).
-      # 'python' is excluded deliberately: it needs a maturin/PyO3 toolchain and
-      # is already built on every release by pypi.yml.
+      #
+      # 'python' used to be excluded here on the theory that pypi.yml covers it.
+      # It does not: pypi.yml is workflow_dispatch-only, so nothing built the
+      # PyO3 bindings on a PR, and src/python.rs drifted three E0063 initializers
+      # behind the struct definitions (Experience::toponyms from the #435
+      # gazetteer, Query::ner_entities twice). `cargo check` needs no maturin —
+      # pyo3 is abi3-py38 + extension-module, so the build script only wants the
+      # interpreter that every runner already has, and check never links.
       - name: cargo check each optional feature
         run: |
           set -o pipefail
           FAILED=""
-          for feature in zenoh llm-parser telemetry; do
+          for feature in zenoh llm-parser telemetry python; do
             echo "::group::cargo check --features $feature"
             if cargo check --features "$feature" --all-targets; then
               echo "OK: $feature"
@@ -183,6 +189,15 @@ jobs:
             echo "Optional features failed to compile:$FAILED" >&2
             exit 1
           fi
+
+      # The loop above proves each feature compiles ALONE. It cannot prove the
+      # union compiles, and the union is what `cargo check --all-features`,
+      # `cargo package --all-features`, and any downstream crate enabling two of
+      # ours actually build. Feature unification only ever ADDS cfgs and dep
+      # features, so a symbol that resolves under one feature can stop resolving
+      # when a second is on. This step is a hard gate, not a report.
+      - name: cargo check --all-features --all-targets
+        run: cargo check --all-features --all-targets
 
   build:
     name: Build (${{ matrix.os }})
@@ -211,6 +226,27 @@ jobs:
 
       - name: Build Release
         run: cargo build --release
+
+      # `cargo test --release` builds a unit graph that NOTHING else in this
+      # repo builds: `cargo build --release` makes bins only, every test job
+      # runs the dev profile, and `cargo check` emits no cdylib. That gap hid an
+      # unbuildable configuration for months — `[profile.release] panic =
+      # "abort"` plus a cdylib lib target made cargo emit two variants of
+      # `libshodh_memory.rlib` into the same unhashed filename (cargo#6313), so
+      # the loser was clobbered and every consumer linked against the wrong SVH.
+      #
+      # `recall_eval_cli` is the right sentinel and not an arbitrary pick: it
+      # resolves `CARGO_BIN_EXE_recall-eval`, which forces cargo to build the
+      # bins in release alongside a rustc test harness — exactly the two-panic-
+      # flavour graph that broke. Its four tests only parse CLI flags (no
+      # models, no ports), so this runs for real rather than `--no-run` — which
+      # additionally proves the release `recall-eval` binary starts and parses
+      # its arguments, not that a full eval suite passes (recall.yml owns that).
+      # Ubuntu only: this is a build-configuration gate, not a portability one,
+      # and the release profile is fat-LTO.
+      - name: Release test graph compiles and runs (cargo test --release)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release --test recall_eval_cli
 
       # `cargo test --lib` constructs real memory systems, and library init
       # acquires its models on demand: MiniLM (~90MB, HuggingFace) because vector

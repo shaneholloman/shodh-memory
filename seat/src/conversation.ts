@@ -125,6 +125,22 @@ export const DEFAULT_MEMORY_MECHANISMS: MemoryMechanisms = {
  */
 const REDUNDANT_MCP_MEMORY_TOOLS = new Set(["recall", "quick_recall", "proactive_context", "remember"]);
 
+/**
+ * Drop the bridged MCP tools that duplicate native memory ops.
+ *
+ * `deps.mcpTools` is a *function* re-read every turn, so this has to be applied
+ * at every call site rather than once at construction — a server that
+ * reconnects or changes its tool list mid-conversation would otherwise
+ * re-introduce exactly the tools this filter exists to remove.
+ */
+function withoutRedundantMcpTools(tools: AgentTool<any>[], enabled: boolean): AgentTool<any>[] {
+	if (!enabled) return tools;
+	return tools.filter((tool) => {
+		const baseName = tool.name.startsWith("mcp__") ? tool.name.split("__").slice(2).join("__") : tool.name;
+		return !REDUNDANT_MCP_MEMORY_TOOLS.has(baseName);
+	});
+}
+
 /** Hard cap on verification passes per turn: one revision, never a loop. */
 const MAX_VERIFY_PASSES = 1;
 
@@ -187,7 +203,19 @@ export interface ConversationDeps {
 	backend: ShodhBackend;
 	registry: ModelRegistry;
 	ledger: LearningLedger;
-	mcpTools: AgentTool<any>[];
+	/**
+	 * The bridged MCP tools that are reachable RIGHT NOW, read fresh rather
+	 * than handed over once.
+	 *
+	 * A function and not an array because MCP servers come and go underneath a
+	 * long-lived conversation: one is reconnected from the workbench, another
+	 * announces a changed tool list, a third dies. A snapshot taken when the
+	 * conversation was constructed would keep offering the model tools that
+	 * cannot be called, and would hide tools that appeared since — and a
+	 * conversation here can outlive several such changes, because it is
+	 * rehydrated from the store rather than recreated per request.
+	 */
+	mcpTools: () => AgentTool<any>[];
 }
 
 export interface ConversationOptions {
@@ -279,6 +307,10 @@ export class Conversation {
 	private readonly deps: ConversationDeps;
 	private readonly agent: Agent;
 	private readonly baseSystemPrompt: string;
+	/** The native memory tools, kept so the tool list can be rebuilt around a
+	 *  changed set of MCP tools without recreating them (they close over this
+	 *  conversation's ids and event sink). */
+	private readonly memoryTools: AgentTool<any>[];
 
 	private turn = 0;
 	private currentSink?: SeatEventSink;
@@ -334,7 +366,7 @@ export class Conversation {
 		if (options.systemPrompt?.trim()) promptBlocks.push(options.systemPrompt.trim());
 		this.baseSystemPrompt = promptBlocks.join("\n\n");
 
-		const memoryTools = createMemoryTools({
+		this.memoryTools = createMemoryTools({
 			backend: deps.backend,
 			userId: this.userId,
 			harnessUserId: this.harnessUserId,
@@ -353,19 +385,15 @@ export class Conversation {
 			renderLineage: this.mechanisms.recallLineage,
 		});
 
-		const mcpTools = this.mechanisms.mcpMemoryToolFilter
-			? deps.mcpTools.filter((tool) => {
-					const baseName = tool.name.startsWith("mcp__") ? tool.name.split("__").slice(2).join("__") : tool.name;
-					return !REDUNDANT_MCP_MEMORY_TOOLS.has(baseName);
-				})
-			: deps.mcpTools;
-
 		this.agent = new Agent({
 			initialState: {
 				systemPrompt: this.baseSystemPrompt,
 				model: options.model,
 				thinkingLevel: "off",
-				tools: [...memoryTools, ...mcpTools],
+				tools: [
+					...this.memoryTools,
+					...withoutRedundantMcpTools(deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
+				],
 				// Restored transcripts were produced by this same agent and
 				// persisted verbatim (store.ts) — the cast re-labels what the
 				// agent itself serialized.
@@ -466,6 +494,17 @@ export class Conversation {
 		if (this.agent.state.isStreaming || this.currentSink) throw new ConversationBusyError();
 		this.currentSink = sink;
 		this.turn += 1;
+
+		// Re-read the bridged MCP tools for this turn. `AgentState.tools` is a
+		// settable accessor that copies the array it is given
+		// (pi-agent-core dist/types.d.ts), so this is the supported way to
+		// change what the agent can reach between runs — and it is the only
+		// place a server that reconnected, dropped, or changed its tool list
+		// since the last turn actually takes effect.
+		this.agent.state.tools = [
+			...this.memoryTools,
+			...withoutRedundantMcpTools(this.deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
+		];
 
 		// Reset per-run state.
 		this.surfaced = new Map();

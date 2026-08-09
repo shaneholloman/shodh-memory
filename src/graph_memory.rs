@@ -4670,6 +4670,85 @@ impl GraphMemory {
             sb.total_cmp(&sa)
         });
 
+        // Phase 3.1: CROSS-INGEST DETERMINISM. The stable sort above leaves
+        // equal-strength edges in Phase-1 prefix-scan order, i.e. edge-UUID
+        // lexicographic order — random per ingest, since edge UUIDs are
+        // `Uuid::new_v4()`. Freshly built graphs have large exact-strength
+        // plateaus (every co-occurrence edge starts at its tier's initial
+        // weight), and hub entities carry more edges than callers' caps
+        // (locomo-gate: 3 hubs at 185-290 edges vs the PPR per-node cap of
+        // 100), so WHICH edges survive Phase 4's `truncate(limit)` — and the
+        // summation order of everything downstream — was decided by that
+        // per-ingest random order. Two ingests of the same corpus then walk
+        // different subgraphs, activations jitter at the ~1% level, and the
+        // recall harness's repeat-determinism guard (RH-12) fires on near-tie
+        // rank flips (PR #462: conv-42_q1/q51, a Δ≈9e-5 fused pair at the
+        // top-10 cutoff).
+        //
+        // Order equal-strength runs by a key that is a pure function of graph
+        // CONTENT, not of ingest randomness: (peer entity name, relation
+        // type, edge uuid). Names are repeat-stable (deterministic entity
+        // resolution — verified by cross-repeat graph checksums) and
+        // `add_relationship` dedups by (from, to, type), so the uuid fallback
+        // only orders edges that are content-identical — where either order
+        // yields bit-identical downstream sums (equal strengths commute).
+        // Peer names are resolved lazily and only inside runs of 2+, so the
+        // common no-tie case costs nothing extra.
+        {
+            let mut peer_names: HashMap<Uuid, String> = HashMap::new();
+            let strength_bits = |e: &RelationshipEdge| -> u32 {
+                strength_cache
+                    .get(&e.uuid)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .to_bits()
+            };
+            let mut i = 0;
+            while i < edges.len() {
+                let si = strength_bits(&edges[i]);
+                let mut j = i + 1;
+                while j < edges.len() && strength_bits(&edges[j]) == si {
+                    j += 1;
+                }
+                if j - i > 1 {
+                    for e in &edges[i..j] {
+                        let peer = if e.from_entity == *entity_uuid {
+                            e.to_entity
+                        } else {
+                            e.from_entity
+                        };
+                        peer_names.entry(peer).or_insert_with(|| {
+                            self.get_entity(&peer)
+                                .ok()
+                                .flatten()
+                                .map(|ent| ent.name)
+                                .unwrap_or_default()
+                        });
+                    }
+                    edges[i..j].sort_by(|a, b| {
+                        let pa = if a.from_entity == *entity_uuid {
+                            a.to_entity
+                        } else {
+                            a.from_entity
+                        };
+                        let pb = if b.from_entity == *entity_uuid {
+                            b.to_entity
+                        } else {
+                            b.from_entity
+                        };
+                        peer_names[&pa]
+                            .cmp(&peer_names[&pb])
+                            .then_with(|| {
+                                format!("{:?}", a.relation_type)
+                                    .cmp(&format!("{:?}", b.relation_type))
+                            })
+                            .then_with(|| a.uuid.cmp(&b.uuid))
+                    });
+                }
+                i = j;
+            }
+        }
+
         // Phase 3.5: Opportunistic pruning — queue edges that have decayed below
         // their tier's threshold for batch deletion on next maintenance cycle.
         // This replaces the eager full-scan apply_decay() with lazy on-read pruning.

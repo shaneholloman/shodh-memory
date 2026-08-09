@@ -1245,6 +1245,314 @@ async fn list_todos_empty() {
     assert!(status.is_success());
 }
 
+/// Regression (capability-map F19): `list_todos` with a `query` that is a
+/// literal prefix of an existing todo's content returned nothing. The lexical
+/// path of hybrid search must guarantee exact word matches surface.
+#[tokio::test]
+async fn list_todos_query_finds_exact_word_match() {
+    let h = Harness::new();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": "test-user", "content": "Audit-2 parent task"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create todo: {body}");
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos",
+            json!({"user_id": "test-user", "query": "Audit-2 parent"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let todos = body["todos"].as_array().expect("todos array");
+    assert!(
+        todos
+            .iter()
+            .any(|t| t["content"].as_str() == Some("Audit-2 parent task")),
+        "query must find the todo whose content it literally prefixes: {body}"
+    );
+}
+
+/// Regression (capability-map F15): `reorder_todo` accepted any direction and
+/// silently treated it as "down". Invalid directions must be a 400 that names
+/// the accepted values.
+#[tokio::test]
+async fn reorder_todo_rejects_invalid_direction() {
+    let h = Harness::new();
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": "test-user", "content": "Reorder me"}),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/reorder"),
+            json!({"user_id": "test-user", "direction": "sideways"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid direction must be rejected, got: {body}"
+    );
+    assert!(
+        body.to_string().contains("up"),
+        "error should name accepted values: {body}"
+    );
+
+    // Valid direction still works
+    let (status, _) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/reorder"),
+            json!({"user_id": "test-user", "direction": "up"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Regression (capability-map F7): comment ids were never rendered, making
+/// `update_todo_comment` / `delete_todo_comment` unreachable for clients that
+/// read formatted output. Both the add confirmation and the list must carry
+/// the id, and the id must actually drive update and delete.
+#[tokio::test]
+async fn todo_comment_ids_are_discoverable_and_usable() {
+    let h = Harness::new();
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": "test-user", "content": "Comment target"}),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/comments"),
+            json!({"user_id": "test-user", "content": "an audit comment"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "add comment: {body}");
+    let comment_id = body["comment"]["id"]
+        .as_str()
+        .expect("comment id")
+        .to_string();
+    assert!(
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&comment_id),
+        "add confirmation must render the comment id: {body}"
+    );
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_get(&format!("/api/todos/{todo_id}/comments?user_id=test-user")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&comment_id),
+        "comment list must render ids: {body}"
+    );
+
+    // The rendered id drives update...
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/comments/{comment_id}/update"),
+            json!({"user_id": "test-user", "content": "edited"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update comment: {body}");
+
+    // ...and delete
+    let (status, body) = json_of(
+        h.app(),
+        authed_delete(&format!(
+            "/api/todos/{todo_id}/comments/{comment_id}?user_id=test-user"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete comment: {body}");
+    assert_eq!(body["success"], json!(true));
+}
+
+/// Regression (capability-map F8): the subtasks endpoint returned a header and
+/// a count with no rows. The formatted output must render the children.
+#[tokio::test]
+async fn subtasks_listing_renders_rows() {
+    let h = Harness::new();
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": "test-user", "content": "Parent task"}),
+        ),
+    )
+    .await;
+    let parent_id = body["todo"]["id"].as_str().expect("parent id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({
+                "user_id": "test-user",
+                "content": "Child task row",
+                "parent_id": parent_id
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create subtask: {body}");
+    assert_eq!(
+        body["todo"]["parent_id"].as_str(),
+        Some(parent_id.as_str()),
+        "child must be parented: {body}"
+    );
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_get(&format!(
+            "/api/todos/{parent_id}/subtasks?user_id=test-user"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["count"], json!(1), "one subtask expected: {body}");
+    assert!(
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Child task row"),
+        "formatted subtask list must render the rows, not just a count: {body}"
+    );
+}
+
+/// Structured dependencies end to end: create with blocked_by, reject a
+/// dependency cycle with 400, and surface the newly unblocked todo on
+/// completion of its last blocker.
+#[tokio::test]
+async fn todo_blocked_by_dependency_flow() {
+    let h = Harness::new();
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": "test-user", "content": "Blocker task"}),
+        ),
+    )
+    .await;
+    let blocker_id = body["todo"]["id"].as_str().expect("blocker id").to_string();
+
+    // Create a dependent todo referencing the blocker by UUID
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({
+                "user_id": "test-user",
+                "content": "Dependent task",
+                "blocked_by": [blocker_id]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create dependent: {body}");
+    let dependent_id = body["todo"]["id"]
+        .as_str()
+        .expect("dependent id")
+        .to_string();
+    assert_eq!(
+        body["todo"]["blocked_by"].as_array().map(|a| a.len()),
+        Some(1),
+        "dependency must be stored: {body}"
+    );
+
+    // Unknown reference is rejected
+    let (status, _) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({
+                "user_id": "test-user",
+                "content": "Bad dep",
+                "blocked_by": ["NOPE-999"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown dependency ref");
+
+    // Cycle: blocker cannot depend on dependent (dependent already waits on it)
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{blocker_id}/update"),
+            json!({"user_id": "test-user", "blocked_by": [dependent_id]}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "dependency cycle must be rejected: {body}"
+    );
+
+    // Completing the blocker surfaces the dependent as unblocked
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{blocker_id}/complete"),
+            json!({"user_id": "test-user"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "complete blocker: {body}");
+    let unblocked = body["unblocked"].as_array().expect("unblocked array");
+    assert!(
+        unblocked
+            .iter()
+            .any(|t| t["content"].as_str() == Some("Dependent task")),
+        "completing the last blocker must surface the dependent as unblocked: {body}"
+    );
+    assert!(
+        body["formatted"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Unblocked"),
+        "formatted completion must mention what was unblocked: {body}"
+    );
+}
+
 #[tokio::test]
 async fn todo_stats_empty() {
     let h = Harness::new();
@@ -1375,6 +1683,36 @@ async fn verify_index_empty() {
     )
     .await;
     assert!(status.is_success());
+}
+
+/// Regression (capability-map F17): with no `since`, the consolidation report
+/// covered only the last hour while clients document a 24-hour default, so it
+/// reported "no activity" on stores that consolidated earlier the same day.
+/// The default window must span 24 hours.
+#[tokio::test]
+async fn consolidation_report_defaults_to_24h_window() {
+    let h = Harness::new();
+    let (status, body) = json_of(
+        h.app(),
+        authed_post("/api/consolidation/report", json!({"user_id": "test-user"})),
+    )
+    .await;
+    assert!(status.is_success(), "consolidation report: {body}");
+
+    let start = body["period"]["start"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .expect("period.start");
+    let end = body["period"]["end"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .expect("period.end");
+
+    let window_mins = (end - start).num_minutes();
+    assert!(
+        (window_mins - 24 * 60).abs() <= 5,
+        "default report window must span ~24h, got {window_mins} minutes"
+    );
 }
 
 #[tokio::test]

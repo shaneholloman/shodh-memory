@@ -12,6 +12,7 @@ import type {
   ConversationDetail,
   ConversationSummary,
   LedgerEntryView,
+  McpServerInfo,
   ModelRef,
   OAuthFlowEvent,
   ProviderInfo,
@@ -77,6 +78,24 @@ export async function clearProviderKey(providerId: string): Promise<ProviderInfo
   });
   if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ""));
   return ((await res.json()) as { provider: ProviderInfo }).provider;
+}
+
+/** Every configured MCP server, connected or not — the failures are the point
+ *  as much as the successes, so the seat never filters this list. */
+export function listMcpServers(signal?: AbortSignal) {
+  return api.get<{ servers: McpServerInfo[] }>("/seat/v1/mcp/servers", signal);
+}
+
+/** Re-run one server's connection. The seat runs no retry loop (seat/src/mcp.ts
+ *  explains why), so this is the remedy for a server that dropped or whose
+ *  configuration was just fixed. Resolves with its post-attempt state — which
+ *  may still be a failure, carrying the new reason. */
+export async function reconnectMcpServer(name: string): Promise<McpServerInfo> {
+  const res = await fetch(`/seat/v1/mcp/servers/${encodeURIComponent(name)}/reconnect`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ""));
+  return ((await res.json()) as { server: McpServerInfo }).server;
 }
 
 export function listConversations(userId: string, signal?: AbortSignal) {

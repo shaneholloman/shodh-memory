@@ -407,6 +407,7 @@ fn convert_todo(t: &Todo) -> MifTodo {
         comments,
         related_memory_ids: t.related_memory_ids.iter().map(|id| id.0).collect(),
         external_id: t.external_id.clone(),
+        blocked_by: t.blocked_by.iter().map(|id| id.0).collect(),
     }
 }
 
