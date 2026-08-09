@@ -652,6 +652,126 @@ function streamToolCall(toolName: string, args: Record<string, unknown>, resultT
   streamMemory(content, ["tool-call", toolName], "tool");
 }
 
+// =============================================================================
+// LINEAGE / GRAPH / FACTS HELPERS
+// =============================================================================
+
+const FULL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Minimal slice of GET /api/memory/{id} (crud::MemoryWithHierarchy) used for
+// id resolution and preview rendering.
+interface MemoryLookup {
+  id: string;
+  experience?: { content?: string; experience_type?: string };
+}
+
+// Resolve a full UUID or 8+ char prefix to a concrete memory id.
+//
+// GET /api/memory/{id} resolves prefixes server-side (crud::resolve_memory →
+// find_memory_by_prefix), but the lineage handlers do a bare uuid::parse_str
+// (src/handlers/lineage.rs) and reject prefixes — so anything that feeds a
+// memory id into a lineage endpoint must resolve it here first.
+async function resolveMemoryId(idOrPrefix: string): Promise<string> {
+  const trimmed = idOrPrefix.trim();
+  if (FULL_UUID_RE.test(trimmed)) return trimmed;
+  const memory = await apiCall<MemoryLookup>(
+    `/api/memory/${encodeURIComponent(trimmed)}?user_id=${encodeURIComponent(USER_ID)}`,
+    "GET",
+  );
+  return memory.id;
+}
+
+// Fetch short content previews for a bounded set of memory ids so causal-chain
+// output shows what each node IS, not just a UUID. Parallel, failures
+// tolerated: a deleted/unreadable memory simply renders as its id.
+const PREVIEW_FETCH_CAP = 16;
+const PREVIEW_CHARS = 90;
+
+async function fetchMemoryPreviews(ids: string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids)].slice(0, PREVIEW_FETCH_CAP);
+  const previews = new Map<string, string>();
+  await Promise.all(
+    unique.map(async (id) => {
+      try {
+        const m = await apiCall<MemoryLookup>(
+          `/api/memory/${encodeURIComponent(id)}?user_id=${encodeURIComponent(USER_ID)}`,
+          "GET",
+        );
+        const content = m.experience?.content || "";
+        if (content) {
+          previews.set(id, content.length > PREVIEW_CHARS ? content.slice(0, PREVIEW_CHARS) + "…" : content);
+        }
+      } catch {
+        // Memory deleted since the edge was written — the id alone still identifies it.
+      }
+    }),
+  );
+  return previews;
+}
+
+// Prose rendering of a causal relation read from→to. The edge's `from` is
+// always the earlier memory (cause/origin/evidence), `to` the later one — per
+// the inference table in src/memory/lineage.rs infer_by_types: Error→Task =
+// Caused, Task→Learning = ResolvedBy, Learning→Decision = InformedBy,
+// Discovery→Task = TriggeredBy, Decision→Decision = SupersededBy. InformedBy
+// therefore reads "from informed to" (evidence → the decision it informed),
+// NOT the enum's to-perspective name. The one inversion is BranchedFrom:
+// branch anchoring (mod.rs) writes from=pivot, to=origin, so "from branched
+// from to" is literally correct there.
+const CAUSAL_RELATION_PROSE: Record<string, string> = {
+  Caused: "caused",
+  ResolvedBy: "was resolved by",
+  InformedBy: "informed",
+  SupersededBy: "was superseded by",
+  TriggeredBy: "triggered",
+  BranchedFrom: "branched from",
+  RelatedTo: "is related to",
+};
+
+// Wire shape of a lineage edge (src/memory/lineage.rs LineageEdge; MemoryId
+// serializes as a bare UUID string).
+interface LineageEdgeWire {
+  id: string;
+  from: string;
+  to: string;
+  relation: string;
+  confidence: number;
+  source: string; // "Inferred" | "Confirmed" | "Explicit"
+  branch_id: string | null;
+  created_at: string;
+  reinforcement_count: number;
+}
+
+function formatLineageEdge(
+  edge: LineageEdgeWire,
+  previews: Map<string, string>,
+  indent: string,
+): string {
+  const conf = (edge.confidence * 100).toFixed(0);
+  const prose = CAUSAL_RELATION_PROSE[edge.relation] || edge.relation;
+  let out = `${indent}${edge.from} ──${edge.relation}──▶ ${edge.to}\n`;
+  out += `${indent}  (${conf}% confidence, ${edge.source} │ edge_id: ${edge.id})\n`;
+  const fromPreview = previews.get(edge.from);
+  const toPreview = previews.get(edge.to);
+  // Prose reading only when both sides have content — a UUID mid-sentence
+  // reads like a broken render; the arrow line above already carries the ids.
+  if (fromPreview && toPreview) {
+    out += `${indent}  "${fromPreview}" ${prose} "${toPreview}"\n`;
+  }
+  return out;
+}
+
+// RelationType (src/graph_memory.rs) serializes either as a bare string
+// ("Causes", "Triggers", "CoOccurs", ...) or as { "Custom": "Enabled" } for
+// schema-typed custom relations. Normalize both to a display string.
+function formatRelationType(rt: unknown): string {
+  if (typeof rt === "string") return rt;
+  if (rt && typeof rt === "object" && "Custom" in (rt as Record<string, unknown>)) {
+    return String((rt as Record<string, unknown>).Custom);
+  }
+  return String(rt);
+}
+
 // Robust API call with retries and timeout
 async function apiCall<T>(
   endpoint: string,
@@ -1731,6 +1851,204 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
           },
           required: ["memory_id"],
+        },
+      },
+      // =======================================================================
+      // CAUSAL LINEAGE, KNOWLEDGE GRAPH, ANOMALIES, FACTS
+      //
+      // Abstraction choice: one tool per QUESTION an agent asks, not one per
+      // API route. "Why did X happen / what did X cause" (trace_lineage),
+      // "what causal structure exists" (list_causal_edges), "record a causal
+      // link" (add_causal_link), "settle an inferred link" (validate_causal_link),
+      // "what surrounds this entity" (explore_entity), "what entities exist"
+      // (list_entities), "what is statistically unusual" (list_anomalies),
+      // "what does the system know as distilled fact" (search_facts), and
+      // "these memories helped/misled" (reinforce_memories). Mode parameters
+      // are used only where the choice is a filter on the same question
+      // (trace direction, facts query-vs-entity), never to fuse different
+      // questions into one tool — an LLM discriminates between tools by name
+      // and first sentence, and a grab-bag "lineage" tool with an operation
+      // enum would make every causal question a two-step guess.
+      //
+      // Deliberately NOT exposed (operator/maintenance surface, not agent
+      // affordances): graph clear/rebuild/canonicalize, tier-census/curvature/
+      // universe (dashboard diagnostics), lineage branches (pivot bookkeeping
+      // with no natural agent trigger), raw entity/relationship writes (the
+      // graph is built by extraction; manual writes bypass provenance).
+      // =======================================================================
+      {
+        name: "trace_lineage",
+        description: "Trace the causal chain of a memory: what led to it (direction=backward, the default) or what it went on to cause (forward). Follows typed causal edges between memories (Caused, ResolvedBy, InformedBy, SupersededBy, TriggeredBy) and reports the root cause — the oldest ancestor — when tracing backward. Use this, not recall, to answer 'why did X happen' or 'what did X cause' for a memory whose ID you have (from recall/read_memory output). For exploring around a named entity instead of a memory, use explore_entity.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            memory_id: {
+              type: "string",
+              description: "Memory to trace from (full UUID or 8+ char prefix from recall results)",
+            },
+            direction: {
+              type: "string",
+              enum: ["backward", "forward", "both"],
+              description: "backward = find causes (default), forward = find effects, both = full chain",
+              default: "backward",
+            },
+            max_depth: {
+              type: "number",
+              description: "Maximum hops to traverse (default: 10, max: 100)",
+              default: 10,
+            },
+          },
+          required: ["memory_id"],
+        },
+      },
+      {
+        name: "list_causal_edges",
+        description: "Survey the causal lineage graph: totals by relation type and source (inferred/confirmed/explicit), average confidence, and the highest-confidence edges with their edge IDs. Use to see what causal structure exists across all memories, or to find edge IDs for validate_causal_link. For the chain around one specific memory, use trace_lineage instead.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Maximum edges to list (default: 15)",
+              default: 15,
+            },
+          },
+        },
+      },
+      {
+        name: "add_causal_link",
+        description: "Record an explicit causal edge between two memories. from_memory_id is the cause/origin (the earlier event), to_memory_id is the effect (the later one); the relation reads from→to, e.g. relation=Caused means 'from caused to'. Use when you learn that one remembered event caused, resolved, informed, superseded, or triggered another. Explicit links carry full confidence and strengthen causal recall and root-cause tracing.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            from_memory_id: {
+              type: "string",
+              description: "The cause/origin memory (full UUID or 8+ char prefix)",
+            },
+            to_memory_id: {
+              type: "string",
+              description: "The effect memory (full UUID or 8+ char prefix)",
+            },
+            relation: {
+              type: "string",
+              enum: ["Caused", "ResolvedBy", "InformedBy", "SupersededBy", "TriggeredBy", "BranchedFrom", "RelatedTo"],
+              description: "Causal relation read from→to: Caused (error→task it spawned), ResolvedBy (task→fix that closed it), InformedBy (evidence→decision it informed: 'from informed to'), SupersededBy (old→replacement), TriggeredBy ('from triggered to'), BranchedFrom (pivot→the origin it branched from; the only relation whose from is the NEWER memory), RelatedTo (causal but untyped)",
+            },
+          },
+          required: ["from_memory_id", "to_memory_id", "relation"],
+        },
+      },
+      {
+        name: "validate_causal_link",
+        description: "Confirm or reject a causal edge by its edge ID (shown by trace_lineage and list_causal_edges). Confirming an inferred edge raises it to full confidence and strengthens the knowledge-graph connections between the two memories' entities; rejecting deletes the edge. Use when the user or the evidence settles whether an inferred causal link is real — confirmed chains make root-cause tracing trustworthy.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            edge_id: {
+              type: "string",
+              description: "The lineage edge ID (edge_id field in trace_lineage / list_causal_edges output)",
+            },
+            verdict: {
+              type: "string",
+              enum: ["confirm", "reject"],
+              description: "confirm = the causal link is real; reject = it is spurious (deletes the edge)",
+            },
+          },
+          required: ["edge_id", "verdict"],
+        },
+      },
+      {
+        name: "explore_entity",
+        description: "Walk the knowledge graph outward from a named entity: connected entities by hop distance, and the typed relationships between them (Causes, Triggers, DependsOn, custom types, plus co-occurrence), each with strength and source context. Use when you have an entity NAME (person, system, place, ship, ...) and want its connections — recall searches episodic text instead, and trace_lineage follows memory-to-memory causality instead. Name matching is fuzzy (case-insensitive, stems, substrings); the output states which entity actually matched. Use list_entities to browse what exists.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            entity_name: {
+              type: "string",
+              description: "Entity name to start from (fuzzily matched; browse names via list_entities)",
+            },
+            max_depth: {
+              type: "number",
+              description: "Hops to traverse: 1 = direct neighbors (default), 2 = neighborhood, 3 = wide (can be large)",
+              default: 1,
+            },
+          },
+          required: ["entity_name"],
+        },
+      },
+      {
+        name: "list_entities",
+        description: "List the entities in the knowledge graph, ranked by salience (learned importance), with their types and mention counts. Use to discover what people, systems, places, and concepts the graph tracks — or to find the exact name to pass to explore_entity. For memory contents use recall; this is the graph's cast of characters.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Maximum entities to return (default: 30)",
+              default: 30,
+            },
+          },
+        },
+      },
+      {
+        name: "list_anomalies",
+        description: "Rank recent memories by statistical deviation from this user's own rolling baseline (novel entities, unusual entity co-occurrence, untyped-relation share). Each entry carries per-component z-scores and a deterministic explanation of why it deviates. Use to answer 'what has been unusual lately' or to spot weak signals worth investigating — this is deviation scoring against the corpus's own shape, not content search; there is no query. The baseline is the most recent 200 scored episodes (server default); at least 10 must exist before anything is scored.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Maximum entries, ranked by deviation (default: 10)",
+              default: 10,
+            },
+            min_sigma: {
+              type: "number",
+              description: "|z| at or above which an entry is flagged as anomalous (default: 2.0)",
+              default: 2.0,
+            },
+          },
+        },
+      },
+      {
+        name: "search_facts",
+        description: "Search the distilled semantic facts the system has consolidated out of episodic memories — stable knowledge like preferences, capabilities, relationships, and procedures, each with a confidence score and supporting-memory count. Pass query for keyword search, entity for facts about one entity, or neither to list recent facts. Use for 'what does the system KNOW about X' — recall searches raw episodic memories instead, and fact_narratives returns topic-clustered summaries instead of individual facts.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "Keyword search over fact statements",
+            },
+            entity: {
+              type: "string",
+              description: "Return facts related to this entity (takes precedence if both given)",
+            },
+            limit: {
+              type: "number",
+              description: "Maximum facts to return (default: 20)",
+              default: 20,
+            },
+          },
+        },
+      },
+      {
+        name: "reinforce_memories",
+        description: "Give Hebbian feedback on memories after using them: outcome 'helpful' boosts their importance and strengthens their associations so they surface more readily, 'misleading' decays them, 'neutral' just records the access. Call after completing a task with the memory IDs recall gave you — this is how retrieval learns from outcomes instead of only from similarity.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            memory_ids: {
+              type: "array",
+              items: { type: "string" },
+              description: "Memory IDs that were used (full UUIDs or 8+ char prefixes from recall output)",
+            },
+            outcome: {
+              type: "string",
+              enum: ["helpful", "misleading", "neutral"],
+              description: "helpful = they contributed to success; misleading = they pointed the wrong way; neutral = merely accessed",
+            },
+          },
+          required: ["memory_ids", "outcome"],
         },
       },
     ],
@@ -4204,6 +4522,644 @@ const handleCallTool = async (request: CallToolRequest) => {
         };
       }
 
+      // =======================================================================
+      // CAUSAL LINEAGE TOOLS
+      // =======================================================================
+
+      case "trace_lineage": {
+        const { memory_id, direction = "backward", max_depth = 10 } = args as {
+          memory_id: string;
+          direction?: string;
+          max_depth?: number;
+        };
+
+        if (!memory_id || memory_id.trim().length === 0) {
+          return { content: [{ type: "text", text: "Error: 'memory_id' is required (full UUID or 8+ char prefix from recall results)" }], isError: true };
+        }
+        const validDirections = ["backward", "forward", "both"];
+        if (!validDirections.includes(direction)) {
+          return { content: [{ type: "text", text: `Error: 'direction' must be one of: ${validDirections.join(", ")}` }], isError: true };
+        }
+        const depth = Math.max(1, Math.min(Math.floor(max_depth), 100));
+
+        // Lineage endpoints require a full UUID (bare uuid parse server-side);
+        // resolve prefixes via GET /api/memory/{id} first.
+        let resolvedId: string;
+        try {
+          resolvedId = await resolveMemoryId(memory_id);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return { content: [{ type: "text", text: `Could not resolve memory '${memory_id}': ${msg}` }], isError: true };
+        }
+
+        interface LineageTraceResponse {
+          root: string;
+          direction: string;
+          edges: LineageEdgeWire[];
+          path: string[];
+          depth: number;
+        }
+
+        // Root cause (oldest ancestor) only exists in the backward direction.
+        const wantRootCause = direction === "backward" || direction === "both";
+        const [trace, rootCause] = await Promise.all([
+          apiCall<LineageTraceResponse>("/api/lineage/trace", "POST", {
+            user_id: USER_ID,
+            memory_id: resolvedId,
+            direction,
+            max_depth: depth,
+          }),
+          wantRootCause
+            ? apiCall<{ memory_id: string; root_cause_id: string | null }>("/api/lineage/root-cause", "POST", {
+                user_id: USER_ID,
+                memory_id: resolvedId,
+              }).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+
+        const edges = trace.edges || [];
+
+        if (edges.length === 0) {
+          const hint = direction === "both"
+            ? "This memory has no causal edges at all yet."
+            : `Try direction:"both" to look in the other direction.`;
+          return {
+            content: [{
+              type: "text",
+              text: `🔗 No causal edges found ${direction} from ${resolvedId} (depth ${depth}).\n${hint}\nEdges are inferred automatically at ingest from type + entity overlap + temporal order, or recorded explicitly with add_causal_link.`,
+            }],
+          };
+        }
+
+        // Previews for everything on the path plus edge endpoints (bounded).
+        const previewIds = [...(trace.path || []), ...edges.flatMap((e) => [e.from, e.to])];
+        const previews = await fetchMemoryPreviews(previewIds);
+
+        let response = `🔗 Causal Trace (${direction})\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `Memory: ${trace.root}\n`;
+        const rootPreview = previews.get(trace.root);
+        if (rootPreview) response += `  "${rootPreview}"\n`;
+        response += `Depth reached: ${trace.depth} │ Edges: ${edges.length}\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+        // A hub memory at depth 10 can pull in dozens of edges; cap the render
+        // and say so rather than flooding the context window.
+        const TRACE_DISPLAY_CAP = 20;
+        response += `EDGES (from = cause, to = effect)\n`;
+        for (const edge of edges.slice(0, TRACE_DISPLAY_CAP)) {
+          response += formatLineageEdge(edge, previews, "  ");
+          response += `\n`;
+        }
+        if (edges.length > TRACE_DISPLAY_CAP) {
+          response += `  … ${edges.length - TRACE_DISPLAY_CAP} more edges (re-run with a smaller max_depth to focus)\n\n`;
+        }
+
+        if (rootCause?.root_cause_id) {
+          response += `⏮ ROOT CAUSE: ${rootCause.root_cause_id}\n`;
+          const rcPreview = previews.get(rootCause.root_cause_id);
+          if (rcPreview) response += `  "${rcPreview}"\n`;
+        } else if (wantRootCause) {
+          response += `⏮ ROOT CAUSE: this memory is itself the start of its chain (no older ancestor).\n`;
+        }
+
+        response += `\nUse read_memory for full content, validate_causal_link (edge_id + confirm/reject) to curate an edge.`;
+
+        return { content: [{ type: "text", text: response }] };
+      }
+
+      case "list_causal_edges": {
+        const { limit: rawEdgeLimit = 15 } = args as { limit?: number };
+        const edgeLimit = Math.max(1, Math.min(Math.floor(rawEdgeLimit), MAX_LIMIT));
+
+        interface LineageStatsWire {
+          total_edges: number;
+          inferred_edges: number;
+          confirmed_edges: number;
+          explicit_edges: number;
+          total_branches: number;
+          active_branches: number;
+          edges_by_relation: Record<string, number>;
+          avg_confidence: number;
+        }
+
+        // The server pages in storage order, so ask for a generous page and
+        // rank by confidence here — otherwise "top edges" would be a sorted
+        // sample of an arbitrary prefix.
+        const EDGE_FETCH_LIMIT = 500;
+        const [edgesResult, stats] = await Promise.all([
+          apiCall<{ edges: LineageEdgeWire[]; total: number }>("/api/lineage/edges", "POST", {
+            user_id: USER_ID,
+            limit: EDGE_FETCH_LIMIT,
+          }),
+          apiCall<LineageStatsWire>("/api/lineage/stats", "POST", { user_id: USER_ID }).catch(() => null),
+        ]);
+
+        const edges = edgesResult.edges || [];
+
+        if (edges.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `🔗 The causal lineage graph is empty.\nEdges are inferred automatically at ingest (memory type + entity overlap + temporal order) and can be added explicitly with add_causal_link.`,
+            }],
+          };
+        }
+
+        // Highest-confidence first: curated (confirmed/explicit, 1.0) edges
+        // surface above low-confidence inferences.
+        edges.sort((a, b) => b.confidence - a.confidence);
+        const totalFetched = edges.length;
+        edges.length = Math.min(edges.length, edgeLimit);
+
+        let response = `🔗 Causal Lineage Graph\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        if (stats) {
+          response += `Edges: ${stats.total_edges} total │ ${stats.inferred_edges} inferred │ ${stats.confirmed_edges} confirmed │ ${stats.explicit_edges} explicit\n`;
+          response += `Avg confidence: ${(stats.avg_confidence * 100).toFixed(0)}%`;
+          const byRelation = Object.entries(stats.edges_by_relation || {})
+            .sort((a, b) => b[1] - a[1])
+            .map(([rel, n]) => `${rel}(${n})`)
+            .join(" │ ");
+          if (byRelation) response += `\nBy relation: ${byRelation}`;
+          response += `\n`;
+        }
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+        // Preview budget covers the first PREVIEW_FETCH_CAP/2 edges' endpoints.
+        const previews = await fetchMemoryPreviews(edges.flatMap((e) => [e.from, e.to]));
+
+        response += `TOP ${edges.length} OF ${stats?.total_edges ?? totalFetched} EDGES BY CONFIDENCE (from = cause, to = effect)\n`;
+        for (const edge of edges) {
+          response += formatLineageEdge(edge, previews, "  ");
+          response += `\n`;
+        }
+
+        response += `Use trace_lineage(memory_id) for the chain around one memory; validate_causal_link(edge_id, verdict) to confirm or reject an inferred edge.`;
+
+        return { content: [{ type: "text", text: response }] };
+      }
+
+      case "add_causal_link": {
+        const { from_memory_id, to_memory_id, relation } = args as {
+          from_memory_id: string;
+          to_memory_id: string;
+          relation: string;
+        };
+
+        if (!from_memory_id || !to_memory_id) {
+          return { content: [{ type: "text", text: "Error: 'from_memory_id' (the cause) and 'to_memory_id' (the effect) are both required" }], isError: true };
+        }
+        // Exact variants accepted by the server (src/handlers/lineage.rs match).
+        const validRelations = ["Caused", "ResolvedBy", "InformedBy", "SupersededBy", "TriggeredBy", "BranchedFrom", "RelatedTo"];
+        if (!validRelations.includes(relation)) {
+          return { content: [{ type: "text", text: `Error: 'relation' must be one of: ${validRelations.join(", ")}` }], isError: true };
+        }
+
+        let fromId: string;
+        let toId: string;
+        try {
+          [fromId, toId] = await Promise.all([
+            resolveMemoryId(from_memory_id),
+            resolveMemoryId(to_memory_id),
+          ]);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return { content: [{ type: "text", text: `Could not resolve memory ids: ${msg}` }], isError: true };
+        }
+        if (fromId === toId) {
+          return { content: [{ type: "text", text: "Error: from_memory_id and to_memory_id resolve to the same memory — a memory cannot cause itself" }], isError: true };
+        }
+
+        const edge = await apiCall<LineageEdgeWire>("/api/lineage/link", "POST", {
+          user_id: USER_ID,
+          from_memory_id: fromId,
+          to_memory_id: toId,
+          relation,
+        });
+
+        const previews = await fetchMemoryPreviews([edge.from, edge.to]);
+        const prose = CAUSAL_RELATION_PROSE[edge.relation] || edge.relation;
+
+        let response = `🔗 Causal Link Recorded\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `"${previews.get(edge.from) || edge.from}"\n`;
+        response += `  ──${edge.relation} (${prose})──▶\n`;
+        response += `"${previews.get(edge.to) || edge.to}"\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `edge_id: ${edge.id} │ confidence: ${(edge.confidence * 100).toFixed(0)}% │ source: ${edge.source}`;
+
+        return { content: [{ type: "text", text: response }] };
+      }
+
+      case "validate_causal_link": {
+        const { edge_id, verdict } = args as { edge_id: string; verdict: string };
+
+        if (!edge_id || edge_id.trim().length === 0) {
+          return { content: [{ type: "text", text: "Error: 'edge_id' is required (from trace_lineage or list_causal_edges output)" }], isError: true };
+        }
+        if (verdict !== "confirm" && verdict !== "reject") {
+          return { content: [{ type: "text", text: "Error: 'verdict' must be 'confirm' or 'reject'" }], isError: true };
+        }
+
+        if (verdict === "confirm") {
+          const result = await apiCall<{ confirmed: boolean; graph_edges_strengthened: number }>(
+            "/api/lineage/confirm",
+            "POST",
+            { user_id: USER_ID, edge_id },
+          );
+          if (!result.confirmed) {
+            return {
+              content: [{ type: "text", text: `Edge ${edge_id} was not confirmed — it does not exist (check the edge_id against list_causal_edges).` }],
+              isError: true,
+            };
+          }
+          let response = `✓ Causal edge confirmed: ${edge_id}\n`;
+          response += `Confidence raised to 100%; ${result.graph_edges_strengthened} knowledge-graph edge(s) between the memories' entities strengthened.`;
+          return { content: [{ type: "text", text: response }] };
+        }
+
+        const result = await apiCall<{ rejected: boolean }>("/api/lineage/reject", "POST", {
+          user_id: USER_ID,
+          edge_id,
+        });
+        if (!result.rejected) {
+          return {
+            content: [{ type: "text", text: `Edge ${edge_id} was not rejected — it does not exist (it may already have been rejected).` }],
+            isError: true,
+          };
+        }
+        return { content: [{ type: "text", text: `✕ Causal edge rejected and deleted: ${edge_id}` }] };
+      }
+
+      // =======================================================================
+      // KNOWLEDGE GRAPH TOOLS
+      // =======================================================================
+
+      case "explore_entity": {
+        const { entity_name, max_depth = 1 } = args as { entity_name: string; max_depth?: number };
+
+        if (!entity_name || entity_name.trim().length === 0) {
+          return { content: [{ type: "text", text: "Error: 'entity_name' is required (use list_entities to discover names)" }], isError: true };
+        }
+        const depth = Math.max(1, Math.min(Math.floor(max_depth), 3));
+
+        // Entity wire shape (src/graph_memory.rs EntityNode). name_embedding is
+        // deliberately never rendered.
+        interface EntityWire {
+          uuid: string;
+          name: string;
+          labels: string[];
+          mention_count: number;
+          salience: number;
+          fine_type: string | null;
+          kb_id: string | null;
+        }
+        interface TraversalWire {
+          entities: Array<{ entity: EntityWire; hop_distance: number; decay_factor: number }>;
+          relationships: Array<{
+            uuid: string;
+            from_entity: string;
+            to_entity: string;
+            relation_type: unknown;
+            strength: number;
+            context: string;
+            invalidated_at: string | null;
+            tier?: string;
+          }>;
+        }
+
+        let traversal: TraversalWire;
+        try {
+          traversal = await apiCall<TraversalWire>("/api/graph/traverse", "POST", {
+            user_id: USER_ID,
+            entity_name,
+            max_depth: depth,
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes("API error 404")) {
+            return {
+              content: [{ type: "text", text: `Entity not found in the knowledge graph: "${entity_name}" (no exact, case-insensitive, stemmed, or substring match). Use list_entities to see what the graph knows.` }],
+            };
+          }
+          throw e;
+        }
+
+        const entities = traversal.entities || [];
+        const liveRels = (traversal.relationships || []).filter((r) => !r.invalidated_at);
+        const invalidatedCount = (traversal.relationships || []).length - liveRels.length;
+        const nameById = new Map(entities.map((t) => [t.entity.uuid, t.entity.name]));
+
+        const describeEntity = (t: { entity: EntityWire; hop_distance: number }): string => {
+          const e = t.entity;
+          const type = e.fine_type || e.labels.join("/") || "Concept";
+          return `  [hop ${t.hop_distance}] ${e.name} (${type} │ mentions: ${e.mention_count} │ salience: ${e.salience.toFixed(2)})`;
+        };
+
+        // Name matching is fuzzy server-side (exact → case-insensitive →
+        // stemmed → substring); say what actually matched so the agent never
+        // reads a neighborhood as belonging to the name it typed.
+        const origin = entities.find((t) => t.hop_distance === 0)?.entity;
+        const matchedNote = origin && origin.name !== entity_name ? ` (matched entity: "${origin.name}")` : "";
+
+        let response = `🕸 Entity Graph: ${entity_name}${matchedNote} (depth ${depth})\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `Connected entities: ${entities.length} │ Relationships: ${liveRels.length}`;
+        if (invalidatedCount > 0) response += ` (${invalidatedCount} invalidated hidden)`;
+        response += `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+        // Entities: all hops, salience-ranked within hop, capped for readability.
+        const ENTITY_DISPLAY_CAP = 30;
+        const sortedEntities = [...entities].sort(
+          (a, b) => a.hop_distance - b.hop_distance || b.entity.salience - a.entity.salience,
+        );
+        response += `ENTITIES\n`;
+        for (const t of sortedEntities.slice(0, ENTITY_DISPLAY_CAP)) {
+          response += describeEntity(t) + `\n`;
+        }
+        if (sortedEntities.length > ENTITY_DISPLAY_CAP) {
+          response += `  … ${sortedEntities.length - ENTITY_DISPLAY_CAP} more (lower salience)\n`;
+        }
+
+        // Typed relationships are the signal — show them all (capped), with
+        // the sentence that attested them. Untyped co-occurrence is bulk;
+        // summarize it.
+        const GENERIC_TYPES = new Set(["CoOccurs", "RelatedTo"]);
+        const typed = liveRels
+          .filter((r) => !GENERIC_TYPES.has(formatRelationType(r.relation_type)))
+          .sort((a, b) => b.strength - a.strength);
+        const generic = liveRels.filter((r) => GENERIC_TYPES.has(formatRelationType(r.relation_type)));
+
+        const TYPED_DISPLAY_CAP = 20;
+        if (typed.length > 0) {
+          response += `\nTYPED RELATIONSHIPS (strongest first)\n`;
+          for (const r of typed.slice(0, TYPED_DISPLAY_CAP)) {
+            const from = nameById.get(r.from_entity) || r.from_entity;
+            const to = nameById.get(r.to_entity) || r.to_entity;
+            response += `  ${from} ──${formatRelationType(r.relation_type)}──▶ ${to} (${(r.strength * 100).toFixed(0)}%)\n`;
+            if (r.context) {
+              const ctx = r.context.length > 100 ? r.context.slice(0, 100) + "…" : r.context;
+              response += `    ⌞ "${ctx}"\n`;
+            }
+          }
+          if (typed.length > TYPED_DISPLAY_CAP) {
+            response += `  … ${typed.length - TYPED_DISPLAY_CAP} more typed relationships\n`;
+          }
+        } else {
+          response += `\nNo typed relationships in this neighborhood — only co-occurrence so far. Typed edges (Causes, Triggers, DependsOn, …) appear as the relation extractor finds explicit statements.\n`;
+        }
+
+        if (generic.length > 0) {
+          response += `\nPlus ${generic.length} co-occurrence edge(s) (entities that appear together without an extracted typed relation).\n`;
+        }
+
+        response += `\nUse explore_entity on a neighbor to keep walking, or recall to read the memories behind a relationship's context.`;
+
+        return { content: [{ type: "text", text: response }] };
+      }
+
+      case "list_entities": {
+        const { limit: rawEntityLimit = 30 } = args as { limit?: number };
+        const entityLimit = Math.max(1, Math.min(Math.floor(rawEntityLimit), MAX_LIMIT));
+
+        interface EntityListWire {
+          entities: Array<{
+            uuid: string;
+            name: string;
+            labels: string[];
+            mention_count: number;
+            salience: number;
+            fine_type: string | null;
+          }>;
+          count: number;
+        }
+
+        // The server truncates BEFORE any ordering (get_all_entities → take(limit)),
+        // so a small server-side limit would sample arbitrary storage order.
+        // Request a generous page and rank by salience here.
+        const SERVER_FETCH_LIMIT = 500;
+        const result = await apiCall<EntityListWire>("/api/graph/entities/all", "POST", {
+          user_id: USER_ID,
+          limit: SERVER_FETCH_LIMIT,
+        });
+
+        const all = result.entities || [];
+        if (all.length === 0) {
+          return {
+            content: [{ type: "text", text: `🕸 The knowledge graph has no entities yet.\nEntities are extracted automatically as memories are stored — remember something first.` }],
+          };
+        }
+
+        const ranked = [...all].sort((a, b) => b.salience - a.salience).slice(0, entityLimit);
+
+        let response = `🕸 Knowledge Graph Entities (top ${ranked.length} of ${all.length}${all.length === SERVER_FETCH_LIMIT ? "+" : ""} by salience)\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        for (let i = 0; i < ranked.length; i++) {
+          const e = ranked[i];
+          const type = e.fine_type || e.labels.join("/") || "Concept";
+          response += `${String(i + 1).padStart(3)}. ${e.name}  (${type} │ mentions: ${e.mention_count} │ salience: ${e.salience.toFixed(2)})\n`;
+        }
+        response += `\nUse explore_entity(entity_name) to walk any of these.`;
+
+        return { content: [{ type: "text", text: response }] };
+      }
+
+      // =======================================================================
+      // ANOMALY & FACTS TOOLS
+      // =======================================================================
+
+      case "list_anomalies": {
+        const { limit: rawAnomalyLimit = 10, min_sigma = 2.0 } = args as { limit?: number; min_sigma?: number };
+        const anomalyLimit = Math.max(1, Math.min(Math.floor(rawAnomalyLimit), MAX_LIMIT));
+        const sigma = Math.max(0, min_sigma);
+
+        interface AnomalyWire {
+          anomalies: Array<{
+            memory_id: string;
+            created_at: string;
+            content_preview: string;
+            max_abs_z: number;
+            flagged: boolean;
+            explanation: string;
+            entities: Array<{ id: string; name: string }>;
+          }>;
+          episodes_scored: number;
+          baseline_window: number;
+          min_sigma: number;
+        }
+
+        const result = await apiCall<AnomalyWire>("/api/anomalies", "POST", {
+          user_id: USER_ID,
+          limit: anomalyLimit,
+          min_sigma: sigma,
+        });
+
+        const anomalies = result.anomalies || [];
+
+        if (anomalies.length === 0) {
+          // The endpoint returns an empty feed (not z-scores against noise)
+          // below its minimum baseline of scored episodes.
+          const reason = result.episodes_scored < 10
+            ? `Only ${result.episodes_scored} scored episode(s) exist — deviation needs a baseline of at least 10 before z-scores mean anything.`
+            : `${result.episodes_scored} episodes scored against a window of ${result.baseline_window}; none deviate from the baseline.`;
+          return { content: [{ type: "text", text: `📈 No anomalies.\n${reason}` }] };
+        }
+
+        const flaggedCount = anomalies.filter((a) => a.flagged).length;
+
+        let response = `📈 Anomaly Feed (deviation vs your own baseline)\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `${anomalies.length} entries ranked by |z| │ ${flaggedCount} flagged at ≥${result.min_sigma.toFixed(1)}σ │ baseline: ${result.episodes_scored} episodes\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+        for (let i = 0; i < anomalies.length; i++) {
+          const a = anomalies[i];
+          const marker = a.flagged ? "🚩" : "  ";
+          const when = new Date(a.created_at).toLocaleString();
+          response += `${marker} ${i + 1}. [${a.max_abs_z.toFixed(1)}σ] ${when}\n`;
+          response += `     "${a.content_preview}"\n`;
+          if (a.explanation) response += `     why: ${a.explanation}\n`;
+          if (a.entities.length > 0) {
+            response += `     entities: ${a.entities.map((e) => e.name).join(", ")}\n`;
+          }
+          response += `     memory: ${a.memory_id}\n\n`;
+        }
+
+        response += `Use read_memory(memory_id) for full content, trace_lineage(memory_id) to see what an anomalous memory caused or was caused by.`;
+
+        return { content: [{ type: "text", text: response.trimEnd() }] };
+      }
+
+      case "search_facts": {
+        const { query, entity, limit: rawFactLimit = 20 } = args as {
+          query?: string;
+          entity?: string;
+          limit?: number;
+        };
+        const factLimit = Math.max(1, Math.min(Math.floor(rawFactLimit), MAX_LIMIT));
+
+        interface FactWire {
+          id: string;
+          fact: string;
+          confidence: number;
+          support_count: number;
+          related_entities: string[];
+          fact_type: string;
+          created_at: string;
+          invalidated_at: string | null;
+        }
+
+        // One question, three filters: entity → /by-entity, query → /search,
+        // neither → /list. Entity takes precedence when both are given.
+        let endpoint: string;
+        let body: Record<string, unknown>;
+        let heading: string;
+        if (entity && entity.trim().length > 0) {
+          endpoint = "/api/facts/by-entity";
+          body = { user_id: USER_ID, entity: entity.trim(), limit: factLimit };
+          heading = `facts about "${entity.trim()}"`;
+        } else if (query && query.trim().length > 0) {
+          endpoint = "/api/facts/search";
+          body = { user_id: USER_ID, query: query.trim(), limit: factLimit };
+          heading = `facts matching "${query.trim()}"`;
+        } else {
+          endpoint = "/api/facts/list";
+          body = { user_id: USER_ID, limit: factLimit };
+          heading = "recent facts";
+        }
+
+        const result = await apiCall<{ facts: FactWire[]; total: number }>(endpoint, "POST", body);
+        const facts = result.facts || [];
+
+        if (facts.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: `📚 No ${heading}.\nSemantic facts distill out of episodic memories during consolidation — a young or recently imported corpus may have none yet. Try recall for the underlying episodic memories, or fact_narratives for topic clusters.`,
+            }],
+          };
+        }
+
+        let response = `📚 Semantic Facts: ${facts.length} ${heading}\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        for (let i = 0; i < facts.length; i++) {
+          const f = facts[i];
+          const invalidated = f.invalidated_at ? " ⚠ INVALIDATED (superseded — retained for audit)" : "";
+          response += `${String(i + 1).padStart(2)}. ${f.fact}${invalidated}\n`;
+          response += `    ┗━ ${f.fact_type} │ confidence: ${(f.confidence * 100).toFixed(0)}% │ support: ${f.support_count} memories`;
+          if (f.related_entities.length > 0) {
+            response += ` │ entities: ${f.related_entities.slice(0, 5).join(", ")}`;
+          }
+          response += `\n\n`;
+        }
+        response += `Facts are confidence-scored distillations; use recall to read the episodic memories behind them.`;
+
+        return { content: [{ type: "text", text: response.trimEnd() }] };
+      }
+
+      // =======================================================================
+      // HEBBIAN FEEDBACK
+      // =======================================================================
+
+      case "reinforce_memories": {
+        const { memory_ids, outcome } = args as { memory_ids: string[]; outcome: string };
+
+        if (!memory_ids || memory_ids.length === 0) {
+          return { content: [{ type: "text", text: "Error: 'memory_ids' must contain at least one memory ID" }], isError: true };
+        }
+        const validOutcomes = ["helpful", "misleading", "neutral"];
+        if (!validOutcomes.includes(outcome)) {
+          return { content: [{ type: "text", text: `Error: 'outcome' must be one of: ${validOutcomes.join(", ")}` }], isError: true };
+        }
+
+        // The endpoint silently drops non-UUID ids; resolve prefixes here so a
+        // short id from recall output reinforces instead of vanishing.
+        const resolved: string[] = [];
+        const unresolvable: string[] = [];
+        await Promise.all(
+          memory_ids.slice(0, 50).map(async (id) => {
+            try {
+              resolved.push(await resolveMemoryId(id));
+            } catch {
+              unresolvable.push(id);
+            }
+          }),
+        );
+
+        if (resolved.length === 0) {
+          return {
+            content: [{ type: "text", text: `Error: none of the provided ids resolved to memories: ${unresolvable.join(", ")}` }],
+            isError: true,
+          };
+        }
+
+        interface ReinforceWire {
+          memories_processed: number;
+          associations_strengthened: number;
+          importance_boosts: number;
+          importance_decays: number;
+        }
+
+        const result = await apiCall<ReinforceWire>("/api/reinforce", "POST", {
+          user_id: USER_ID,
+          ids: resolved,
+          outcome,
+        });
+
+        const verb = outcome === "helpful" ? "boosted" : outcome === "misleading" ? "decayed" : "recorded";
+        let response = `🧠 Hebbian Feedback (${outcome})\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `Memories processed: ${result.memories_processed} (${verb})\n`;
+        response += `Associations strengthened: ${result.associations_strengthened}\n`;
+        response += `Importance boosts: ${result.importance_boosts} │ decays: ${result.importance_decays}`;
+        if (unresolvable.length > 0) {
+          response += `\n⚠ Not found (skipped): ${unresolvable.join(", ")}`;
+        }
+
+        return { content: [{ type: "text", text: response }] };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -4367,6 +5323,22 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 - **proactive_context** - Surface relevant memories for current context
 - **list_memories** - List all stored memories
 - **memory_stats** - Get memory system statistics
+- **reinforce_memories** - Hebbian feedback: mark used memories helpful/misleading
+
+## Causal Lineage Tools
+- **trace_lineage** - Trace what led to a memory (backward) or what it caused (forward), with root cause
+- **list_causal_edges** - Survey the causal graph: relation totals, confidence, top edges
+- **add_causal_link** - Record an explicit causal edge between two memories
+- **validate_causal_link** - Confirm or reject an inferred causal edge
+
+## Knowledge Graph Tools
+- **explore_entity** - Walk the graph from a named entity: neighbors + typed relationships
+- **list_entities** - List graph entities ranked by salience
+
+## Anomaly & Facts Tools
+- **list_anomalies** - Rank recent memories by statistical deviation from your baseline
+- **search_facts** - Search distilled semantic facts (by query, entity, or recency)
+- **fact_narratives** - Topic-clustered fact summaries with causal chains
 
 ## Todo Tools
 - **add_todo** - Add a task to your todo list
