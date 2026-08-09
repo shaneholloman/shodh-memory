@@ -969,13 +969,24 @@ fn test_adaptive_memory_workflow() {
     assert!(stats.memories_processed > 0);
 
     let graph_stats = system.graph_stats();
-    // Was `node_count > 0 || edge_count >= 0`. `edge_count` is unsigned, so
-    // `>= 0` is a tautology and the whole disjunction could never fail. This
-    // test remembers memories and reinforces a tracked recall, so the graph is
-    // expected to hold nodes by now — assert that instead of nothing.
-    assert!(
-        graph_stats.node_count > 0,
-        "reinforced recall should have populated the graph: {graph_stats:?}"
+    // Pins the SHIPPED semantics of the memory-to-memory coactivation layer,
+    // which has been inert since f6b730ee (2026-07-10): SHODH_COACT_STRENGTHEN_ONLY
+    // defaults true, but the only writer of the `mem_edge:` index lives in the
+    // now-dead `!strengthen_only` branch, so strengthen-only mode has nothing to
+    // strengthen. Reinforcing a tracked recall therefore leaves this graph empty.
+    //
+    // The previous assertion here was `node_count > 0 || edge_count >= 0`. Both
+    // counts are unsigned, so `>= 0` is a tautology and the disjunction could
+    // never fail — which is precisely why these two tests kept passing while the
+    // layer went inert underneath them.
+    //
+    // This is deliberately NOT asserting `> 0`: whether to remove the inert
+    // machinery or revive it with bounded seeding is an open owner decision, and
+    // asserting the revived behaviour would pre-empt it. If the layer is revived,
+    // this assertion must be updated as part of that change.
+    assert_eq!(
+        graph_stats.node_count, 0,
+        "memory coactivation layer is inert by default; reviving it must update this test: {graph_stats:?}"
     );
 
     let prefetch = AnticipatoryPrefetch::new();
@@ -1005,12 +1016,13 @@ fn test_graph_maintenance() {
     system.graph_maintenance();
 
     let stats = system.graph_stats();
-    // `node_count` is unsigned, so the old `>= 0` asserted nothing. Two
-    // memories were remembered and reinforced above, so maintenance must leave
-    // nodes behind rather than empty the graph.
-    assert!(
-        stats.node_count > 0,
-        "graph_maintenance should not empty the graph: {stats:?}"
+    // Same shipped-semantics pin as in test_adaptive_memory_workflow: the
+    // memory-to-memory coactivation layer is inert, so maintenance runs over an
+    // empty graph. The old `node_count >= 0` was a tautology on an unsigned
+    // count and asserted nothing at all.
+    assert_eq!(
+        stats.node_count, 0,
+        "memory coactivation layer is inert by default; reviving it must update this test: {stats:?}"
     );
 }
 
