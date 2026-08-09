@@ -12,13 +12,150 @@
 import * as os from "node:os";
 import * as path from "node:path";
 
-export interface McpServerConfig {
+/**
+ * An MCP server the seat should connect to, as written in the JSON file named
+ * by SEAT_MCP_SERVERS.
+ *
+ * Two genuinely different things, so two shapes rather than one shape with
+ * half its fields ignored: a server the seat SPAWNS (a command on this
+ * machine, talking over stdio) and a server the seat DIALS (a URL someone else
+ * hosts). The union is discriminated structurally on `command` vs `url` —
+ * `transport` only ever refines the remote case — because that is what a
+ * person actually writes, and a config that names both is a mistake worth
+ * rejecting rather than resolving by precedence.
+ */
+export interface McpStdioServerConfig {
 	/** Short identifier used in tool-name prefixes: [a-zA-Z0-9_-]+ */
 	name: string;
+	transport?: "stdio";
 	command: string;
 	args?: string[];
 	env?: Record<string, string>;
 	cwd?: string;
+}
+
+export interface McpRemoteServerConfig {
+	/** Short identifier used in tool-name prefixes: [a-zA-Z0-9_-]+ */
+	name: string;
+	/**
+	 * "http" is the current standard transport (streamable HTTP). "sse" is the
+	 * superseded one, kept because deployed servers still speak only it. The
+	 * default, "auto", tries streamable HTTP and falls back to SSE when the
+	 * endpoint answers that it does not know the newer verb — see mcp.ts.
+	 */
+	transport?: "http" | "sse" | "auto";
+	url: string;
+	/**
+	 * Extra request headers, verbatim. Values are secrets as often as not, so
+	 * they live in this server-side file and are never echoed anywhere: the
+	 * seat's own API reports header NAMES at most.
+	 */
+	headers?: Record<string, string>;
+	/**
+	 * Header name → environment-variable name, resolved in this process at
+	 * connect time. The reason to prefer this over `headers` is that it keeps
+	 * the token out of the config file entirely, which matters because that
+	 * file is the thing most likely to be copied into a repository. A named
+	 * variable that is unset is a connection ERROR, never a quiet
+	 * unauthenticated attempt — a 401 three layers down is a much worse way to
+	 * learn that an export was missing.
+	 */
+	headerEnv?: Record<string, string>;
+}
+
+export type McpServerConfig = McpStdioServerConfig | McpRemoteServerConfig;
+
+export function isRemoteMcpServer(config: McpServerConfig): config is McpRemoteServerConfig {
+	return "url" in config;
+}
+
+/** Server-name grammar. Shared with mcp.ts, which builds `mcp__<name>__<tool>`
+ *  tool identifiers out of it — anything looser produces tool names a model
+ *  cannot reliably reproduce. */
+export const MCP_SERVER_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+const REMOTE_TRANSPORTS = ["http", "sse", "auto"] as const;
+
+function describeEntry(index: number, name: unknown): string {
+	return typeof name === "string" && name ? `server "${name}"` : `server #${index + 1}`;
+}
+
+/**
+ * Validate the SEAT_MCP_SERVERS payload. Every failure names the offending
+ * entry and what was expected: this file is hand-written, and a typo in it
+ * silently costs the agent every tool on that server.
+ */
+export function parseMcpServers(raw: string, source: string): McpServerConfig[] {
+	let parsed: { servers?: unknown };
+	try {
+		parsed = JSON.parse(raw) as { servers?: unknown };
+	} catch (error) {
+		throw new Error(`${source}: not valid JSON (${error instanceof Error ? error.message : String(error)})`);
+	}
+	if (!Array.isArray(parsed.servers)) {
+		throw new Error(
+			`${source}: expected { "servers": [ … ] } — each entry either ` +
+				`{ name, command, args?, env?, cwd? } for a local command, or ` +
+				`{ name, url, transport?, headers?, headerEnv? } for a remote endpoint`,
+		);
+	}
+
+	const seen = new Set<string>();
+	const servers: McpServerConfig[] = [];
+	for (const [index, entry] of parsed.servers.entries()) {
+		if (typeof entry !== "object" || entry === null) {
+			throw new Error(`${source}: ${describeEntry(index, undefined)} is not an object`);
+		}
+		const candidate = entry as Record<string, unknown>;
+		const name = candidate.name;
+		if (typeof name !== "string" || !MCP_SERVER_NAME_PATTERN.test(name)) {
+			throw new Error(
+				`${source}: ${describeEntry(index, name)} needs a "name" of letters, digits, - or _ ` +
+					`(it becomes part of every tool name the model sees)`,
+			);
+		}
+		if (seen.has(name)) throw new Error(`${source}: two servers are both named "${name}"`);
+		seen.add(name);
+
+		const hasCommand = typeof candidate.command === "string" && candidate.command.length > 0;
+		const hasUrl = typeof candidate.url === "string" && candidate.url.length > 0;
+		if (hasCommand && hasUrl) {
+			throw new Error(`${source}: server "${name}" sets both "command" and "url" — it can only be one of the two`);
+		}
+		if (!hasCommand && !hasUrl) {
+			throw new Error(`${source}: server "${name}" needs a "command" (local) or a "url" (remote)`);
+		}
+
+		if (hasCommand) {
+			if (candidate.transport !== undefined && candidate.transport !== "stdio") {
+				throw new Error(
+					`${source}: server "${name}" runs a command, so its transport is stdio — ` +
+						`"${String(candidate.transport)}" needs a "url" instead`,
+				);
+			}
+			servers.push(entry as McpStdioServerConfig);
+			continue;
+		}
+
+		const transport = candidate.transport;
+		if (transport !== undefined && !(REMOTE_TRANSPORTS as readonly unknown[]).includes(transport)) {
+			throw new Error(
+				`${source}: server "${name}" has transport "${String(transport)}" — expected ` +
+					`${REMOTE_TRANSPORTS.map((value) => `"${value}"`).join(", ")}`,
+			);
+		}
+		let url: URL;
+		try {
+			url = new URL(candidate.url as string);
+		} catch {
+			throw new Error(`${source}: server "${name}" has a "url" that is not a URL: ${String(candidate.url)}`);
+		}
+		if (url.protocol !== "http:" && url.protocol !== "https:") {
+			throw new Error(`${source}: server "${name}" must use http:// or https://, not ${url.protocol}`);
+		}
+		servers.push(entry as McpRemoteServerConfig);
+	}
+	return servers;
 }
 
 export interface SeatConfig {
@@ -47,6 +184,10 @@ export interface SeatConfig {
 	localMaxTokens: number;
 	/** Optional path to a JSON file: { "servers": McpServerConfig[] } */
 	mcpConfigPath?: string;
+	/** How long one MCP server gets to start, handshake and list its tools.
+	 *  Generous by default: a stdio server launched through `npx`/`uvx` may be
+	 *  downloading its own package on first run. */
+	mcpConnectTimeoutMs: number;
 	/** Backend request timeout in milliseconds. */
 	backendTimeoutMs: number;
 }
@@ -132,6 +273,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SeatConfig {
 		localContextWindow: parseIntEnv(env.SEAT_LOCAL_CONTEXT_WINDOW, 32768, "SEAT_LOCAL_CONTEXT_WINDOW"),
 		localMaxTokens: parseIntEnv(env.SEAT_LOCAL_MAX_TOKENS, 8192, "SEAT_LOCAL_MAX_TOKENS"),
 		mcpConfigPath: env.SEAT_MCP_SERVERS,
+		mcpConnectTimeoutMs: parseIntEnv(env.SEAT_MCP_CONNECT_TIMEOUT_MS, 30000, "SEAT_MCP_CONNECT_TIMEOUT_MS"),
 		backendTimeoutMs: parseIntEnv(env.SEAT_BACKEND_TIMEOUT_MS, 30000, "SEAT_BACKEND_TIMEOUT_MS"),
 	};
 }

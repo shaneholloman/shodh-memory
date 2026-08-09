@@ -4,7 +4,7 @@
 
 import * as fsp from "node:fs/promises";
 import { ShodhBackend } from "./backend.js";
-import { loadConfig, type McpServerConfig } from "./config.js";
+import { loadConfig, type McpServerConfig, parseMcpServers } from "./config.js";
 import { FileCredentialStore } from "./credentials.js";
 import { LearningLedger } from "./ledger.js";
 import { McpHost } from "./mcp.js";
@@ -15,16 +15,7 @@ import { SeatStore } from "./store.js";
 async function loadMcpServers(configPath: string | undefined): Promise<McpServerConfig[]> {
 	if (!configPath) return [];
 	const raw = await fsp.readFile(configPath, "utf8");
-	const parsed = JSON.parse(raw) as { servers?: McpServerConfig[] };
-	if (!Array.isArray(parsed.servers)) {
-		throw new Error(`${configPath}: expected { "servers": [ { name, command, args?, env?, cwd? } ] }`);
-	}
-	for (const server of parsed.servers) {
-		if (!server.name || !server.command) {
-			throw new Error(`${configPath}: every server needs "name" and "command"`);
-		}
-	}
-	return parsed.servers;
+	return parseMcpServers(raw, configPath);
 }
 
 async function main(): Promise<void> {
@@ -34,7 +25,10 @@ async function main(): Promise<void> {
 	const registry = new ModelRegistry(config, credentials);
 	const ledger = new LearningLedger(config.dataDir);
 	const store = new SeatStore(config.dataDir);
-	const mcpHost = new McpHost();
+	const mcpHost = new McpHost({
+		connectTimeoutMs: config.mcpConnectTimeoutMs,
+		log: (message) => console.warn(message),
+	});
 
 	try {
 		const health = await backend.health();
@@ -51,20 +45,30 @@ async function main(): Promise<void> {
 		console.log(`[seat] local provider ${provider} offline: ${message}`);
 	}
 
+	// A malformed servers file is fatal (the operator asked for these servers
+	// and got none of them, which they must be told loudly), but the
+	// CONNECTIONS are not: they run behind the listener, so one endpoint that
+	// accepts a socket and says nothing cannot decide when the seat starts
+	// answering. Conversations pick up whatever is connected at the time of
+	// each turn, so a server that finishes connecting a second after boot is
+	// still available to the first message.
 	const mcpServers = await loadMcpServers(config.mcpConfigPath);
-	if (mcpServers.length > 0) {
-		const mcpErrors = await mcpHost.connect(mcpServers);
-		for (const server of mcpHost.listServers()) {
-			console.log(`[seat] MCP server "${server.name}": ${server.tool_count} tools bridged`);
-		}
-		for (const [name, message] of Object.entries(mcpErrors)) {
-			console.warn(`[seat] MCP server "${name}" failed to connect: ${message}`);
-		}
-	}
+	const mcpConnected = mcpServers.length > 0 ? mcpHost.connect(mcpServers) : Promise.resolve();
 
 	const server = new SeatServer({ config, backend, registry, ledger, mcpHost, store });
 	await server.listen();
 	console.log(`[seat] listening on http://${config.host}:${config.port}`);
+
+	void mcpConnected.then(() => {
+		for (const mcp of mcpHost.listServers()) {
+			const where = mcp.endpoint ?? mcp.command ?? "";
+			if (mcp.status === "ready") {
+				console.log(`[seat] MCP "${mcp.name}" ready over ${mcp.transport}: ${mcp.tool_count} tools bridged`);
+			} else {
+				console.warn(`[seat] MCP "${mcp.name}" ${mcp.status} (${mcp.transport}${where ? ` → ${where}` : ""}): ${mcp.error ?? "no reason reported"}`);
+			}
+		}
+	});
 	console.log(`[seat] learning ledger: ${ledger.file}`);
 	console.log(`[seat] conversation store + provider credentials: ${config.dataDir}`);
 

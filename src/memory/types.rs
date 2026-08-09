@@ -4138,6 +4138,13 @@ pub struct Todo {
     /// Memories that are semantically or explicitly linked to this todo
     #[serde(default)]
     pub related_memory_ids: Vec<MemoryId>,
+
+    /// Structured dependencies: todos that must complete before this one can proceed.
+    /// Unlike the free-text `blocked_on` (who/what, e.g. "waiting on vendor"), these
+    /// reference real todos so blocked chains can be walked and cycles rejected.
+    /// NOTE: appended at the struct tail — keep new fields after this one.
+    #[serde(default)]
+    pub blocked_by: Vec<TodoId>,
 }
 
 impl Todo {
@@ -4169,6 +4176,7 @@ impl Todo {
             comments: Vec::new(),
             embedding: None,
             related_memory_ids: Vec::new(),
+            blocked_by: Vec::new(),
         }
     }
 
