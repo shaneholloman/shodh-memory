@@ -67,6 +67,19 @@
  *
  *   node seat/eval/memory-guidance-ab.mjs --phase rescore --results <dir>
  *       Re-score persisted raw transcripts with the current rules. No model.
+ *
+ * ── Chunked execution (resumable; used to drive long phases in short steps) ──
+ *
+ *   --phase serve                         start a detached persistent backend
+ *   --phase seed --user U --results DIR   seed one user, persist corpus ids
+ *   --phase run  --user U --results DIR --label A1 --guidance off [--cases …]
+ *                                         run (a chunk of) cases for one arm;
+ *                                         already-recorded cases are skipped,
+ *                                         so a crashed chunk just re-runs
+ *   --phase stop-backend                  stop the served backend
+ *
+ * baseline == run chunks with --guidance off; A/B == alternating off/on chunks
+ * against per-(arm,repeat) users; aggregation via --phase rescore.
  */
 import { spawn } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -90,6 +103,13 @@ const MODEL = argOf("--model") ?? "fixture-deterministic-v1";
 const REPEATS = Number(argOf("--repeats") ?? (PHASE === "ab" ? 4 : 3));
 const RESULTS_ARG = argOf("--results");
 const CASE_FILTER = argOf("--cases")?.split(",").map((s) => s.trim());
+/** Chunked-execution flags (phases serve/seed/run/stop-backend): they let a
+ *  long evaluation be driven as a sequence of short invocations against one
+ *  persistent backend, so a crashed step never loses more than its own chunk
+ *  and everything stays resumable from the persisted raw records. */
+const USER_ARG = argOf("--user");
+const LABEL_ARG = argOf("--label"); // results subdir for this chunk, e.g. A1 / B2
+const GUIDANCE_ARG = argOf("--guidance"); // "on" | "off" for --phase run
 const usingFixture = PROVIDER === "lmstudio" && MODEL === "fixture-deterministic-v1";
 
 const API_KEY = "guidance-ab-key";
@@ -415,8 +435,157 @@ async function seedUser(userId) {
   return ids;
 }
 
-/** Carry the user's stored provider credential into a scratch seat data dir —
- *  the credential file alone, never the store (same pattern as lessons-ab). */
+// ── Persistent backend (chunked execution) ──────────────────────────────────
+
+const serveStateFile = path.join(scratchRoot, "backend-serve.json");
+
+/** Start a backend that OUTLIVES this invocation (detached, unref) so a long
+ *  evaluation can be driven as many short invocations against one store. */
+async function phaseServe() {
+  if (existsSync(serveStateFile)) {
+    const state = JSON.parse(readFileSync(serveStateFile, "utf-8"));
+    try {
+      const res = await fetch(`http://127.0.0.1:${state.port}/health`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) {
+        console.log(`backend already serving on port ${state.port} (pid ${state.pid})`);
+        return;
+      }
+    } catch {
+      /* stale state — start fresh below */
+    }
+  }
+  const port = await freePort();
+  const dataDir = path.join(scratchRoot, `serve-backend-${Date.now()}`);
+  mkdirSync(dataDir, { recursive: true });
+  const child = spawn(resolveBackendExe(), [], {
+    cwd: dataDir,
+    env: {
+      PATH: process.env.PATH,
+      SYSTEMROOT: process.env.SYSTEMROOT,
+      SHODH_MEMORY_PATH: path.join(dataDir, "data"),
+      SHODH_API_KEYS: API_KEY,
+      SHODH_PORT: String(port),
+    },
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+  if (!(await waitFor(`http://127.0.0.1:${port}/health`))) {
+    console.error("serve: backend never came up");
+    process.exit(2);
+  }
+  writeFileSync(serveStateFile, JSON.stringify({ port, pid: child.pid, data_dir: dataDir }, null, 2));
+  console.log(`backend serving on port ${port} (pid ${child.pid}), data: ${dataDir}`);
+}
+
+function phaseStopBackend() {
+  if (!existsSync(serveStateFile)) {
+    console.log("no serve state — nothing to stop");
+    return;
+  }
+  const state = JSON.parse(readFileSync(serveStateFile, "utf-8"));
+  try {
+    process.kill(state.pid);
+    console.log(`stopped backend pid ${state.pid}`);
+  } catch (error) {
+    console.log(`backend pid ${state.pid} already gone (${error.code ?? error.message})`);
+  }
+  writeFileSync(serveStateFile, JSON.stringify({ ...state, stopped: true }, null, 2));
+}
+
+/** Point this invocation at the served backend; exits if none is healthy. */
+async function useServedBackend() {
+  if (!existsSync(serveStateFile)) {
+    console.error("no served backend — run --phase serve first");
+    process.exit(2);
+  }
+  const state = JSON.parse(readFileSync(serveStateFile, "utf-8"));
+  BACKEND_PORT = state.port;
+  try {
+    const res = await fetch(`${backendBase()}/health`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) throw new Error(`health ${res.status}`);
+  } catch (error) {
+    console.error(`served backend on port ${state.port} not healthy: ${error.message} — re-run --phase serve`);
+    process.exit(2);
+  }
+}
+
+/** Seed one user against the served backend and persist its corpus ids under
+ *  the results dir, so later `run` chunks can score without reseeding. */
+async function phaseSeed() {
+  if (!USER_ARG || !RESULTS_ARG) {
+    console.error("--user and --results required for seed");
+    process.exit(2);
+  }
+  await useServedBackend();
+  const usersDir = path.join(RESULTS_ARG, "users");
+  mkdirSync(usersDir, { recursive: true });
+  const idsFile = path.join(usersDir, `${USER_ARG}.json`);
+  if (existsSync(idsFile)) {
+    console.log(`user ${USER_ARG} already seeded — skipping (delete ${idsFile} to force)`);
+    return;
+  }
+  const started = Date.now();
+  const ids = await seedUser(USER_ARG);
+  writeFileSync(idsFile, JSON.stringify({ user: USER_ARG, corpus_ids: ids }, null, 1));
+  console.log(`seeded ${USER_ARG}: ${ids.length} memories + ${TODOS.length} todos in ${Math.round((Date.now() - started) / 1000)}s`);
+}
+
+/** Run a chunk of cases for one arm against a seeded user; raw records are
+ *  persisted under --results/<label>/ and scored summaries printed. The final
+ *  aggregation happens in --phase rescore over the whole results dir. */
+async function phaseRun() {
+  if (!USER_ARG || !RESULTS_ARG || !LABEL_ARG || !GUIDANCE_ARG) {
+    console.error("--user, --results, --label and --guidance on|off required for run");
+    process.exit(2);
+  }
+  await useServedBackend();
+  const idsFile = path.join(RESULTS_ARG, "users", `${USER_ARG}.json`);
+  if (!existsSync(idsFile)) {
+    console.error(`user ${USER_ARG} not seeded — run --phase seed first`);
+    process.exit(2);
+  }
+  const { corpus_ids: corpusIds } = JSON.parse(readFileSync(idsFile, "utf-8"));
+  const guidance = GUIDANCE_ARG === "on" ? await loadGuidance() : undefined;
+  const arm = GUIDANCE_ARG === "on" ? "B" : "A";
+  const scratch = path.join(scratchRoot, `scratch-run-${LABEL_ARG}-${Date.now()}`);
+  mkdirSync(scratch, { recursive: true });
+
+  const cases = activeCases().filter(
+    (testCase) => !existsSync(path.join(RESULTS_ARG, LABEL_ARG, `${testCase.id}.json`)),
+  );
+  if (cases.length === 0) {
+    console.log(`all requested cases already recorded under ${LABEL_ARG}`);
+    return;
+  }
+  console.log(`run ${LABEL_ARG} (arm ${arm}, user ${USER_ARG}): ${cases.length} cases, model ${PROVIDER}/${MODEL_STATE.model}`);
+  const scores = await withSeat(`run-${LABEL_ARG}`, USER_ARG, scratch, undefined, async (seatHandle) => {
+    const out = [];
+    for (const testCase of cases) {
+      const raw = await runCase(seatHandle.base, USER_ARG, arm, testCase, guidance);
+      persistRecord(RESULTS_ARG, LABEL_ARG, raw, corpusIds);
+      const score = scoreCase(raw, testCase, corpusIds);
+      score.repeat = LABEL_ARG;
+      out.push(score);
+      console.log(
+        `  [${LABEL_ARG}] ${testCase.id}: ${score.pass ? "PASS" : "fail"} (gold ${score.gold_cited}/${score.gold_required}, content ${score.content_ok ? "ok" : "no"}, recalls ${score.recall_calls}, mcp-recalls ${score.mcp_recall_calls}, ${Math.round(score.ms / 1000)}s)`,
+      );
+      await sleep(500);
+    }
+    return out;
+  });
+  console.log(`chunk done: ${scores.filter((score) => score.pass).length}/${scores.length} passed`);
+}
+
+/** Carry a stored provider credential into a scratch seat data dir — the
+ *  credential file alone, never the store (same pattern as lessons-ab).
+ *
+ *  EVAL_CRED_DIR overrides the source directory. This exists because OAuth
+ *  refresh tokens rotate on use: an eval seat that refreshes invalidates the
+ *  token lineage its source file came from, so an evaluation MUST run its
+ *  seats sequentially against a dedicated credential lineage rather than
+ *  repeatedly copying the user's canonical store (measured here: one eval
+ *  seat refresh made the canonical store's refresh token invalid_grant). */
 function carryCredential(seatDataDir) {
   if (usingFixture) return;
   const defaultDataDir =
@@ -427,7 +596,8 @@ function carryCredential(seatDataDir) {
           "shodh",
           "seat-harness",
         );
-  const credFile = path.join(defaultDataDir, "provider-credentials.json");
+  const sourceDir = process.env.EVAL_CRED_DIR ?? defaultDataDir;
+  const credFile = path.join(sourceDir, "provider-credentials.json");
   if (existsSync(credFile)) {
     mkdirSync(seatDataDir, { recursive: true });
     copyFileSync(credFile, path.join(seatDataDir, "provider-credentials.json"));
@@ -446,9 +616,15 @@ function carryCredential(seatDataDir) {
  */
 async function launchSeat(runName, runUser, scratch, fixturePort) {
   const seatPort = await freePort();
-  const seatDataDir = path.join(scratch, `seat-${runName}`);
+  // ONE shared seat-data dir for all (sequential) eval seats: pi rotates the
+  // OAuth credential in place, so a single lineage is maintained without any
+  // copy-back. Carrying happens only when the dir has no credential yet —
+  // overwriting would replace rotated (valid) tokens with stale ones.
+  const seatDataDir = path.join(scratchRoot, "eval-seat-data");
   mkdirSync(seatDataDir, { recursive: true });
-  carryCredential(seatDataDir);
+  if (!existsSync(path.join(seatDataDir, "provider-credentials.json"))) {
+    carryCredential(seatDataDir);
+  }
 
   const mcpDist = path.join(repoRoot, "mcp-server", "dist", "index.js");
   const mcpConfigPath = path.join(scratch, `mcp-${runName}.json`);
@@ -1115,18 +1291,18 @@ async function phaseRescore() {
     process.exit(2);
   }
   const scoresByArm = { A: [], B: [] };
-  for (const runName of readdirSync(RESULTS_ARG)) {
+  for (const entry of readdirSync(RESULTS_ARG, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === "users") continue;
+    const runName = entry.name;
     const runDir = path.join(RESULTS_ARG, runName);
-    if (!/^([AB])\d+$/.test(runName)) continue;
-    const arm = runName[0];
     for (const file of readdirSync(runDir)) {
       if (!file.endsWith(".json")) continue;
       const persisted = JSON.parse(readFileSync(path.join(runDir, file), "utf-8"));
       const testCase = CASES.find((candidate) => candidate.id === persisted.case_id);
-      if (!testCase) continue;
+      if (!testCase || !persisted.corpus_ids) continue;
       const score = scoreCase(persisted, testCase, persisted.corpus_ids);
       score.repeat = runName;
-      scoresByArm[arm].push(score);
+      scoresByArm[persisted.arm === "B" ? "B" : "A"].push(score);
     }
   }
   if (scoresByArm.A.length) printAggregate("ARM A (rescored)", aggregate(scoresByArm.A, activeCases()));
@@ -1148,7 +1324,21 @@ async function main() {
     await phaseRescore();
     process.exit(0);
   }
-  if (PHASE === "fixture") await phaseFixture();
+  if (PHASE === "serve") {
+    await phaseServe();
+    process.exit(0);
+  }
+  if (PHASE === "stop-backend") {
+    phaseStopBackend();
+    process.exit(0);
+  }
+  if (PHASE === "seed") {
+    await phaseSeed();
+    process.exit(0);
+  }
+  if (PHASE === "run") {
+    await phaseRun();
+  } else if (PHASE === "fixture") await phaseFixture();
   else if (PHASE === "smoke") await phaseSmoke();
   else if (PHASE === "baseline") await phaseBaseline();
   else if (PHASE === "ab") await phaseAb();
