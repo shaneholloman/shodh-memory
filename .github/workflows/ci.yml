@@ -79,6 +79,126 @@ jobs:
           echo "| Warnings | $WARNINGS |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | $WARNINGS warning(s) — non-blocking (-W mode) |" >> $GITHUB_STEP_SUMMARY
 
+  frontend:
+    name: Dashboard Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: front/ui/package-lock.json
+
+      # Nothing in this workflow compiled front/ui before, so the dashboard
+      # could stop building and every PR would still be green. That is not
+      # hypothetical: a blanket `lib/` rule in .gitignore (Python venv
+      # boilerplate) silently swallowed front/ui/src/lib/ — the entire API
+      # client, the wire types and cn() — and the branch did not type-check
+      # from a clean clone while CI reported success on eleven other checks.
+      #
+      # `npm ci` rather than `npm install`, so this fails loudly if the
+      # lockfile and package.json disagree instead of quietly resolving
+      # something new.
+      - name: Install
+        working-directory: front/ui
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: front/ui
+        run: npx tsc -b --noEmit
+
+      - name: Build
+        working-directory: front/ui
+        run: npx vite build
+
+      # The dashboard is embedded into the shodh-front binary as ONE file and
+      # must run with no network — that is what the on-device claim rests on.
+      # A stray CDN link or un-inlined asset breaks it silently in the browser,
+      # so assert it here instead of hoping.
+      - name: Assert single self-contained artifact
+        working-directory: front/ui
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          EXTRA=$(find dist -type f ! -name index.html | wc -l)
+          if [ "$EXTRA" -ne 0 ]; then
+            echo "dist/ must contain only index.html; found $EXTRA other file(s):" >&2
+            find dist -type f ! -name index.html >&2
+            exit 1
+          fi
+          if grep -Eq '(src|href)="https?://' dist/index.html; then
+            echo "dist/index.html references an external URL:" >&2
+            grep -Eo '(src|href)="https?://[^"]*"' dist/index.html | sort -u >&2
+            exit 1
+          fi
+          SIZE=$(wc -c < dist/index.html)
+          echo "### Dashboard Build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Single self-contained artifact: $SIZE bytes" >> $GITHUB_STEP_SUMMARY
+
+  feature-gates:
+    name: Optional Features Compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      # Optional features are compiled by nothing else in this workflow, so code
+      # behind a #[cfg(feature = ...)] gate can stop compiling and no PR will
+      # ever show it. Not hypothetical: the zenoh transport accrued four compile
+      # errors that way (repaired in #417), and llm-parser two (repaired here).
+      #
+      # 'python' used to be excluded here on the theory that pypi.yml covers it.
+      # It does not: pypi.yml is workflow_dispatch-only, so nothing built the
+      # PyO3 bindings on a PR, and src/python.rs drifted three E0063 initializers
+      # behind the struct definitions (Experience::toponyms from the #435
+      # gazetteer, Query::ner_entities twice). `cargo check` needs no maturin —
+      # pyo3 is abi3-py38 + extension-module, so the build script only wants the
+      # interpreter that every runner already has, and check never links.
+      - name: cargo check each optional feature
+        run: |
+          set -o pipefail
+          FAILED=""
+          for feature in zenoh llm-parser telemetry python; do
+            echo "::group::cargo check --features $feature"
+            if cargo check --features "$feature" --all-targets; then
+              echo "OK: $feature"
+            else
+              echo "FAILED: $feature"
+              FAILED="$FAILED $feature"
+            fi
+            echo "::endgroup::"
+          done
+          {
+            echo "### Optional Feature Compilation"
+            echo ""
+            if [ -n "$FAILED" ]; then
+              echo "Broken:$FAILED"
+            else
+              echo "All optional features compile."
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+          if [ -n "$FAILED" ]; then
+            echo "Optional features failed to compile:$FAILED" >&2
+            exit 1
+          fi
+
+      # The loop above proves each feature compiles ALONE. It cannot prove the
+      # union compiles, and the union is what `cargo check --all-features`,
+      # `cargo package --all-features`, and any downstream crate enabling two of
+      # ours actually build. Feature unification only ever ADDS cfgs and dep
+      # features, so a symbol that resolves under one feature can stop resolving
+      # when a second is on. This step is a hard gate, not a report.
+      - name: cargo check --all-features --all-targets
+        run: cargo check --all-features --all-targets
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -107,8 +227,98 @@ jobs:
       - name: Build Release
         run: cargo build --release
 
+      # `cargo test --release` builds a unit graph that NOTHING else in this
+      # repo builds: `cargo build --release` makes bins only, every test job
+      # runs the dev profile, and `cargo check` emits no cdylib. That gap hid an
+      # unbuildable configuration for months — `[profile.release] panic =
+      # "abort"` plus a cdylib lib target made cargo emit two variants of
+      # `libshodh_memory.rlib` into the same unhashed filename (cargo#6313), so
+      # the loser was clobbered and every consumer linked against the wrong SVH.
+      #
+      # `recall_eval_cli` is the right sentinel and not an arbitrary pick: it
+      # resolves `CARGO_BIN_EXE_recall-eval`, which forces cargo to build the
+      # bins in release alongside a rustc test harness — exactly the two-panic-
+      # flavour graph that broke. Its four tests only parse CLI flags (no
+      # models, no ports), so this runs for real rather than `--no-run` — which
+      # additionally proves the release `recall-eval` binary starts and parses
+      # its arguments, not that a full eval suite passes (recall.yml owns that).
+      # Ubuntu only: this is a build-configuration gate, not a portability one,
+      # and the release profile is fat-LTO.
+      - name: Release test graph compiles and runs (cargo test --release)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release --test recall_eval_cli
+
+      # `cargo test --lib` constructs real memory systems, and library init
+      # acquires its models on demand: MiniLM (~90MB, HuggingFace) because vector
+      # search is meaningless without it, and the GLiNER typer (142MB) because
+      # only CI ever provisions it otherwise. Unprovisioned, this step therefore
+      # pulled ~230MB per OS per run and was one HuggingFace hiccup away from red
+      # — which is exactly how it failed on PR #443 (MiniLM tokenizer.json), a
+      # flake that then passed on a bare re-run with no code change.
+      #
+      # Pre-supplying both assets makes the step hermetic for those two fetches:
+      # SHODH_MODEL_PATH / SHODH_GLINER_MODEL_PATH are read as explicit local
+      # paths first, so nothing is downloaded and the tests run on the REAL
+      # embedder and the REAL typer, never the silent fallbacks. Cache keys are
+      # shared with the Tier-1 job deliberately.
+      #
+      # SHODH_OFFLINE is NOT set here: the ONNX Runtime dylib is still fetched by
+      # the library (a GitHub release download that is green on both OSes today),
+      # and offline mode would block it. SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS is
+      # likewise never set — degrading the embedder to make CI pass would make
+      # every vector assertion below it meaningless.
+      - name: Cache GLiNER typer assets
+        if: matrix.os != 'windows-latest'
+        id: build-gliner-cache
+        uses: actions/cache@v4
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: matrix.os != 'windows-latest' && steps.build-gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Cache MiniLM embedder weights
+        if: matrix.os != 'windows-latest'
+        id: build-minilm-cache
+        uses: actions/cache@v4
+        with:
+          path: models/minilm-l6
+          key: minilm-l6-c9745ed1-v1
+
+      - name: Fetch MiniLM embedder weights
+        if: matrix.os != 'windows-latest' && steps.build-minilm-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p models/minilm-l6
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/model_quantized.onnx "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o models/minilm-l6/tokenizer.json "$BASE/tokenizer.json"
+          ls -la models/minilm-l6
+
+      - name: Verify model assets (hard gate — refuse to run on missing/degraded assets)
+        if: matrix.os != 'windows-latest'
+        run: |
+          SHODH_MODEL_PATH="${{ github.workspace }}/models/minilm-l6"
+          SHODH_GLINER_MODEL_PATH="${{ github.workspace }}/models/gliner-bi-edge"
+          test -s "$SHODH_MODEL_PATH/model_quantized.onnx" || { echo "::error::MiniLM weights missing"; exit 1; }
+          test -s "$SHODH_MODEL_PATH/tokenizer.json" || { echo "::error::MiniLM tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/model.onnx" || { echo "::error::GLiNER model missing — refusing to run on fallback NER"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$SHODH_GLINER_MODEL_PATH/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+
       - name: Run unit tests
         if: matrix.os != 'windows-latest'
+        env:
+          SHODH_MODEL_PATH: ${{ github.workspace }}/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: cargo test --lib --no-fail-fast
 
       - name: Display build info (Unix)

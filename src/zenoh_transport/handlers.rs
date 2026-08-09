@@ -309,7 +309,15 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     }
 
     let op_start = std::time::Instant::now();
-    let experience_type = parse_experience_type(req.memory_type.as_ref());
+    // Fire-and-forget subscriber: an invalid type is logged and dropped, matching
+    // the validation failures above (there is no reply channel to surface it on).
+    let experience_type = match parse_experience_type(req.memory_type.as_ref()) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(user_id = %req.user_id, "Validation failed: {}", e);
+            return;
+        }
+    };
 
     // Parallel NER + YAKE extraction (same as HTTP handler)
     let ner = manager.get_neural_ner();
@@ -422,17 +430,22 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     let created_at = req.created_at;
     let created_at_for_facts = created_at.unwrap_or_else(chrono::Utc::now);
 
-    let memory_id = match tokio::task::spawn_blocking(move || {
+    // `_detailed` for the same reason the HTTP path uses it: a content-hash
+    // dedup hit may MERGE enrichment into the stored memory, and only the
+    // caller can tell the graph pass below that the existing episode is now
+    // stale. Robotics ingest is exactly where this matters — the same
+    // observation re-sent with a geo fix or a reward the first copy lacked.
+    let outcome = match tokio::task::spawn_blocking(move || {
         let guard = memory_clone.read();
         if agent_id.is_some() || run_id.is_some() {
-            guard.remember_with_agent(exp_clone, created_at, agent_id, run_id)
+            guard.remember_with_agent_detailed(exp_clone, created_at, agent_id, run_id)
         } else {
-            guard.remember(exp_clone, created_at)
+            guard.remember_detailed(exp_clone, created_at)
         }
     })
     .await
     {
-        Ok(Ok(id)) => id,
+        Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => {
             error!(user_id = %req.user_id, "Failed to store memory: {}", e);
             return;
@@ -442,6 +455,9 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
             return;
         }
     };
+    let memory_id = outcome.id.clone();
+    let needs_graph_rebuild = outcome.needs_graph_rebuild();
+    let experience = outcome.merged_experience.clone().unwrap_or(experience);
 
     // Tool-aware feedback attribution for robotics:
     // If this remember() carries an action+reward, attribute it to the most recent recall.
@@ -559,8 +575,12 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     let user_id = req.user_id.clone();
     let parent_id = req.parent_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id, None)
-        {
+        let graph_pass = if needs_graph_rebuild {
+            state.rebuild_experience_graph(&user_id, &experience, &memory_id, None)
+        } else {
+            state.process_experience_into_graph(&user_id, &experience, &memory_id, None)
+        };
+        if let Err(e) = graph_pass {
             debug!("Graph processing failed (non-fatal): {}", e);
         }
 
@@ -724,11 +744,16 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
                     content: m.experience.content.clone(),
                     memory_type: Some(format!("{:?}", m.experience.experience_type)),
                     tags: m.experience.entities.clone(),
+                    geo_location: m.experience.geo_location,
+                    toponyms: m.experience.toponyms.clone(),
                 },
                 importance: m.importance(),
                 created_at: m.created_at.to_rfc3339(),
                 score,
                 tier: format!("{:?}", m.tier),
+                // Debug-only field: the HTTP path fills it from retrieval stats
+                // when debug=true; the Zenoh query API has no debug flag.
+                score_attribution: None,
             }
         })
         .collect();
@@ -845,10 +870,13 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
     };
 
     let has_recall_memories = !recall_memories.is_empty();
+    // Zenoh recall is not paginated: the returned set is the full result,
+    // so count mirrors the HTTP handler's recall_memories.len().
+    let count = recall_memories.len();
 
     let response = RecallResponse {
         memories: recall_memories,
-        count: total,
+        count,
         retrieval_stats: None,
         todos,
         todo_count,
@@ -917,7 +945,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
 
     debug!(
         user_id = %user_id,
-        results = total,
+        results = count,
         "Zenoh recall completed"
     );
 }
