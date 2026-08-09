@@ -1340,7 +1340,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
       {
         name: "backup_restore",
-        description: "Restore a previously created backup by ID. This replaces all current data for the user with the backup contents. Server restart is recommended after restore.",
+        description: "Restore a previously created backup by ID. Destructive: replaces this user's memories, vector index and knowledge graph with the backup's contents. Todos, reminders and audit logs are NOT restored — they live in a store shared with other users, so restoring one user's copy would destroy everyone else's. The response names every store restored, and any that failed. Server restart is recommended after restore.",
         inputSchema: {
           type: "object",
           properties: {
@@ -3309,12 +3309,15 @@ const handleCallTool = async (request: CallToolRequest) => {
           success: boolean;
           message: string;
           restored_stores: string[];
+          failed_stores?: string[];
         }
 
         const result = await apiCall<RestoreBackupResponse>("/api/backup/restore", "POST", {
           user_id: USER_ID,
           backup_id,
         });
+
+        const failed = result.failed_stores ?? [];
 
         let response = `🔄 Backup Restore\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -3325,6 +3328,16 @@ const handleCallTool = async (request: CallToolRequest) => {
             response += `Restored stores: ${result.restored_stores.join(", ")}\n`;
           }
           response += `\n⚠️ ${result.message || "Restore completed with no additional details"}`;
+        } else if (failed.length > 0) {
+          // Partial restore: some stores came back, others were cleared and not
+          // replaced. Reporting this as a plain success is how an operator ends
+          // up believing data was recovered that was not.
+          response += `⚠️ Backup #${backup_id} restored INCOMPLETELY\n`;
+          if (result.restored_stores.length > 0) {
+            response += `Restored stores: ${result.restored_stores.join(", ")}\n`;
+          }
+          response += `Failed stores: ${failed.join(", ")}\n`;
+          response += `\n${result.message || "Some stores were not recovered"}`;
         } else {
           response += `✗ Restore failed: ${result.message || "Unknown restore error"}`;
         }
