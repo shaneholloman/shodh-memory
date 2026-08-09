@@ -825,9 +825,12 @@ jobs:
     runs-on: ubuntu-latest
     # `CI Summary` is the ONLY required status check on `main` (branch
     # protection), so a job that is not listed here cannot block a merge no
-    # matter how red it goes. `security` is listed, and gated below.
+    # matter how red it goes. `security`, `frontend`, and `feature-gates` are
+    # listed, and gated below. `test-stress` is deliberately NOT listed: it is
+    # skipped on pull requests (if: push to main), so requiring
+    # `result == 'success'` here would fail every PR.
     needs:
-      [version-check, format, clippy, build, test-unit, test-integration, security, benchmark]
+      [version-check, format, clippy, build, test-unit, test-integration, security, frontend, feature-gates, benchmark]
     if: always()
     steps:
       - name: Generate final summary
@@ -844,6 +847,8 @@ jobs:
           unit_icon="${{ needs.test-unit.result == 'success' && '✅' || '❌' }}"
           integration_icon="${{ needs.test-integration.result == 'success' && '✅' || '❌' }}"
           security_icon="${{ needs.security.result == 'success' && '✅' || '❌' }}"
+          frontend_icon="${{ needs.frontend.result == 'success' && '✅' || '❌' }}"
+          features_icon="${{ needs.feature-gates.result == 'success' && '✅' || '❌' }}"
           bench_icon="${{ needs.benchmark.result == 'success' && '✅' || '⚠️' }}"
 
           echo "| Version | $version_icon ${{ needs.version-check.result }} |" >> $GITHUB_STEP_SUMMARY
@@ -853,6 +858,8 @@ jobs:
           echo "| Unit Tests (Tier 1) | $unit_icon ${{ needs.test-unit.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Integration Tests (Tier 2) | $integration_icon ${{ needs.test-integration.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Security Audit | $security_icon ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dashboard Build | $frontend_icon ${{ needs.frontend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Optional Features Compile | $features_icon ${{ needs.feature-gates.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Benchmarks | $bench_icon ${{ needs.benchmark.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
@@ -862,7 +869,9 @@ jobs:
                 "${{ needs.build.result }}" == "success" && \
                 "${{ needs.test-unit.result }}" == "success" && \
                 "${{ needs.test-integration.result }}" == "success" && \
-                "${{ needs.security.result }}" == "success" ]]; then
+                "${{ needs.security.result }}" == "success" && \
+                "${{ needs.frontend.result }}" == "success" && \
+                "${{ needs.feature-gates.result }}" == "success" ]]; then
             echo "### All critical checks passed" >> $GITHUB_STEP_SUMMARY
             exit 0
           else
