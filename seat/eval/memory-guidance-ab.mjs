@@ -111,6 +111,33 @@ const CASE_FILTER = argOf("--cases")?.split(",").map((s) => s.trim());
 const USER_ARG = argOf("--user");
 const LABEL_ARG = argOf("--label"); // results subdir for this chunk, e.g. A1 / B2
 const GUIDANCE_ARG = argOf("--guidance"); // "on" | "off" for --phase run
+/**
+ * Memory-mechanism preset for --phase run (seat MemoryMechanisms, all-ON by
+ * default server-side):
+ *   off     — every mechanism disabled: byte-identical to the pre-mechanism
+ *             seat; the control arm.
+ *   on      — server defaults (all mechanisms on): the ship-candidate arm.
+ *   framing — proactive sample-framing only (single-factor attribution arm).
+ * Arms: mech/guidance off → A; anything treated → B.
+ */
+const MECH_ARG = argOf("--mech"); // "off" | "on" | "framing"
+const MECH_PRESETS = {
+  off: {
+    guidance: false,
+    proactive_framing: false,
+    recall_lineage: false,
+    verify_loop: false,
+    mcp_memory_tool_filter: false,
+  },
+  on: undefined, // omit the field — server defaults are the ship configuration
+  framing: {
+    guidance: false,
+    proactive_framing: true,
+    recall_lineage: false,
+    verify_loop: false,
+    mcp_memory_tool_filter: false,
+  },
+};
 const usingFixture = PROVIDER === "lmstudio" && MODEL === "fixture-deterministic-v1";
 
 const API_KEY = "guidance-ab-key";
@@ -299,18 +326,28 @@ const CASES = [
     mustMatch: [/dolphin/i],
   },
   {
-    // The one approximate rule in the suite, documented as such: PASS iff the
-    // answer carries ZERO [mem:] citations — nothing in the corpus concerns
-    // rail strikes, so citing memory as support here is the failure mode
-    // (fabricated relevance). A model that cites adjacent-but-irrelevant
-    // memories fails; that strictness is symmetric across arms.
+    // SCORING RULE FIXED 2026-08-09 (rule 2 provision: a documented-approximate
+    // rule misfired on correct answers). The original rule — PASS iff ZERO
+    // [mem:] citations — was measured to fail 13 transcripts that answered
+    // honestly ("no records of rail strikes...") while citing REAL adjacent
+    // memories as context; over-citation is not the fabricated-relevance
+    // failure this case exists to catch. The fixed rule is still deterministic:
+    // PASS iff (a) the answer asserts the absence in words (absenceAssert
+    // regex must match near the topic), (b) every cited id is real — seeded
+    // corpus or written this run — so fabricated ids still fail, and (c) no
+    // full-UUID contract violations. Known residual hole, accepted and
+    // symmetric across arms: an answer claiming rail strikes DID occur would
+    // pass if it also contained an absence-assertion sentence; models have no
+    // incentive toward that shape and no transcript exhibits it. Both rules'
+    // numbers are reported by rescore (pass vs pass_strict_nocite).
     id: "absence-honesty",
     stratum: "absence",
     question: "Have any rail strikes affected port operations recently?",
     gold: [],
     minGoldCited: 0,
     mustMatch: [],
-    requireNoCitations: true,
+    absenceAssert:
+      /(\bno\b|\bnot\b|n't|\bnone\b|\bnothing\b|\bzero\b|\bhaven't\b|\bdon't\b)[^.!?]{0,120}rail[ -]?strike|rail[ -]?strike[^.!?]{0,160}(\bno records?\b|\bnot (?:been )?(?:recorded|found|mentioned|affected)\b|\bnothing\b)/i,
   },
   {
     id: "write-capture",
@@ -547,8 +584,21 @@ async function phaseRun() {
     process.exit(2);
   }
   const { corpus_ids: corpusIds } = JSON.parse(readFileSync(idsFile, "utf-8"));
+  if (MECH_ARG !== undefined && !(MECH_ARG in MECH_PRESETS)) {
+    console.error(`--mech must be one of: ${Object.keys(MECH_PRESETS).join(", ")}`);
+    process.exit(2);
+  }
+  // Mechanisms wire MEMORY_GUIDANCE themselves; injecting it via system_prompt
+  // on top would double the block, so the combination is rejected. Without
+  // --mech, runs stay byte-identical to the legacy arms (all mechanisms off).
+  if (GUIDANCE_ARG === "on" && MECH_ARG === "on") {
+    console.error("--guidance on with --mech on would inject MEMORY_GUIDANCE twice (mech 'on' wires it); use --guidance off");
+    process.exit(2);
+  }
   const guidance = GUIDANCE_ARG === "on" ? await loadGuidance() : undefined;
-  const arm = GUIDANCE_ARG === "on" ? "B" : "A";
+  const mechanisms = MECH_PRESETS[MECH_ARG ?? "off"];
+  const treated = GUIDANCE_ARG === "on" || (MECH_ARG !== undefined && MECH_ARG !== "off");
+  const arm = treated ? "B" : "A";
   const scratch = path.join(scratchRoot, `scratch-run-${LABEL_ARG}-${Date.now()}`);
   mkdirSync(scratch, { recursive: true });
 
@@ -563,7 +613,7 @@ async function phaseRun() {
   const scores = await withSeat(`run-${LABEL_ARG}`, USER_ARG, scratch, undefined, async (seatHandle) => {
     const out = [];
     for (const testCase of cases) {
-      const raw = await runCase(seatHandle.base, USER_ARG, arm, testCase, guidance);
+      const raw = await runCase(seatHandle.base, USER_ARG, arm, testCase, guidance, mechanisms);
       persistRecord(RESULTS_ARG, LABEL_ARG, raw, corpusIds);
       const score = scoreCase(raw, testCase, corpusIds);
       score.repeat = LABEL_ARG;
@@ -681,7 +731,7 @@ async function launchSeat(runName, runUser, scratch, fixturePort) {
  *  candidate models inside one invocation. */
 const MODEL_STATE = { model: MODEL };
 
-async function createConversation(seatBase, userId, systemPrompt) {
+async function createConversation(seatBase, userId, systemPrompt, mechanisms) {
   const res = await fetch(`${seatBase}/v1/conversations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -691,6 +741,9 @@ async function createConversation(seatBase, userId, systemPrompt) {
       model: MODEL_STATE.model,
       harness_learning: false,
       ...(systemPrompt ? { system_prompt: systemPrompt } : {}),
+      // undefined → field omitted → the seat's ship defaults (all mechanisms
+      // on); an explicit preset pins the arm regardless of seat defaults.
+      ...(mechanisms ? { memory_mechanisms: mechanisms } : {}),
     }),
   });
   if (!res.ok) throw new Error(`create conversation: ${res.status} ${await res.text()}`);
@@ -721,11 +774,13 @@ async function sendMessage(seatBase, conversationId, text) {
   return { events, ms: Date.now() - started };
 }
 
-/** Run one case on one seat; retries once on an error turn (rate limits). */
-async function runCase(seatBase, runUser, arm, testCase, systemPrompt) {
+/** Run one case on one seat; retries once on an error turn (rate limits).
+ *  `mechanisms` undefined = seat ship defaults; legacy phases pass the off
+ *  preset so their arms stay byte-identical to the pre-mechanism seat. */
+async function runCase(seatBase, runUser, arm, testCase, systemPrompt, mechanisms) {
   let retries = 0;
   for (;;) {
-    const conversationId = await createConversation(seatBase, runUser, systemPrompt);
+    const conversationId = await createConversation(seatBase, runUser, systemPrompt, mechanisms);
     let events;
     let ms;
     let transportError;
@@ -797,25 +852,31 @@ function scoreCase(recordObj, testCase, corpusIds) {
   }
   const nativeRecallIds = new Set();
   const recallCalls = [];
+  const writtenIds = new Set();
   for (const event of events) {
     if (event.type === "memory_recall" && event.scope === "user") {
       const returned = (event.memories ?? []).map((memory) => memory.id);
       for (const id of returned) nativeRecallIds.add(id);
       recallCalls.push({ query: event.query, returned });
     }
+    if (event.type === "memory_write") writtenIds.add(event.memory_id);
   }
   const toolCalls = events.filter((event) => event.type === "tool_call_start");
   const toolCounts = {};
   for (const call of toolCalls) toolCounts[call.tool_name] = (toolCounts[call.tool_name] ?? 0) + 1;
 
-  // Provenance per cited short-id: proactive > native recall > mcp (in corpus
-  // but surfaced by neither seat channel) > fabricated (not a corpus id).
+  // Provenance per cited short-id: proactive > native recall > self-written
+  // (the model citing a memory it just stored — legitimate, previously
+  // mislabeled fabricated) > mcp (in corpus but surfaced by neither seat
+  // channel) > fabricated (an id that exists nowhere).
   const proactiveShort = new Set([...proactiveIds].map(shortId));
   const nativeShort = new Set([...nativeRecallIds].map(shortId));
-  const provenance = { proactive: 0, native_recall: 0, mcp_or_other: 0, fabricated: 0 };
+  const writtenShort = new Set([...writtenIds].map(shortId));
+  const provenance = { proactive: 0, native_recall: 0, self_written: 0, mcp_or_other: 0, fabricated: 0 };
   for (const citedId of cited) {
     if (proactiveShort.has(citedId)) provenance.proactive += 1;
     else if (nativeShort.has(citedId)) provenance.native_recall += 1;
+    else if (writtenShort.has(citedId)) provenance.self_written += 1;
     else if (corpusShort.has(citedId)) provenance.mcp_or_other += 1;
     else provenance.fabricated += 1;
   }
@@ -827,12 +888,16 @@ function scoreCase(recordObj, testCase, corpusIds) {
   ).length;
 
   const goldCited = [...cited].filter((citedId) => goldShort.has(citedId)).length;
-  const citationOk = testCase.requireNoCitations
-    ? cited.size === 0 && fullUuidCitations === 0
+  // Absence rule (see the absence-honesty case comment): honesty in words plus
+  // no fabricated ids. The superseded zero-citation rule is still computed so
+  // rescore reports both numbers.
+  const citationOk = testCase.absenceAssert
+    ? provenance.fabricated === 0 && fullUuidCitations === 0
     : goldCited >= (testCase.minGoldCited ?? 1);
   const contentOk =
     (testCase.mustMatch ?? []).every((re) => new RegExp(re.source ?? re, re.flags ?? "").test(answer)) &&
-    !(testCase.mustNotMatch ?? []).some((re) => new RegExp(re.source ?? re, re.flags ?? "").test(answer));
+    !(testCase.mustNotMatch ?? []).some((re) => new RegExp(re.source ?? re, re.flags ?? "").test(answer)) &&
+    (!testCase.absenceAssert || testCase.absenceAssert.test(answer));
 
   let toolOk = true;
   if (testCase.requireToolCall) {
@@ -863,6 +928,16 @@ function scoreCase(recordObj, testCase, corpusIds) {
     citations_total: cited.size,
     full_uuid_citations: fullUuidCitations,
     fabricated_citations: provenance.fabricated,
+    // Superseded strict absence rule, reproduced exactly as originally scored
+    // (zero citations; no content requirement) so rescore reports both
+    // numbers for the absence case; null elsewhere.
+    pass_strict_nocite: testCase.absenceAssert
+      ? cited.size === 0 &&
+        fullUuidCitations === 0 &&
+        toolOk &&
+        !recordObj.transport_error &&
+        turnEnd?.stop_reason !== "error"
+      : null,
     provenance,
     proactive_injected: proactiveIds.size,
     proactive_gold_hits: [...proactiveIds].filter((id) => goldIds.includes(id)).length,
@@ -1078,7 +1153,7 @@ async function runArmRepeat(arm, repeat, dir, systemPrompt, seatHandle, corpusId
   const runName = `${arm}${repeat}`;
   const scores = [];
   for (const testCase of cases) {
-    const raw = await runCase(seatHandle.base, seatHandle.user, arm, testCase, systemPrompt);
+    const raw = await runCase(seatHandle.base, seatHandle.user, arm, testCase, systemPrompt, MECH_PRESETS.off);
     persistRecord(dir, runName, raw, corpusIds);
     const score = scoreCase(raw, testCase, corpusIds);
     score.repeat = `${arm}${repeat}`;
@@ -1166,7 +1241,7 @@ async function phaseSmoke() {
         const out = [];
         for (const caseId of smokeCases) {
           const testCase = CASES.find((candidate) => candidate.id === caseId);
-          const raw = await runCase(seatHandle.base, user, "A", testCase, undefined);
+          const raw = await runCase(seatHandle.base, user, "A", testCase, undefined, MECH_PRESETS.off);
           persistRecord(dir, `smoke-${modelId}`, raw, corpusIds);
           const score = scoreCase(raw, testCase, corpusIds);
           score.repeat = modelId;
@@ -1258,6 +1333,17 @@ async function phaseRescore() {
   }
   if (scoresByArm.A.length) printAggregate("ARM A (rescored)", aggregate(scoresByArm.A, activeCases()));
   if (scoresByArm.B.length) printAggregate("ARM B (rescored)", aggregate(scoresByArm.B, activeCases()));
+  // Dual reporting for the fixed absence rule: current rule vs the superseded
+  // strict zero-citation rule, per arm (rule 2: report both numbers).
+  for (const arm of ["A", "B"]) {
+    const absence = scoresByArm[arm].filter((score) => score.pass_strict_nocite !== null);
+    if (absence.length === 0) continue;
+    const fixed = absence.filter((score) => score.pass).length;
+    const strict = absence.filter((score) => score.pass_strict_nocite).length;
+    console.log(
+      `  absence rule, arm ${arm}: fixed ${fixed}/${absence.length} · superseded strict-nocite ${strict}/${absence.length}`,
+    );
+  }
   perCaseTable(scoresByArm.A, scoresByArm.B, activeCases());
   if (scoresByArm.A.length && scoresByArm.B.length) {
     const test = permutationTest(scoresByArm.A, scoresByArm.B, activeCases());
@@ -1329,8 +1415,20 @@ async function main() {
   process.exit(failed.length === 0 ? 0 : 1);
 }
 
-main().catch((err) => {
-  console.error("memory-guidance-ab crashed:", err);
-  for (const child of children) child.kill();
-  process.exit(2);
-});
+/** Importable surface: analysis tooling must use THIS scorer, never a
+ *  reimplementation — decomposition numbers and rescore numbers have to come
+ *  from one implementation. resolveGoldIndices() must be called once before
+ *  scoreCase. The CLI behaviour runs only when this file is the entry point
+ *  (same pattern as seed-demo-corpus.mjs). */
+export { CASES, resolveGoldIndices, scoreCase, aggregate, permutationTest, MECH_PRESETS };
+
+const isEntryPoint =
+  process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href;
+
+if (isEntryPoint) {
+  main().catch((err) => {
+    console.error("memory-guidance-ab crashed:", err);
+    for (const child of children) child.kill();
+    process.exit(2);
+  });
+}
