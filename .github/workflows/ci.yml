@@ -239,8 +239,9 @@ jobs:
       # resolves `CARGO_BIN_EXE_recall-eval`, which forces cargo to build the
       # bins in release alongside a rustc test harness — exactly the two-panic-
       # flavour graph that broke. Its four tests only parse CLI flags (no
-      # models, no ports), so this runs for real rather than `--no-run`, and it
-      # also proves the release `recall-eval` that recall.yml ships is runnable.
+      # models, no ports), so this runs for real rather than `--no-run` — which
+      # additionally proves the release `recall-eval` binary starts and parses
+      # its arguments, not that a full eval suite passes (recall.yml owns that).
       # Ubuntu only: this is a build-configuration gate, not a portability one,
       # and the release profile is fat-LTO.
       - name: Release test graph compiles and runs (cargo test --release)
