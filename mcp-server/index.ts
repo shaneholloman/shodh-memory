@@ -3032,7 +3032,12 @@ const handleCallTool = async (request: CallToolRequest) => {
         response += `Graph: ${result.graph_nodes || 0} nodes │ ${result.graph_edges || 0} edges\n`;
         response += `Indexed Vectors: ${indexedCount}\n`;
         response += `Avg Importance: ${avgImportance.toFixed(2)}\n`;
-        response += `Tiers: ${result.working_memory_count ?? 0} working │ ${result.session_memory_count ?? 0} session │ ${result.long_term_memory_count ?? 0} long-term\n`;
+        // These are buffer-occupancy counts, not a partition: a memory is
+        // written to long-term storage immediately and also held in the working
+        // buffer until evicted, so it is counted twice and the three numbers sum
+        // to more than the total. Labelling them "working / session / long-term"
+        // read as a tier breakdown that does not add up.
+        response += `In working buffer: ${result.working_memory_count ?? 0} │ in session buffer: ${result.session_memory_count ?? 0} │ persisted: ${result.long_term_memory_count ?? 0}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         // No "By Type" section: GET /api/users/{id}/stats returns no type
         // histogram. list_memories computes one from the memories it lists.
@@ -6409,10 +6414,11 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
         const parts: string[] = ["**Memory System Health:**\n"];
         parts.push(`Total memories: ${statsResult.total_memories || 0}`);
+        // Buffer occupancy, not a tier partition — see the note in memory_stats.
         parts.push(
-          `Tiers: ${statsResult.working_memory_count ?? 0} working │ ` +
-            `${statsResult.session_memory_count ?? 0} session │ ` +
-            `${statsResult.long_term_memory_count ?? 0} long-term`,
+          `In working buffer: ${statsResult.working_memory_count ?? 0} │ ` +
+            `in session buffer: ${statsResult.session_memory_count ?? 0} │ ` +
+            `persisted: ${statsResult.long_term_memory_count ?? 0}`,
         );
         parts.push(`Indexed vectors: ${statsResult.vector_index_count ?? 0}`);
         parts.push(`Graph: ${statsResult.graph_nodes ?? 0} nodes │ ${statsResult.graph_edges ?? 0} edges`);
