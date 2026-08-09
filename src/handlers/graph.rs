@@ -209,9 +209,18 @@ pub async fn get_episode(
 pub struct GetAllEntitiesRequest {
     pub user_id: String,
     pub limit: Option<usize>,
+    /// Include each entity's 384-float `name_embedding` in the response.
+    ///
+    /// Defaults to FALSE. The embedding is roughly 3KB of JSON per entity, so a
+    /// 500-entity listing shipped about 3MB that every known caller discarded
+    /// on arrival. It stays available for a caller that genuinely wants to
+    /// compute similarity itself; it is no longer the price of asking which
+    /// entities exist.
+    #[serde(default)]
+    pub include_embeddings: bool,
 }
 
-/// POST /api/graph/entities/all - Get all entities
+/// POST /api/graph/entities/all - Get all entities, most salient first
 pub async fn get_all_entities(
     State(state): State<AppState>,
     Json(req): Json<GetAllEntitiesRequest>,
@@ -223,7 +232,8 @@ pub async fn get_all_entities(
         .map_err(AppError::Internal)?;
 
     let limit = req.limit.unwrap_or(100);
-    let entities = tokio::task::spawn_blocking(move || {
+    let include_embeddings = req.include_embeddings;
+    let mut entities = tokio::task::spawn_blocking(move || {
         let graph_guard = graph.read();
         graph_guard.get_all_entities()
     })
@@ -231,7 +241,31 @@ pub async fn get_all_entities(
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {e}")))?
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
-    let entities: Vec<_> = entities.into_iter().take(limit).collect();
+    // Rank BEFORE truncating. Taking `limit` straight off the iterator returned
+    // whatever storage order produced, so "the 100 entities" meant 100
+    // arbitrary ones — a caller asking for the graph's cast of characters got
+    // an unordered sample, and the most important entity in the graph could sit
+    // outside it for no reason it could observe.
+    //
+    // Salience is the ranking the graph already computes for exactly this
+    // question ("how much does this entity matter here"); mention count breaks
+    // ties, and name breaks those, so the order is total and the same request
+    // twice returns the same page.
+    entities.sort_by(|a, b| {
+        b.salience
+            .partial_cmp(&a.salience)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.mention_count.cmp(&a.mention_count))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    entities.truncate(limit);
+
+    if !include_embeddings {
+        for entity in &mut entities {
+            entity.name_embedding = None;
+        }
+    }
+
     let count = entities.len();
 
     Ok(Json(serde_json::json!({
