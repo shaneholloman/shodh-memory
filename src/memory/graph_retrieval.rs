@@ -2268,6 +2268,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
 
         // add_entity forces mention_count=1 for a new entity and +1 on each re-add of
@@ -2366,6 +2367,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         let a = graph.add_entity(mk_entity("Alphaword")).unwrap();
         let b = graph.add_entity(mk_entity("Betaword")).unwrap();
@@ -2890,6 +2892,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         let widget = graph.add_entity(mk_entity("widget")).unwrap();
         let gadget = graph.add_entity(mk_entity("gadget")).unwrap();

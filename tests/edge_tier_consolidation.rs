@@ -191,6 +191,7 @@ fn ingest(graph: &GraphMemory, corpus: &[CorpusItem]) -> i64 {
                         is_proper_noun: true,
                         selectivity: None,
                         fine_type: None,
+                        kb_id: None,
                     };
                     let id = graph.add_entity(node).expect("add entity");
                     entities.insert(name.clone(), id);

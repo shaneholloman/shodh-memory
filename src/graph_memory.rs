@@ -165,6 +165,23 @@ pub struct EntityNode {
     /// records written before this field existed).
     #[serde(default)]
     pub fine_type: Option<String>,
+
+    /// Stable real-world identity: a Wikidata QID (e.g. `"Q37156"` for IBM), set
+    /// by offline KB linking (`crate::kb`) when a mention resolves unambiguously.
+    ///
+    /// Two nodes carrying the same `kb_id` are the same real-world thing — that
+    /// is the entire claim, and it is one no amount of string similarity can
+    /// make: `IBM` and `International Business Machines` share almost no
+    /// characters. `None` is the norm and is never an error; it means the
+    /// surface was unknown to the KB, or known but too ambiguous to link, and
+    /// abstaining is the designed behaviour rather than a gap.
+    ///
+    /// Write-once: set only when `None`, never overwritten. A node that already
+    /// carries an identity keeps it even if a later mention resolves differently
+    /// (see `add_entity`), because silently repointing an identity is exactly
+    /// the corruption KB linking exists to avoid.
+    #[serde(default)]
+    pub kb_id: Option<String>,
 }
 
 fn default_salience() -> f32 {
@@ -1091,10 +1108,29 @@ fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
 
 /// Postcard defaults for trailing `EntityNode` fields added after the postcard
 /// cutover (#192), in declaration order: `selectivity: Option` (None = `0x00`),
-/// `fine_type: Option<String>` (None = `0x00`). Keep in sync with any new
-/// trailing field — append one `0x00` (or the field's postcard-encoded default)
-/// per field, in the order the fields appear in the struct.
-const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
+/// `fine_type: Option<String>` (None = `0x00`), `kb_id: Option<String>`
+/// (None = `0x00`). Keep in sync with any new trailing field — append one
+/// `0x00` (or the field's postcard-encoded default) per field, in the order the
+/// fields appear in the struct.
+const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
+
+/// Whether two graph nodes may be canonicalized into one, given the real-world
+/// identities they carry.
+///
+/// Two *different* Wikidata QIDs are a hard veto: the KB has established that
+/// these name different things, and no surface-similarity score should be able
+/// to overrule that. Anything else permits the merge — an unlinked node is not
+/// evidence of difference, only of silence, which is the common case.
+///
+/// Split out of `canonicalize_entities` because that function needs a live
+/// dependency parser to run at all, and this rule is too important to be
+/// reachable only through it.
+fn kb_identities_permit_merge(canonical: Option<&str>, member: Option<&str>) -> bool {
+    match (canonical, member) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
 
 /// Decode a stored `EntityNode`, tolerating legacy records written before trailing
 /// fields (e.g. `selectivity`, `fine_type`) existed. See [`crate::serialization::try_decode_compat`].
@@ -2921,14 +2957,18 @@ impl GraphMemory {
         self.seed_aliases(to_seed).unwrap_or(0)
     }
 
-    /// Retrieval-based KB linking (ER Task 3.2) — GATED. For each freshly-extracted
-    /// entity, link its surface to the domain KB (`SHODH_KB_PATH`): exact alias hit,
-    /// else type-blocked embedding nearest-neighbour ≥ `SHODH_KB_LINK_MIN`. When the
-    /// KB's canonical entity already exists as a node in this graph, seed a
-    /// surface→canonical alias so corpus mentions collapse onto the world-knowledge
-    /// entity (`Google` → `Alphabet Inc.`) — a merge no in-corpus matcher reaches.
-    /// No-ops without `SHODH_KB_LINKING=1` or a loaded KB (`SHODH_KB_PATH`). Returns
-    /// aliases seeded.
+    /// Collapse corpus mentions onto their KB-canonical node — GATED behind
+    /// `SHODH_KB_LINKING=1`.
+    ///
+    /// Distinct from the always-on `kb_id` stamp in `add_entity`. Stamping only
+    /// *records* an identity and cannot move retrieval; this merges graph
+    /// structure by seeding a surface→canonical alias, which changes what
+    /// traversal and dedup see. That is a real behavioural change with a real
+    /// blast radius, so it stays opt-in until it has been measured against the
+    /// recall gate.
+    ///
+    /// Only unambiguous links act (`crate::kb::Resolution::Linked`); an abstain
+    /// seeds nothing. Returns the number of aliases seeded.
     pub fn kb_link_entities(&self, entity_uuids: &[(String, Uuid, EntityLabel)]) -> usize {
         let on = std::env::var("SHODH_KB_LINKING")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -2936,36 +2976,25 @@ impl GraphMemory {
         if !on {
             return 0;
         }
-        let Some(kb) = crate::kb::global() else {
-            return 0;
-        };
-        let min = std::env::var("SHODH_KB_LINK_MIN")
-            .ok()
-            .and_then(|s| s.parse::<f32>().ok())
-            .unwrap_or(0.75);
+        let kb = crate::kb::global();
         let mut seeded = 0usize;
         for (name, uuid, label) in entity_uuids {
             if self.resolve_alias(name).is_some() {
                 continue;
             }
-            let ty = label.as_str().to_lowercase();
-            let kb_hit = kb.link_by_alias(name).or_else(|| {
-                self.get_entity(uuid)
-                    .ok()
-                    .flatten()
-                    .and_then(|e| e.name_embedding)
-                    .and_then(|emb| kb.link_by_embedding(&emb, &ty, min).map(|(e, _)| e))
-            });
-            if let Some(kbe) = kb_hit {
-                if name.eq_ignore_ascii_case(&kbe.label) {
-                    continue;
-                }
-                if let Ok(Some(canon)) = self.find_entity_by_name(&kbe.label) {
-                    if canon.uuid != *uuid
-                        && self.seed_aliases([(name.clone(), canon.uuid)]).is_ok()
-                    {
-                        seeded += 1;
-                    }
+            let Some(kb_type) = crate::kb::kb_type_for_label(label) else {
+                continue;
+            };
+            let crate::kb::Resolution::Linked { entity: kbe, .. } = kb.resolve(name, kb_type)
+            else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case(kbe.label) {
+                continue;
+            }
+            if let Ok(Some(canon)) = self.find_entity_by_name(kbe.label) {
+                if canon.uuid != *uuid && self.seed_aliases([(name.clone(), canon.uuid)]).is_ok() {
+                    seeded += 1;
                 }
             }
         }
@@ -3020,6 +3049,7 @@ impl GraphMemory {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         self.add_entity(node).ok()
     }
@@ -3209,7 +3239,8 @@ impl GraphMemory {
         // embedding evidence let it merge abbreviations / paraphrases
         // ("Key Bridge" ≡ "Francis Scott Key Bridge") that surface strings miss.
         let mut records: Vec<MatchRecord> = Vec::new();
-        let mut meta: Vec<(Uuid, bool, usize, String)> = Vec::new(); // (uuid, is_proper, mentions, name)
+        // (uuid, is_proper, mentions, name, kb_id)
+        let mut meta: Vec<(Uuid, bool, usize, String, Option<String>)> = Vec::new();
         for e in &entities {
             let Some(parsed) =
                 crate::dep_parser::parse(&e.name).and_then(|t| parse_mention_tokens(&t))
@@ -3250,7 +3281,13 @@ impl GraphMemory {
                 name_embedding: e.name_embedding.clone(),
                 ..Default::default()
             });
-            meta.push((e.uuid, e.is_proper_noun, e.mention_count, e.name.clone()));
+            meta.push((
+                e.uuid,
+                e.is_proper_noun,
+                e.mention_count,
+                e.name.clone(),
+                e.kb_id.clone(),
+            ));
         }
         if records.len() < 2 {
             return Ok((0, 0));
@@ -3305,6 +3342,8 @@ impl GraphMemory {
 
         let mut merged_nodes = 0usize;
         let mut repointed = 0usize;
+        // Merges refused because the two nodes carry different KB identities.
+        let mut kb_vetoed = 0usize;
         // Alias pairs to seed after merging: every merged surface → its canonical
         // UUID. `resolve_alias` is checked at ingest (Tier 0), so once seeded, a
         // future mention of that surface redirects to the canonical node instead of
@@ -3321,11 +3360,32 @@ impl GraphMemory {
                 .max_by_key(|&&i| (meta[i].1, meta[i].2))
                 .unwrap();
             let canonical = meta[canon_idx].0;
+            // The canonical node's real-world identity. It can be *acquired*
+            // below: the canonical is picked for prominence, not for being
+            // linked, so the node carrying the QID is often the one about to be
+            // deleted.
+            let mut canon_kb_id = meta[canon_idx].4.clone();
             for &i in &cluster_idxs {
                 if i == canon_idx {
                     continue;
                 }
                 let member = meta[i].0;
+                // KB identity is a merge VETO. Two nodes carrying different QIDs
+                // are known to be different real-world things no matter how well
+                // their surfaces score, and fusing them is precisely the
+                // permanent corruption entity linking exists to prevent. The
+                // string matcher cannot see this; the KB can.
+                if !kb_identities_permit_merge(canon_kb_id.as_deref(), meta[i].4.as_deref()) {
+                    tracing::debug!(
+                        canonical = %meta[canon_idx].3,
+                        member = %meta[i].3,
+                        kept_kb_id = canon_kb_id.as_deref().unwrap_or(""),
+                        member_kb_id = meta[i].4.as_deref().unwrap_or(""),
+                        "canonicalize: refused merge — distinct KB identities"
+                    );
+                    kb_vetoed += 1;
+                    continue;
+                }
                 // Remember this surface → canonical mapping (raw name + parsed clean
                 // form) so future ingests of the merged surface resolve directly.
                 alias_pairs.push((meta[i].3.clone(), canonical));
@@ -3352,6 +3412,22 @@ impl GraphMemory {
                 }
                 let _ = self.delete_entity(&member);
                 merged_nodes += 1;
+                // Inherit an identity rather than deleting it with the node that
+                // held it.
+                if canon_kb_id.is_none() {
+                    canon_kb_id.clone_from(&meta[i].4);
+                }
+            }
+            // Persist an identity acquired from a merged member.
+            if canon_kb_id != meta[canon_idx].4 {
+                if let Ok(Some(mut node)) = self.get_entity(&canonical) {
+                    node.kb_id.clone_from(&canon_kb_id);
+                    if let Ok(encoded) = crate::serialization::encode(&node) {
+                        let _ = self
+                            .db
+                            .put_cf(self.entities_cf(), canonical.as_bytes(), encoded);
+                    }
+                }
             }
         }
         // Close the ingest loop: seed the merged surfaces as aliases of their
@@ -3365,6 +3441,7 @@ impl GraphMemory {
             merged = merged_nodes,
             repointed,
             aliases_seeded,
+            kb_vetoed,
             "canonicalize (Splink): merged duplicate mention nodes into canonical entities"
         );
         Ok((merged_nodes, repointed))
@@ -3598,6 +3675,26 @@ impl GraphMemory {
                     entity.fine_type = existing.fine_type.clone();
                 }
 
+                // KB identity is write-once. An id already on the node always
+                // wins: re-mentions arrive with a freshly-resolved id, and
+                // letting the newest one overwrite would let a single ambiguous
+                // mention silently repoint an established entity at a different
+                // real-world thing. A disagreement is worth knowing about, so
+                // log it rather than resolving it silently.
+                if existing.kb_id.is_some() {
+                    if let (Some(old), Some(new)) = (&existing.kb_id, &entity.kb_id) {
+                        if old != new {
+                            tracing::warn!(
+                                entity = %entity.name,
+                                kept = %old,
+                                rejected = %new,
+                                "KB id conflict on re-mention; keeping the established identity"
+                            );
+                        }
+                    }
+                    entity.kb_id = existing.kb_id.clone();
+                }
+
                 // Merge summary: first non-empty wins, preserve existing
                 if !existing.summary.is_empty() {
                     entity.summary = existing.summary.clone();
@@ -3637,6 +3734,15 @@ impl GraphMemory {
             entity.last_seen_at = entity.created_at;
             entity.mention_count = 1;
             is_new_entity = true;
+        }
+
+        // Stamp the real-world identity. Free of extra I/O — the node is about to
+        // be written anyway — and a pure function of (name, labels), so a
+        // re-ingest or a re-enrichment of the same content recomputes the same
+        // id instead of accumulating state. Abstains by default: most entities
+        // legitimately end up with `None`.
+        if entity.kb_id.is_none() {
+            entity.kb_id = crate::kb::stamp(&entity.name, &entity.labels);
         }
 
         // BUG-002 FIX: Write index FIRST, then entity
@@ -9738,6 +9844,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         }
     }
 
@@ -10299,11 +10406,135 @@ mod tests {
             is_proper_noun: true,
             selectivity: None,
             fine_type: Some("bridge".to_string()),
+            kb_id: None,
         };
         let entity_uuid = graph.add_entity(entity).unwrap();
 
         let roundtripped = graph.get_entity(&entity_uuid).unwrap().unwrap();
         assert_eq!(roundtripped.fine_type, Some("bridge".to_string()));
+    }
+
+    #[test]
+    fn add_entity_stamps_kb_id_from_the_offline_kb() {
+        // The always-on half of KB linking: an unambiguous organisation mention
+        // acquires its Wikidata identity as a side effect of being stored, with
+        // no extra I/O and no configuration.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let entity = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "International Business Machines".to_string(),
+            labels: vec![EntityLabel::Organization],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: None,
+            kb_id: None,
+        };
+        let uuid = graph.add_entity(entity).unwrap();
+        let stored = graph.get_entity(&uuid).unwrap().unwrap();
+        assert_eq!(
+            stored.kb_id,
+            Some("Q37156".to_string()),
+            "an unambiguous org mention must acquire its KB identity on write"
+        );
+    }
+
+    #[test]
+    fn add_entity_remention_never_overwrites_an_established_kb_id() {
+        // Write-once identity. A node that already carries a QID keeps it even if
+        // a later mention arrives claiming a different one — silently repointing
+        // an identity is precisely the corruption KB linking exists to prevent.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let make = |kb: Option<String>| EntityNode {
+            uuid: Uuid::new_v4(),
+            // Not in the KB, so the automatic stamp cannot interfere and the test
+            // exercises only the merge rule.
+            name: "Zzyzx Internal Platform".to_string(),
+            labels: vec![EntityLabel::Organization],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: None,
+            kb_id: kb,
+        };
+
+        let uuid = graph.add_entity(make(Some("Q1".to_string()))).unwrap();
+
+        // A re-mention carrying a DIFFERENT id must not win...
+        let uuid2 = graph.add_entity(make(Some("Q999".to_string()))).unwrap();
+        assert_eq!(uuid, uuid2, "re-mention should merge into the same node");
+        assert_eq!(
+            graph.get_entity(&uuid).unwrap().unwrap().kb_id,
+            Some("Q1".to_string()),
+            "a conflicting re-mention must not repoint an established identity"
+        );
+
+        // ...and a re-mention carrying none must not erase it.
+        graph.add_entity(make(None)).unwrap();
+        assert_eq!(
+            graph.get_entity(&uuid).unwrap().unwrap().kb_id,
+            Some("Q1".to_string()),
+            "an unlinked re-mention must not wipe an existing identity"
+        );
+    }
+
+    #[test]
+    fn add_entity_leaves_ambiguous_and_generic_mentions_unlinked() {
+        // The abstain path, end to end through storage: an ambiguous acronym and
+        // a non-linkable label both come back with no identity rather than a
+        // guessed one.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let make = |name: &str, label: EntityLabel| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![label],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: None,
+            kb_id: None,
+        };
+
+        for (name, label) in [
+            ("ACM", EntityLabel::Organization), // ambiguous: two real orgs
+            ("IBM", EntityLabel::Person),       // right surface, wrong type
+            ("IBM", EntityLabel::Concept),      // generic label never links
+            ("Zzyzx Holdings", EntityLabel::Organization), // unknown
+        ] {
+            let uuid = graph.add_entity(make(name, label.clone())).unwrap();
+            assert_eq!(
+                graph.get_entity(&uuid).unwrap().unwrap().kb_id,
+                None,
+                "{name} as {label:?} must abstain, not guess"
+            );
+        }
     }
 
     #[test]
@@ -10329,6 +10560,7 @@ mod tests {
             is_proper_noun: true,
             selectivity: None,
             fine_type: fine,
+            kb_id: None,
         };
 
         // First mention: GLiNER typed it "city".
@@ -10399,6 +10631,111 @@ mod tests {
         assert!(
             needs_migration,
             "legacy-shaped record should be flagged for rewrite-on-read"
+        );
+    }
+
+    #[test]
+    fn legacy_entity_node_defaults_kb_id_to_none() {
+        // The shape of every EntityNode already in the live store before `kb_id`
+        // existed: all fields through `fine_type`, nothing after. postcard is
+        // positional with no EOF tolerance, so without the extra `0x00` in
+        // ENTITY_NODE_DEFAULT_SUFFIX this record fails to decode at all — which
+        // would make an upgraded store unreadable, not merely un-linked.
+        #[derive(serde::Serialize)]
+        struct PreKbIdEntityNode {
+            uuid: Uuid,
+            name: String,
+            labels: Vec<EntityLabel>,
+            created_at: DateTime<Utc>,
+            last_seen_at: DateTime<Utc>,
+            mention_count: usize,
+            summary: String,
+            attributes: HashMap<String, String>,
+            name_embedding: Option<Vec<f32>>,
+            salience: f32,
+            is_proper_noun: bool,
+            selectivity: Option<f32>,
+            fine_type: Option<String>,
+        }
+
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+        let legacy = PreKbIdEntityNode {
+            uuid,
+            name: "IBM".to_string(),
+            labels: vec![EntityLabel::Organization],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 7,
+            summary: "written before kb_id existed".to_string(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.8,
+            is_proper_noun: true,
+            selectivity: Some(0.31),
+            fine_type: Some("company".to_string()),
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+        let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
+
+        assert_eq!(decoded.uuid, uuid);
+        assert_eq!(decoded.name, "IBM");
+        assert_eq!(decoded.selectivity, Some(0.31));
+        assert_eq!(decoded.fine_type, Some("company".to_string()));
+        assert_eq!(
+            decoded.kb_id, None,
+            "a pre-kb_id record must decode with kb_id defaulted, not fail"
+        );
+        assert!(needs_migration);
+    }
+
+    #[test]
+    fn distinct_kb_identities_veto_a_canonicalizer_merge() {
+        // The canonicalizer clusters on surface similarity, so "Apollo Global
+        // Management" and "Apollo Theatre" can score as one entity. When both
+        // carry a KB identity and the identities differ, the merge must be
+        // refused — this is the one signal the string matcher structurally
+        // cannot have.
+        assert!(!kb_identities_permit_merge(Some("Q1"), Some("Q2")));
+
+        // Agreement is a positive signal, not merely permission.
+        assert!(kb_identities_permit_merge(Some("Q1"), Some("Q1")));
+
+        // Silence is not evidence of difference: an unlinked node (the common
+        // case, since linking abstains by default) must not block a merge the
+        // matcher is confident about, or KB linking would make canonicalization
+        // strictly worse.
+        assert!(kb_identities_permit_merge(None, Some("Q1")));
+        assert!(kb_identities_permit_merge(Some("Q1"), None));
+        assert!(kb_identities_permit_merge(None, None));
+    }
+
+    #[test]
+    fn entity_node_kb_id_roundtrips() {
+        let now = Utc::now();
+        let node = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "IBM".to_string(),
+            labels: vec![EntityLabel::Organization],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: None,
+            kb_id: Some("Q37156".to_string()),
+        };
+        let bytes = crate::serialization::encode(&node).unwrap();
+        let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
+        assert_eq!(decoded.kb_id, Some("Q37156".to_string()));
+        assert!(
+            !needs_migration,
+            "a current-shape record needs no migration"
         );
     }
 
@@ -11188,6 +11525,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         let entity_uuid = graph.add_entity(entity).unwrap();
 
@@ -11413,6 +11751,7 @@ mod tests {
                 is_proper_noun: false,
                 selectivity: None,
                 fine_type: None,
+                kb_id: None,
             })
             .unwrap();
         let (memtables, _readers) = graph.rocksdb_memory_breakdown();
@@ -12143,6 +12482,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         let entity2 = EntityNode {
             uuid: Uuid::new_v4(),
@@ -12158,6 +12498,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
 
         let entity1_uuid = graph.add_entity(entity1.clone()).unwrap();
@@ -12209,6 +12550,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         let entity2 = EntityNode {
             uuid: entity2_uuid,
@@ -12224,6 +12566,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
 
         graph.add_entity(entity1).unwrap();
@@ -12363,6 +12706,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         graph.add_entity(entity).unwrap();
 
@@ -12417,6 +12761,7 @@ mod tests {
                 is_proper_noun: false,
                 selectivity: None,
                 fine_type: None,
+                kb_id: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -12489,6 +12834,7 @@ mod tests {
                 is_proper_noun: false,
                 selectivity: None,
                 fine_type: None,
+                kb_id: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -12565,6 +12911,7 @@ mod tests {
                 is_proper_noun: false,
                 selectivity: None,
                 fine_type: None,
+                kb_id: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -12671,6 +13018,7 @@ mod tests {
             is_proper_noun: false,
             selectivity: None,
             fine_type: None,
+            kb_id: None,
         };
         // add_entity may dedup and return a different UUID
         graph.add_entity(entity).unwrap()
@@ -13983,6 +14331,7 @@ mod tests {
                 is_proper_noun: false,
                 selectivity: None,
                 fine_type: None,
+                kb_id: None,
             };
             graph.add_entity(entity).unwrap();
         }
