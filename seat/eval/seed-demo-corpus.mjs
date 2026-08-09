@@ -18,21 +18,16 @@
  *  - open todos → Tasks.
  *
  * Idempotence: re-running adds duplicates. Seed fresh stores only.
+ *
+ * Also importable: memory-guidance-ab.mjs seeds the SAME corpus into its own
+ * per-run eval users via the exported MEMORIES/TODOS, so the eval measures
+ * against exactly the corpus this script defines — one definition, no drift.
+ * The CLI behaviour runs only when this file is the entry point.
  */
-const BASE = (process.env.SHODH_API_URL ?? "http://127.0.0.1:3098").replace(/\/+$/, "");
-const KEY = process.env.SHODH_API_KEY ?? process.env.SHODH_API_KEYS?.split(",")[0]?.trim();
-const USER = process.env.USER_ID ?? "demo";
-if (!KEY) { console.error("SHODH_API_KEY required"); process.exit(2); }
-
-const H = { "X-API-Key": KEY, "Content-Type": "application/json" };
-async function post(path, body) {
-  const res = await fetch(`${BASE}${path}`, { method: "POST", headers: H, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`);
-  return res.json();
-}
+import { pathToFileURL } from "node:url";
 
 /** [content, type, geo?] — geo only where the event has a real location. */
-const MEMORIES = [
+export const MEMORIES = [
   // Causal chain 1 — the incident
   ["Container ship Dali lost propulsion at 01:24 local time because an electrical breaker tripped during departure from the Port of Baltimore.", "observation", [39.264, -76.6015, 0]],
   ["The loss of propulsion led to the Dali drifting off the channel heading despite the crew dropping anchor.", "observation", [39.24, -76.575, 0]],
@@ -133,25 +128,42 @@ const MEMORIES = [
   ["Seagirt gate processed 4,102 truck transactions, a seasonal high, with average turn under 40 minutes.", "observation", [39.2646, -76.5583, 0]],
 ];
 
-const TODOS = [
+export const TODOS = [
   { content: "Review insurance exposure for charter agreements affected by the port closure", priority: "urgent" },
   { content: "Verify rerouted cargo volumes at NY/NJ against manifest data", priority: "high" },
   { content: "Compile channel clearance timeline from salvage reports", priority: "medium", due_date: "2026-08-12" },
 ];
 
-let ok = 0;
-for (const [content, memory_type, geo] of MEMORIES) {
-  await post("/api/remember", {
-    user_id: USER, content, memory_type,
-    ...(geo ? { geo_location: geo } : {}),
-  });
-  ok += 1;
-  process.stdout.write(`\rmemories: ${ok}/${MEMORIES.length}`);
-}
-console.log();
-for (const todo of TODOS) await post("/api/todos/add", { user_id: USER, ...todo });
-console.log(`todos: ${TODOS.length}`);
+const isEntryPoint =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
-const recall = await post("/api/recall", { user_id: USER, query: "why did the bridge collapse", limit: 8, debug: true });
-console.log(`recall smoke: ${recall.count} memories, ${recall.lineage?.length ?? 0} lineage edges, ${recall.facts?.length ?? 0} facts`);
-console.log("seeded.");
+if (isEntryPoint) {
+  const BASE = (process.env.SHODH_API_URL ?? "http://127.0.0.1:3098").replace(/\/+$/, "");
+  const KEY = process.env.SHODH_API_KEY ?? process.env.SHODH_API_KEYS?.split(",")[0]?.trim();
+  const USER = process.env.USER_ID ?? "demo";
+  if (!KEY) { console.error("SHODH_API_KEY required"); process.exit(2); }
+
+  const H = { "X-API-Key": KEY, "Content-Type": "application/json" };
+  const post = async (path, body) => {
+    const res = await fetch(`${BASE}${path}`, { method: "POST", headers: H, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(`${path}: ${res.status} ${await res.text()}`);
+    return res.json();
+  };
+
+  let ok = 0;
+  for (const [content, memory_type, geo] of MEMORIES) {
+    await post("/api/remember", {
+      user_id: USER, content, memory_type,
+      ...(geo ? { geo_location: geo } : {}),
+    });
+    ok += 1;
+    process.stdout.write(`\rmemories: ${ok}/${MEMORIES.length}`);
+  }
+  console.log();
+  for (const todo of TODOS) await post("/api/todos/add", { user_id: USER, ...todo });
+  console.log(`todos: ${TODOS.length}`);
+
+  const recall = await post("/api/recall", { user_id: USER, query: "why did the bridge collapse", limit: 8, debug: true });
+  console.log(`recall smoke: ${recall.count} memories, ${recall.lineage?.length ?? 0} lineage edges, ${recall.facts?.length ?? 0} facts`);
+  console.log("seeded.");
+}
