@@ -5676,10 +5676,20 @@ impl MemorySystem {
             // deterministically by recency then id. Metric-neutral: only sub-1e-6
             // (effectively tied) candidates are reordered, never the top-k membership.
             let q = |s: f32| (s * 1.0e6).round();
+            // Content precedes the id tie-break: `MemoryId` is a per-ingest
+            // random UUID, so for (quantized-score, created_at) ties — common
+            // on corpora whose timestamps are shared session dates — an id
+            // order is deterministic within one process but a coin flip
+            // between two ingests of the same corpus, which is exactly the
+            // comparison the recall harness's RH-12 repeat-determinism guard
+            // makes. Content is repeat-stable and unique per store (#109
+            // content-hash dedup at remember()), making the order total; the
+            // id fallback is unreachable in practice.
             memories.sort_by(|a, b| {
                 q(b.score.unwrap_or(0.0))
                     .total_cmp(&q(a.score.unwrap_or(0.0)))
                     .then_with(|| b.created_at.cmp(&a.created_at))
+                    .then_with(|| a.experience.content.cmp(&b.experience.content))
                     .then_with(|| a.id.cmp(&b.id))
             });
 
