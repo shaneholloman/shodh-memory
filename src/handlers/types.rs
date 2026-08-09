@@ -568,6 +568,10 @@ pub struct RestoreBackupResponse {
     pub success: bool,
     pub message: String,
     pub restored_stores: Vec<String>,
+    /// Stores whose restore was attempted and failed. A restore that recovers
+    /// some stores and not others must not report itself as complete: the
+    /// failing branch has already cleared the live data it was replacing.
+    pub failed_stores: Vec<String>,
 }
 
 // =============================================================================

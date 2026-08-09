@@ -615,7 +615,10 @@ pub async fn restore_backup(
     // Vector index restore directory
     let vi_restore_dir = state.base_path().join(&user_id).join("vector_index");
 
-    // Execute restore
+    // Execute restore. A backup id that is not among the user's backups is a
+    // not-found condition, not a server fault: it surfaced as HTTP 500
+    // INTERNAL_ERROR, which a client cannot tell from a genuinely broken
+    // backend and so cannot recover from by picking a different id.
     let restored_stores = state
         .backup_engine()
         .restore_comprehensive_backup(
@@ -625,7 +628,14 @@ pub async fn restore_backup(
             &secondary_restore_paths,
             Some(&vi_restore_dir),
         )
-        .map_err(AppError::Internal)?;
+        .map_err(|e| {
+            let text = e.to_string();
+            if text.contains("NotFound") || text.contains("No backups") {
+                AppError::BackupNotFound(req.backup_id.unwrap_or(0))
+            } else {
+                AppError::Internal(e)
+            }
+        })?;
 
     // Restore graph checkpoint if present in backup
     let resolved_backup_id = req.backup_id.unwrap_or_else(|| {
@@ -643,14 +653,27 @@ pub async fn restore_backup(
         .join(format!("secondary_{resolved_backup_id}"))
         .join("graph");
 
-    let mut all_restored = restored_stores;
+    // The main memories DB is restored unconditionally by step 1 of
+    // `restore_comprehensive_backup`, which propagates any failure with `?` —
+    // so reaching this line means it succeeded. It was never named in the
+    // response, which reported only `["graph"]` and left an operator believing
+    // a restore had not recovered their memories when in fact it had.
+    let mut all_restored = vec!["memories".to_string()];
+    all_restored.extend(restored_stores);
+
+    let mut failed_stores: Vec<String> = Vec::new();
     if graph_checkpoint.exists() {
         // Remove existing graph and copy from backup
         if graph_path.exists() {
             let _ = std::fs::remove_dir_all(&graph_path);
         }
         if let Err(e) = crate::backup::copy_dir_recursive_pub(&graph_checkpoint, &graph_path) {
-            tracing::warn!(error = %e, "Failed to restore graph DB from backup");
+            // The old graph has already been removed at this point, so a failed
+            // copy leaves the user without one. Logging it and returning
+            // success:true made a partial restore indistinguishable from a
+            // complete one — the caller must be told.
+            tracing::error!(error = %e, "Failed to restore graph DB from backup");
+            failed_stores.push("graph".to_string());
         } else {
             all_restored.push("graph".to_string());
             tracing::info!("Graph DB restored from backup");
@@ -661,16 +684,36 @@ pub async fn restore_backup(
         &user_id,
         "BACKUP_RESTORED",
         &format!("backup_{}", req.backup_id.unwrap_or(0)),
-        &format!("Restored {} stores: {:?}", all_restored.len(), all_restored),
+        &format!(
+            "Restored {} stores: {:?}; failed: {:?}",
+            all_restored.len(),
+            all_restored,
+            failed_stores
+        ),
     );
 
-    Ok(Json(RestoreBackupResponse {
-        success: true,
-        message: format!(
-            "Restore complete for user '{}'. Restored: {:?}. Server restart recommended to re-initialize all caches.",
+    let message = if failed_stores.is_empty() {
+        format!(
+            "Restore complete for user '{}'. Restored: {:?}. Todos, reminders and audit logs live \
+             in a shared multi-user store and are deliberately not restored. Server restart \
+             recommended to re-initialize all caches.",
             user_id, all_restored
-        ),
+        )
+    } else {
+        format!(
+            "Restore INCOMPLETE for user '{}'. Restored: {:?}. FAILED: {:?} — these stores were \
+             not recovered and their previous contents are gone; see the server log. Todos, \
+             reminders and audit logs live in a shared multi-user store and are deliberately not \
+             restored.",
+            user_id, all_restored, failed_stores
+        )
+    };
+
+    Ok(Json(RestoreBackupResponse {
+        success: failed_stores.is_empty(),
+        message,
         restored_stores: all_restored,
+        failed_stores,
     }))
 }
 
