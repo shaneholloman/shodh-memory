@@ -1992,7 +1992,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list_anomalies",
-        description: "Rank recent memories by statistical deviation from this user's own rolling baseline (novel entities, unusual entity co-occurrence, untyped-relation share). Each entry carries per-component z-scores and a deterministic explanation of why it deviates. Use to answer 'what has been unusual lately' or to spot weak signals worth investigating — this is deviation scoring against the corpus's own shape, not content search; there is no query.",
+        description: "Rank recent memories by statistical deviation from this user's own rolling baseline (novel entities, unusual entity co-occurrence, untyped-relation share). Each entry carries per-component z-scores and a deterministic explanation of why it deviates. Use to answer 'what has been unusual lately' or to spot weak signals worth investigating — this is deviation scoring against the corpus's own shape, not content search; there is no query. The baseline is the most recent 200 scored episodes (server default); at least 10 must exist before anything is scored.",
         inputSchema: {
           type: "object",
           properties: {
