@@ -170,13 +170,13 @@ The largest group by tool count (16 of 51) and the one with the most rough edges
 | Tool | Needs | Returns | Latency | Verdict |
 |---|---|---|---|---|
 | `add_todo` | `content` | short key (`SHO-4`, or `AUD-1` under a project) plus a rendered row | 0.4-2.0 s | Works; description overpromises |
-| `list_todos` | none; 8 optional filters | Linear-style list grouped by status, nested subtasks | 3 ms | Works; semantic search dead |
+| `list_todos` | none; 8 optional filters | Linear-style list grouped by status, nested subtasks | 3-112 ms | Works; `query` is dead, see [F19](#f19) |
 | `update_todo` | `todo_id` | updated row | 4-521 ms | Works; the real subtask route |
 | `complete_todo` | `todo_id` | completion row with elapsed time | 5 ms | Works |
 | `delete_todo` | `todo_id` | confirmation | 4 ms | Works |
 | `reorder_todo` | `todo_id`, `direction` | "Moved SHO-4 up" | 3-5 ms | No input validation |
 | `todo_stats` | none | counts by status, overdue, due today, projects | 4-7 ms | Works |
-| `list_subtasks` | `parent_id` | header and count, no rows | 4 ms | Broken renderer |
+| `list_subtasks` | `parent_id` | header and count, no rows | 4 ms | Broken renderer, see [F8](#f8) |
 | `add_todo_comment` | `todo_id`, `content` | the comment as rendered | 261-582 ms | Works |
 | `list_todo_comments` | `todo_id` | comments with author and type, no ids | 3-4 ms | Works; breaks the chain |
 | `update_todo_comment` | `todo_id`, `comment_id`, `content` | updated comment | 3 ms | Unreachable, see [F7](#f7) |
@@ -225,7 +225,7 @@ is only partly delivered on this evidence.
 |---|---|---|---|---|
 | `token_status` | none | pipeline tokens against a 100k budget | 4-7 ms | Operator-only |
 | `reset_token_session` | none | previous and current counter | 3 ms | Operator-only |
-| `session_digest` | none | timestamps, tokens, memory counts, tool-use histogram | 5 ms | Misleading, see [F8](#f8) |
+| `session_digest` | none | timestamps, tokens, memory counts, tool-use histogram | 5 ms | Misleading, see [F18](#f18) |
 | `session_history` | optional `limit`, `group_by_project` | "No session history found" | 3-6 ms | Not exercisable |
 
 `token_status` is explicit that it counts memory tool I/O and not the model's context window,
@@ -667,6 +667,26 @@ aggregate work done by other clients against the same store, under a session who
 end timestamps are identical. A model calling this to answer "what did I do this session"
 gets another client's totals attributed to itself.
 *Fault: session accounting in the backend; the MCP tool renders what it is given.*
+
+### F19
+**`list_todos`'s `query` parameter returns nothing, including for exact word matches.**
+The description promises "semantic search via query parameter... uses vector similarity to
+find matching todos". Against a store holding a todo titled "Audit-2 parent task":
+
+```
+### list_todos {"query":"Audit-2 parent"}  [99ms]
+No todos found.
+```
+
+Not a similarity-threshold artefact — the query words are a literal prefix of the todo's
+content. Verified against the endpoint: `POST /api/todos/list` with
+`{"user_id":"demo","query":"Audit-2 parent"}` returns `count: 0`, and the identical body
+without `query` returns `count: 8`. The other seven filters on the same tool
+(`status`, `project`, `limit`, `offset`) work.
+*Fault: the `/api/todos/list` endpoint — the MCP layer passes `query` through unchanged, and
+the endpoint's semantic path matches nothing.* Passing `query` is worse than useless: it
+turns a working list call into an empty one, and an agent will read "No todos found" as
+evidence that the user has no such task.
 
 ### Redundant pairs
 
