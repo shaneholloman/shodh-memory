@@ -31,7 +31,13 @@ import * as http from "node:http";
 import type { AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
 import type { ShodhBackend } from "./backend.js";
 import type { SeatConfig } from "./config.js";
-import { Conversation, ConversationBusyError, type ConversationDeps, UnknownModelError } from "./conversation.js";
+import {
+	Conversation,
+	ConversationBusyError,
+	type ConversationDeps,
+	type MemoryMechanisms,
+	UnknownModelError,
+} from "./conversation.js";
 import type { SeatEvent } from "./events.js";
 import { LedgerError, type LearningLedger } from "./ledger.js";
 import type { McpHost } from "./mcp.js";
@@ -59,6 +65,31 @@ interface CreateConversationBody {
 	model?: string;
 	system_prompt?: string;
 	harness_learning?: boolean;
+	/** Per-mechanism overrides (A/B evaluation arms); absent fields keep their ON defaults. */
+	memory_mechanisms?: {
+		guidance?: boolean;
+		proactive_framing?: boolean;
+		proactive_max?: number;
+		recall_lineage?: boolean;
+		verify_loop?: boolean;
+		mcp_memory_tool_filter?: boolean;
+	};
+}
+
+/** Map the wire's snake_case mechanism overrides onto MemoryMechanisms fields. */
+function parseMechanisms(body: CreateConversationBody): Partial<MemoryMechanisms> | undefined {
+	const wire = body.memory_mechanisms;
+	if (!wire || typeof wire !== "object") return undefined;
+	const overrides: Partial<MemoryMechanisms> = {};
+	if (typeof wire.guidance === "boolean") overrides.guidance = wire.guidance;
+	if (typeof wire.proactive_framing === "boolean") overrides.proactiveFraming = wire.proactive_framing;
+	if (typeof wire.proactive_max === "number" && Number.isInteger(wire.proactive_max) && wire.proactive_max >= 1 && wire.proactive_max <= 10) {
+		overrides.proactiveMax = wire.proactive_max;
+	}
+	if (typeof wire.recall_lineage === "boolean") overrides.recallLineage = wire.recall_lineage;
+	if (typeof wire.verify_loop === "boolean") overrides.verifyLoop = wire.verify_loop;
+	if (typeof wire.mcp_memory_tool_filter === "boolean") overrides.mcpMemoryToolFilter = wire.mcp_memory_tool_filter;
+	return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
 class HttpError extends Error {
@@ -412,6 +443,7 @@ export class SeatServer {
 				// Default true; `harness_learning: false` exists for A/B evaluation
 				// control arms only (see ConversationOptions.harnessLearning).
 				harnessLearning: body.harness_learning !== false,
+				memoryMechanisms: parseMechanisms(body),
 			});
 		} catch (error) {
 			throw new HttpError(400, error instanceof Error ? error.message : String(error));

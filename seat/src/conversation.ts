@@ -42,6 +42,7 @@ import {
 	OVERLAP_USED_THRESHOLD,
 } from "./feedback.js";
 import type { LearningLedger } from "./ledger.js";
+import { MEMORY_GUIDANCE } from "./memory-guidance.js";
 import { createMemoryTools } from "./memory-tools.js";
 import type { ModelRegistry } from "./models-registry.js";
 
@@ -60,6 +61,87 @@ const MAX_TOOL_ERROR_CAPTURES = 5;
  * the backend's pending-feedback set contains only memories the model actually
  * saw — otherwise the implicit loop penalizes memories that were never shown. */
 const PROACTIVE_MAX_RESULTS = 3;
+
+/**
+ * Memory-behaviour mechanisms, each measured by seat/eval/memory-guidance-ab.mjs.
+ * All default ON — this is the ship configuration. Per-mechanism switches exist
+ * for exactly one reason: an A/B evaluation needs a control arm reproducing the
+ * pre-mechanism behaviour, and factored arms need single-mechanism attribution
+ * (same rationale as ConversationOptions.harnessLearning).
+ */
+export interface MemoryMechanisms {
+	/** Append MEMORY_GUIDANCE (memory-guidance.ts) to the base system prompt. */
+	guidance: boolean;
+	/**
+	 * Frame the proactive block as a partial sample of a larger store instead
+	 * of a bare list. Measured failure it targets: the model treated the
+	 * 3-memory injected block as the whole of memory (recall_memory called 0
+	 * times across 63 baseline cases) and declared facts "not recorded"
+	 * without ever searching.
+	 */
+	proactiveFraming: boolean;
+	/** Proactive memories surfaced+injected per turn (owner hypothesis: 3 vs 5). */
+	proactiveMax: number;
+	/**
+	 * Render causal lineage edges in recall_memory results. The backend
+	 * returns them on every recall; before this mechanism they were dropped
+	 * before the model saw any structure (measured: chain-tracing cases
+	 * failed 16/16 with the chain present in the store).
+	 */
+	recallLineage: boolean;
+	/**
+	 * Deterministic post-draft verification with one bounded revision pass:
+	 * malformed/unknown/unsupported [mem:] citations and absence claims made
+	 * without having searched are fed back to the model once.
+	 */
+	verifyLoop: boolean;
+	/**
+	 * Exclude bridged MCP tools that duplicate the seat's native memory
+	 * surface (recall/remember/proactive_context/quick_recall). Measured
+	 * defects of the duplicates: relevance-percentage output the citation
+	 * contract cannot parse (models cited "[mem:95%]"), writes that bypass
+	 * the ledger, recalls that bypass the reinforcement loop, and MCP
+	 * proactive_context auto-ingesting conversation fragments as junk
+	 * memories mid-conversation.
+	 */
+	mcpMemoryToolFilter: boolean;
+}
+
+export const DEFAULT_MEMORY_MECHANISMS: MemoryMechanisms = {
+	guidance: true,
+	proactiveFraming: true,
+	proactiveMax: PROACTIVE_MAX_RESULTS,
+	recallLineage: true,
+	verifyLoop: true,
+	mcpMemoryToolFilter: true,
+};
+
+/**
+ * MCP tool base names (suffix after mcp__<server>__) that duplicate native
+ * seat memory tools. Everything else — graph/lineage/entity/todo/fact tools —
+ * stays bridged: none of those write memories or auto-ingest (verified against
+ * mcp-server/index.ts: proactive_context is the only auto_ingest tool;
+ * remember is the only general memory write).
+ */
+const REDUNDANT_MCP_MEMORY_TOOLS = new Set(["recall", "quick_recall", "proactive_context", "remember"]);
+
+/** Hard cap on verification passes per turn: one revision, never a loop. */
+const MAX_VERIFY_PASSES = 1;
+
+/** Citation-shaped tokens that are NOT the contract's [mem:<8 hex>] form
+ *  (e.g. "[mem:95%]", "[mem:<full-uuid>]"). */
+const MALFORMED_CITATION_RE = /\[mem:(?![0-9a-fA-F]{8}\])[^\]]{1,80}\]/g;
+
+/** Conservative floor for the misattribution check: fire only when a cited
+ *  memory's content shares essentially no tokens with the answer — the
+ *  measured failure shape is citing an unrelated id for content that came
+ *  from a different memory entirely. OVERLAP_USED_THRESHOLD (0.1) is NOT
+ *  reused here: it calibrates "was this memory used", the opposite question. */
+const MISATTRIBUTION_OVERLAP_FLOOR = 0.05;
+
+/** Deterministic detector for "this is absent from memory" claims. */
+const ABSENCE_CLAIM_RE =
+	/\b(?:no|any)\s+(?:specific\s+)?(?:records?|memor(?:y|ies)|mentions?|information|evidence)\b|\bnot\s+(?:recorded|captured|included|specified|mentioned)\b|\bisn't\s+(?:recorded|captured|included|mentioned)\b|\bdon't\s+have\s+(?:any\s+)?(?:records?|memor|information)|\bnothing\s+in\s+(?:my\s+)?memor/i;
 /** Matches the thresholds the existing callers use (mcp-server/index.ts, hooks/memory-hook.ts). */
 const PROACTIVE_SEMANTIC_THRESHOLD = 0.6;
 
@@ -121,6 +203,12 @@ export interface ConversationOptions {
 	 * substrate, not a treatment under test.
 	 */
 	harnessLearning?: boolean;
+	/**
+	 * Per-mechanism overrides of DEFAULT_MEMORY_MECHANISMS. Absent fields keep
+	 * their (ON) defaults; like harnessLearning, overrides exist for A/B
+	 * evaluation arms and are not persisted across restarts.
+	 */
+	memoryMechanisms?: Partial<MemoryMechanisms>;
 	/**
 	 * Rehydration state for a conversation reopened from the store: identity,
 	 * transcript, and the turn counter continue exactly where they stopped.
@@ -185,6 +273,7 @@ export class Conversation {
 	readonly userId: string;
 	readonly harnessUserId: string;
 	readonly harnessLearning: boolean;
+	readonly mechanisms: MemoryMechanisms;
 	readonly createdAt: Date;
 
 	private readonly deps: ConversationDeps;
@@ -203,6 +292,12 @@ export class Conversation {
 	/** Ids surfaced by proactive_context this run — owned by the backend's
 	 * implicit-feedback loop, excluded from the seat's explicit reinforcement. */
 	private proactiveIds = new Set<string>();
+	/** Content of proactively injected memories this run (verify-loop misattribution check). */
+	private proactiveContents = new Map<string, string>();
+	/** Memory ids written this run (remember/seat-learning) — citable, never "unknown". */
+	private writtenIds = new Set<string>();
+	/** User-scope recall_memory calls this run (verify-loop absence check). */
+	private userRecallCount = 0;
 	/** Previous run's proactive ids — excluded from explicit negative-followup
 	 * penalties because the implicit loop applies its own followup penalty. */
 	private prevProactiveIds = new Set<string>();
@@ -233,9 +328,11 @@ export class Conversation {
 			this.turn = options.restore.turn;
 			this.lastAssistantText = options.restore.lastAssistantText;
 		}
-		this.baseSystemPrompt = options.systemPrompt?.trim()
-			? `${BASE_SYSTEM_PROMPT}\n\n${options.systemPrompt.trim()}`
-			: BASE_SYSTEM_PROMPT;
+		this.mechanisms = { ...DEFAULT_MEMORY_MECHANISMS, ...options.memoryMechanisms };
+		const promptBlocks = [BASE_SYSTEM_PROMPT];
+		if (this.mechanisms.guidance) promptBlocks.push(MEMORY_GUIDANCE);
+		if (options.systemPrompt?.trim()) promptBlocks.push(options.systemPrompt.trim());
+		this.baseSystemPrompt = promptBlocks.join("\n\n");
 
 		const memoryTools = createMemoryTools({
 			backend: deps.backend,
@@ -253,14 +350,22 @@ export class Conversation {
 				this.weakRecalls.push({ query, resultCount, bestFinalScore });
 			},
 			ledger: deps.ledger,
+			renderLineage: this.mechanisms.recallLineage,
 		});
+
+		const mcpTools = this.mechanisms.mcpMemoryToolFilter
+			? deps.mcpTools.filter((tool) => {
+					const baseName = tool.name.startsWith("mcp__") ? tool.name.split("__").slice(2).join("__") : tool.name;
+					return !REDUNDANT_MCP_MEMORY_TOOLS.has(baseName);
+				})
+			: deps.mcpTools;
 
 		this.agent = new Agent({
 			initialState: {
 				systemPrompt: this.baseSystemPrompt,
 				model: options.model,
 				thinkingLevel: "off",
-				tools: [...memoryTools, ...deps.mcpTools],
+				tools: [...memoryTools, ...mcpTools],
 				// Restored transcripts were produced by this same agent and
 				// persisted verbatim (store.ts) — the cast re-labels what the
 				// agent itself serialized.
@@ -285,6 +390,10 @@ export class Conversation {
 	}
 
 	private emit(event: SeatEvent): void {
+		// Verify-loop bookkeeping, kept here so every emitter (native tools,
+		// proactive pass) feeds it without additional plumbing.
+		if (event.type === "memory_write") this.writtenIds.add(event.memory_id);
+		if (event.type === "memory_recall" && event.scope === "user") this.userRecallCount += 1;
 		if (this.currentSink) {
 			this.currentSink(event);
 		} else {
@@ -362,6 +471,9 @@ export class Conversation {
 		this.surfaced = new Map();
 		this.prevProactiveIds = this.proactiveIds;
 		this.proactiveIds = new Set();
+		this.proactiveContents = new Map();
+		this.writtenIds = new Set();
+		this.userRecallCount = 0;
 		this.weakRecalls = [];
 		this.toolErrors = [];
 		this.assistantTexts = [];
@@ -384,6 +496,8 @@ export class Conversation {
 				.join("\n\n");
 
 			await this.agent.prompt(text);
+
+			if (this.mechanisms.verifyLoop) await this.runVerificationPass();
 
 			await this.closeLearningLoops();
 			this.lastAssistantText = this.assistantTexts.join("\n") || undefined;
@@ -471,7 +585,7 @@ export class Conversation {
 			const response = await this.deps.backend.proactiveContext({
 				userId: this.userId,
 				context: userText,
-				maxResults: PROACTIVE_MAX_RESULTS,
+				maxResults: this.mechanisms.proactiveMax,
 				semanticThreshold: PROACTIVE_SEMANTIC_THRESHOLD,
 				autoIngest: false,
 				previousResponse: sendFeedback ? this.lastAssistantText : undefined,
@@ -481,6 +595,7 @@ export class Conversation {
 
 			for (const memory of response.memories) {
 				this.proactiveIds.add(memory.id);
+				this.proactiveContents.set(memory.id, memory.content);
 			}
 
 			// The implicit leg just applied real learning updates server-side
@@ -515,7 +630,18 @@ export class Conversation {
 				(memory) =>
 					`- [mem:${memoryShortId(memory.id)}] (${memory.memory_type}) ${memory.content.slice(0, 400)}`,
 			);
-			return `## Possibly relevant memories (auto-surfaced — cite [mem:id] if used)\n${lines.join("\n")}`;
+			if (!this.mechanisms.proactiveFraming) {
+				return `## Possibly relevant memories (auto-surfaced — cite [mem:id] if used)\n${lines.join("\n")}`;
+			}
+			// Sample framing: the measured failure mode is the model treating
+			// this block as the whole of memory — answering "not recorded" or
+			// stopping a chain because the next link was not in these few lines.
+			return (
+				`## Memory sample (auto-surfaced — cite [mem:id] if used)\n` +
+				`These are only the ${response.memories.length} closest matches to the current message; the persistent store holds far more, and details relevant to the question may not be shown here. ` +
+				`Search it with recall_memory before concluding anything is missing, and before answering questions whose evidence these lines do not fully cover.\n` +
+				lines.join("\n")
+			);
 		} catch (error) {
 			// Momentum loop is an enhancement; its failure must not block the turn.
 			// Un-drained tool actions stay queued for the next attempt.
@@ -528,6 +654,80 @@ export class Conversation {
 		} finally {
 			if (feedbackAllowed) proactiveFeedbackInFlight.delete(this.userId);
 		}
+	}
+
+	/**
+	 * Deterministic answer verification with ONE bounded revision pass.
+	 *
+	 * Memory answers are checkable without any judge model: every [mem:] token
+	 * must be the 8-hex contract form; every cited id must have actually been
+	 * shown to the model this run (proactive block, recall result, or its own
+	 * write); a cited memory must share at least minimal vocabulary with the
+	 * answer (misattribution check, conservative floor); and a claim that
+	 * something is absent from memory is only creditable after memory was
+	 * actually searched. When any check fires, the specific findings are fed
+	 * back to the model exactly once and it revises; the `verification` event
+	 * records what fired so evaluations can attribute revisions.
+	 */
+	private async runVerificationPass(): Promise<void> {
+		for (let pass = 0; pass < MAX_VERIFY_PASSES; pass += 1) {
+			const issues = this.verifyDraft();
+			if (issues.length === 0) return;
+			this.emit({ type: "verification", issues, nudged: true });
+			const nudge =
+				`[automated answer verification — not the user] Issues detected in your draft answer:\n` +
+				issues.map((issue) => `- ${issue}`).join("\n") +
+				`\nRevise now: cite memories as [mem:<8-hex id>] exactly as shown in recall results or the surfaced-memories block, citing only memories that support the sentence they follow. ` +
+				`If you stated that something is not in memory, first search with recall_memory using concrete alternative terms (names, identifiers, short forms); then either use what you find or confirm the absence. ` +
+				`Reply with the corrected, complete answer.`;
+			await this.agent.prompt(nudge);
+		}
+	}
+
+	/** Pure checks over this run's draft answer and memory events. */
+	private verifyDraft(): string[] {
+		const answer = this.assistantTexts.join("\n");
+		if (!answer.trim()) return [];
+		const issues: string[] = [];
+
+		const malformed = answer.match(MALFORMED_CITATION_RE) ?? [];
+		if (malformed.length > 0) {
+			issues.push(
+				`Malformed citation token(s) ${[...new Set(malformed)].slice(0, 4).join(", ")} — the contract is [mem:<8 hex chars>]; for a long id use its first 8 characters.`,
+			);
+		}
+
+		const knownShort = new Map<string, string>(); // shortId -> content ("" when unknown)
+		for (const [memoryId, memory] of this.surfaced) knownShort.set(memoryShortId(memoryId), memory.content);
+		for (const [memoryId, content] of this.proactiveContents) knownShort.set(memoryShortId(memoryId), content);
+		for (const memoryId of this.writtenIds) knownShort.set(memoryShortId(memoryId), "");
+
+		const cited = extractCitations(answer);
+		const unknown = [...cited].filter((shortId) => !knownShort.has(shortId));
+		if (unknown.length > 0) {
+			issues.push(
+				`Cited memory id(s) ${unknown.map((shortId) => `[mem:${shortId}]`).join(", ")} were never surfaced in this conversation — cite only ids shown to you, or search for the memory first.`,
+			);
+		}
+
+		const answerTokens = extractTokens(answer);
+		for (const shortId of cited) {
+			const content = knownShort.get(shortId);
+			if (!content) continue; // unknown handled above; written ids have no content here
+			if (memoryOverlap(content, answerTokens) < MISATTRIBUTION_OVERLAP_FLOOR) {
+				issues.push(
+					`[mem:${shortId}] does not contain the content it is cited for — re-check which surfaced memory actually supports that sentence.`,
+				);
+			}
+		}
+
+		if (this.userRecallCount === 0 && ABSENCE_CLAIM_RE.test(answer)) {
+			issues.push(
+				`The answer claims something is not in memory, but memory was never searched this turn — only the auto-surfaced sample was consulted.`,
+			);
+		}
+
+		return issues;
 	}
 
 	/**

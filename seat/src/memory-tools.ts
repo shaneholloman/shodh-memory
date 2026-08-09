@@ -9,7 +9,7 @@
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import type { MemoryType, RecallMemory, RecallMode, ShodhBackend } from "./backend.js";
+import type { MemoryType, RecallLineageEdge, RecallMemory, RecallMode, ShodhBackend } from "./backend.js";
 import type { MemoryScope, SeatEvent } from "./events.js";
 import type { LearningLedger } from "./ledger.js";
 
@@ -27,6 +27,8 @@ export interface MemoryToolContext {
 	/** A recall came back empty — candidate harness learning. */
 	onWeakRecall(query: string, resultCount: number, bestFinalScore: number): void;
 	ledger: LearningLedger;
+	/** Render causal lineage edges in recall results (MemoryMechanisms.recallLineage). */
+	renderLineage: boolean;
 }
 
 /** Absolute fusion-score floor under which a recall counts as a miss for
@@ -88,6 +90,58 @@ const seatLearningParameters = Type.Object({
 
 function shortId(memoryId: string): string {
 	return memoryId.replace(/-/g, "").slice(0, 8);
+}
+
+/**
+ * Prose for a causal relation read from→to. The edge's `from` is always the
+ * earlier memory (cause/origin/evidence), `to` the later one; InformedBy
+ * therefore reads "from informed to", not the enum's to-perspective name —
+ * same semantics as mcp-server/index.ts CAUSAL_RELATION_PROSE (post-#468).
+ * RelatedTo is deliberately absent: co-occurrence edges are not causal
+ * structure and would dilute the chain signal this block exists to carry.
+ */
+const LINEAGE_RELATION_PROSE: Record<string, string> = {
+	Caused: "caused",
+	ResolvedBy: "was resolved by",
+	InformedBy: "informed",
+	SupersededBy: "was superseded by",
+	TriggeredBy: "triggered",
+	BranchedFrom: "branched from",
+};
+
+/** Cap on rendered edges: every line is context on every recall. */
+const LINEAGE_RENDER_CAP = 8;
+
+/**
+ * Render the causal edges among the returned memories, plus a bounded hint at
+ * how many causal links lead OUTSIDE the result set — the outside count is an
+ * invitation to keep tracing (recall again or use a lineage tool), which the
+ * measured chain-case failures never did.
+ */
+function formatLineage(edges: RecallLineageEdge[], returned: RecallMemory[]): string[] {
+	const returnedIds = new Set(returned.map((memory) => memory.id));
+	const causal = edges.filter((edge) => LINEAGE_RELATION_PROSE[edge.relation] !== undefined);
+	const inside = causal
+		.filter((edge) => returnedIds.has(edge.from) && returnedIds.has(edge.to))
+		.sort((a, b) => b.confidence - a.confidence)
+		.slice(0, LINEAGE_RENDER_CAP);
+	const outsideCount = causal.filter(
+		(edge) => returnedIds.has(edge.from) !== returnedIds.has(edge.to),
+	).length;
+
+	const lines: string[] = [];
+	if (inside.length > 0) {
+		lines.push("Causal links among these memories (earlier → later):");
+		for (const edge of inside) {
+			lines.push(`- [mem:${shortId(edge.from)}] ${LINEAGE_RELATION_PROSE[edge.relation]} [mem:${shortId(edge.to)}]`);
+		}
+	}
+	if (outsideCount > 0) {
+		lines.push(
+			`${outsideCount} causal link${outsideCount === 1 ? "" : "s"} lead beyond these results — recall the linked topic or use a lineage tool to follow the chain.`,
+		);
+	}
+	return lines;
 }
 
 function formatMemoryForModel(memory: RecallMemory, index: number): string {
@@ -172,6 +226,9 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 
 			const lines: string[] = [`Found ${response.memories.length} memories:`];
 			response.memories.forEach((memory, index) => lines.push(formatMemoryForModel(memory, index)));
+			if (context.renderLineage && response.lineage && response.lineage.length > 0) {
+				lines.push(...formatLineage(response.lineage, response.memories));
+			}
 			if (response.facts && response.facts.length > 0) {
 				lines.push("Related facts:");
 				for (const fact of response.facts.slice(0, 5)) {
