@@ -2771,7 +2771,7 @@ const handleCallTool = async (request: CallToolRequest) => {
       case "forget": {
         const { id } = args as { id: string };
 
-        await apiCall(`/api/memory/${id}?user_id=${USER_ID}`, "DELETE");
+        await apiCall(`/api/memory/${encodeURIComponent(id)}?user_id=${USER_ID}`, "DELETE");
 
         let response = `🐘 Memory Deleted\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -2795,7 +2795,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           vector_index_count: number; // API uses this name
         }
 
-        const result = await apiCall<MemoryStats>(`/api/users/${USER_ID}/stats`, "GET");
+        const result = await apiCall<MemoryStats>(`/api/users/${encodeURIComponent(USER_ID)}/stats`, "GET");
 
         // Handle both old and new field names for compatibility
         const indexedCount = result.vector_index_count ?? result.indexed_vectors ?? 0;
@@ -4009,7 +4009,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           message: string;
         }
 
-        const result = await apiCall<ActionResponse>(`/api/reminders/${reminder_id}/dismiss`, "POST", {
+        const result = await apiCall<ActionResponse>(`/api/reminders/${encodeURIComponent(reminder_id)}/dismiss`, "POST", {
           user_id: USER_ID,
         });
 
@@ -4175,7 +4175,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           formatted: string;
         }
 
-        const result = await apiCall<UpdateTodoResponse>(`/api/todos/${todo_id}/update`, "POST", {
+        const result = await apiCall<UpdateTodoResponse>(`/api/todos/${encodeURIComponent(todo_id)}/update`, "POST", {
           user_id: USER_ID,
           content: newContent,
           status,
@@ -4204,7 +4204,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           formatted: string;
         }
 
-        const result = await apiCall<CompleteTodoResponse>(`/api/todos/${todo_id}/complete`, "POST", {
+        const result = await apiCall<CompleteTodoResponse>(`/api/todos/${encodeURIComponent(todo_id)}/complete`, "POST", {
           user_id: USER_ID,
         });
 
@@ -4221,7 +4221,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           formatted: string;
         }
 
-        const result = await apiCall<DeleteTodoResponse>(`/api/todos/${todo_id}?user_id=${USER_ID}`, "DELETE");
+        const result = await apiCall<DeleteTodoResponse>(`/api/todos/${encodeURIComponent(todo_id)}?user_id=${USER_ID}`, "DELETE");
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -4237,7 +4237,7 @@ const handleCallTool = async (request: CallToolRequest) => {
           formatted: string;
         }
 
-        const result = await apiCall<ReorderTodoResponse>(`/api/todos/${todo_id}/reorder`, "POST", {
+        const result = await apiCall<ReorderTodoResponse>(`/api/todos/${encodeURIComponent(todo_id)}/reorder`, "POST", {
           user_id: USER_ID,
           direction,
         });
@@ -5461,7 +5461,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
             memories_by_type: Record<string, number>;
             memories_last_24h: number;
             memories_last_7d: number;
-          }>(`/api/users/${USER_ID}/stats`, "GET");
+          }>(`/api/users/${encodeURIComponent(USER_ID)}/stats`, "GET");
 
           return {
             contents: [{
@@ -5796,7 +5796,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
           memories_by_type: Record<string, number>;
           memories_last_24h: number;
           memories_last_7d: number;
-        }>(`/api/users/${USER_ID}/stats`, "GET");
+        }>(`/api/users/${encodeURIComponent(USER_ID)}/stats`, "GET");
 
         const verifyResult = await apiCall<{
           is_healthy: boolean;

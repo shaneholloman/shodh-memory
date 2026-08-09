@@ -170,6 +170,61 @@ export function GeoMap({
     /** The one place [lat, lon] becomes [lon, lat]. */
     const project = (p: GeoPoint) => projection([p.lon, p.lat]);
 
+    /**
+     * What the projection is fitted to: the memories, not the planet.
+     *
+     * Fitting to `LAND` draws the whole world every time, so a corpus that sits
+     * in one harbour renders as an empty globe with a dot on it — the map
+     * answers "where is Earth" when the question is "where is my memory".
+     * Fitting to the points opens at the scale the data actually occupies.
+     * Zoom and pan are untouched, so the world stays one scroll away.
+     *
+     * Two degenerate cases the extent must survive:
+     *  - NO points: nothing to fit, fall back to the world. That is also the
+     *    honest thing to draw for a corpus carrying no coordinates.
+     *  - ONE point, or several at the same place: a zero-area extent, which
+     *    `fitExtent` would resolve to an infinite scale. Padding to a minimum
+     *    span fixes it, and the span is generous deliberately — a single
+     *    located memory reads better with its region around it than magnified
+     *    to street level.
+     */
+    const MIN_SPAN_DEGREES = 4;
+
+    function fitTarget(): GeoPermissibleObjects {
+      if (points.length === 0) return LAND;
+
+      let minLon = Infinity;
+      let maxLon = -Infinity;
+      let minLat = Infinity;
+      let maxLat = -Infinity;
+      for (const p of points) {
+        if (p.lon < minLon) minLon = p.lon;
+        if (p.lon > maxLon) maxLon = p.lon;
+        if (p.lat < minLat) minLat = p.lat;
+        if (p.lat > maxLat) maxLat = p.lat;
+      }
+
+      // Grow whichever axis is under the minimum span around its own centre,
+      // then clamp to the coordinate domain so padding cannot push the box off
+      // the projection.
+      const padAxis = (min: number, max: number, limit: number): [number, number] => {
+        if (max - min >= MIN_SPAN_DEGREES) return [min, max];
+        const centre = (min + max) / 2;
+        const half = MIN_SPAN_DEGREES / 2;
+        return [Math.max(-limit, centre - half), Math.min(limit, centre + half)];
+      };
+      const [lon0, lon1] = padAxis(minLon, maxLon, 180);
+      const [lat0, lat1] = padAxis(minLat, maxLat, 90);
+
+      return {
+        type: "MultiPoint",
+        coordinates: [
+          [lon0, lat0],
+          [lon1, lat1],
+        ],
+      } as unknown as GeoPermissibleObjects;
+    }
+
     function sizeCanvas() {
       const rect = wrap!.getBoundingClientRect();
       const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -184,7 +239,7 @@ export function GeoMap({
           [12, 12],
           [Math.max(24, width - 12), Math.max(24, height - 12)],
         ],
-        LAND,
+        fitTarget(),
       );
       return dpr;
     }
