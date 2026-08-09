@@ -3057,7 +3057,9 @@ mod tests {
             },
         ];
 
-        let recs = build_per_case_records(&cases, &metrics, &ranks);
+        // Diagnostic off: the deep list is a copy of the production list, so
+        // the depth fields degrade to plain wider cutoffs of the same list.
+        let recs = build_per_case_records(&cases, &metrics, &ranks, &ranks);
         assert_eq!(recs.len(), 2);
 
         let r0 = &recs[0];
@@ -3068,8 +3070,8 @@ mod tests {
         assert_eq!(r0.missed, vec!["ssm-002".to_string()]);
         assert_eq!(r0.recall_at_k, 0.5);
         assert_eq!(r0.ndcg_at_k, 0.6);
-        // Wider cutoffs recompute from the full retrieved list vs gold: case 1
-        // found ssm-001 but not ssm-002, so 1/2 at every cutoff.
+        // Wider cutoffs recompute from the deep list vs gold: case 1 found
+        // ssm-001 but not ssm-002, so 1/2 at every cutoff.
         assert_eq!(r0.recall_at_50, 0.5);
         assert_eq!(r0.recall_at_100, 0.5);
 
@@ -3079,6 +3081,30 @@ mod tests {
         assert!(r1.missed.is_empty());
         assert_eq!(r1.recall_at_50, 1.0);
         assert_eq!(r1.recall_at_100, 1.0);
+
+        // Diagnostic on (RECALL_DIAG_K semantics): the deep list comes from a
+        // SEPARATE deeper query. A gold item absent from the production top-k
+        // but present in the deep list must still be flagged `missed` (headline
+        // fields stay on the production list) while recall@50/@100 count it —
+        // the exact split that turns "gold ranked >10 at depth" and "gold never
+        // retrieved at any depth" into different numbers.
+        let deep_ranks = vec![
+            CaseRankList {
+                case_id: "smoke-001".into(),
+                retrieved: vec!["ssm-001".into(), "ssm-099".into(), "ssm-002".into()],
+            },
+            CaseRankList {
+                case_id: "smoke-002".into(),
+                retrieved: vec!["ssm-010".into()],
+            },
+        ];
+        let recs = build_per_case_records(&cases, &metrics, &ranks, &deep_ranks);
+        let r0 = &recs[0];
+        assert_eq!(r0.missed, vec!["ssm-002".to_string()]);
+        assert_eq!(r0.relevant_found, 1);
+        assert_eq!(r0.recall_at_k, 0.5);
+        assert_eq!(r0.recall_at_50, 1.0);
+        assert_eq!(r0.recall_at_100, 1.0);
     }
 
     /// Smoke test the full runner end-to-end against the canonical fixtures.
