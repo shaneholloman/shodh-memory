@@ -98,11 +98,25 @@ export type SeatEvent =
 			query: string;
 			memories: ProactiveSurfacedMemory[];
 			injected_memory_ids: string[];
+			/** The system-prompt block verbatim as injected this turn (null when
+			 * nothing surfaced) — what the model saw must be inspectable. */
+			injected_block: string | null;
 			feedback: FeedbackProcessed | null;
 			temporal_credits_applied: number | null;
 			took_ms: number;
 	  }
 	| { type: "harness_learning_applied"; memories: { id: string; content: string; score: number }[] }
+	| {
+			/**
+			 * Deterministic post-draft verification (conversation.ts verify loop):
+			 * the issues found in the drafted answer and whether a bounded
+			 * revision pass was run. Emitted only when at least one issue fired,
+			 * so rescoring can count trigger rates and attribute revisions.
+			 */
+			type: "verification";
+			issues: string[];
+			nudged: boolean;
+	  }
 	| { type: "model_changed"; model: ModelRef }
 	| { type: "usage"; model: ModelRef; usage: UsagePayload }
 	| { type: "turn_end"; turn: number; stop_reason: string; error_message?: string }
