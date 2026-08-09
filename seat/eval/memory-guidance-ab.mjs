@@ -62,8 +62,9 @@
  *       guidance was written; its numbers inform the guidance, the
  *       statistical claim comes from the A/B below.
  *
- *   node seat/eval/memory-guidance-ab.mjs --phase ab --provider anthropic --model <id> --repeats 4
- *       Interleaved A/B, fresh users both arms, paired permutation test.
+ *   A/B: driven through the chunked phases below (serve → seed per user →
+ *       alternating run --guidance off/on → rescore); arms use fresh users
+ *       and the aggregation applies a paired permutation test.
  *
  *   node seat/eval/memory-guidance-ab.mjs --phase rescore --results <dir>
  *       Re-score persisted raw transcripts with the current rules. No model.
@@ -994,6 +995,9 @@ function leakCheck(guidance) {
     "unrelated", "routine", "electrician", "reefer", "empty", "two", "line", "ship", "tug", "fog",
     "rail", "thunderstorm", "stevedore", "harbor", "breakbulk", "longshore", "pilot", "chassis",
     "chesapeake",
+    // Generic English words that appear in the corpus only inside proper
+    // names (e.g. a place called "… Point"); they carry no corpus signal.
+    "point",
   ]);
   const leaks = [];
   for (const match of guidance.matchAll(/\b[A-Za-z][A-Za-z0-9-]{2,}\b/g)) {
@@ -1216,73 +1220,20 @@ function perCaseTable(scoresA, scoresB, cases) {
   }
 }
 
-async function phaseAb() {
-  const guidance = await loadGuidance();
-  const scratch = path.join(scratchRoot, `scratch-ab-${Date.now()}`);
-  mkdirSync(scratch, { recursive: true });
-  await startBackend(scratch);
-  const dir = resultsDir("ab");
-  console.log(`A/B: model ${PROVIDER}/${MODEL}, ${REPEATS} repeats/arm, ${activeCases().length} cases\nresults: ${dir}\n`);
-
-  const scoresA = [];
-  const scoresB = [];
-  for (let repeat = 1; repeat <= REPEATS; repeat += 1) {
-    const userA = `guide-ab-a${repeat}`;
-    const userB = `guide-ab-b${repeat}`;
-    console.log(`seeding ${userA} + ${userB}…`);
-    const corpusIdsA = await seedUser(userA);
-    const corpusIdsB = await seedUser(userB);
-
-    // Both seats alive; cases alternate A→B so drift and rate-limit pressure
-    // land evenly on both arms.
-    const seatA = await launchSeat(`ab-a${repeat}`, userA, scratch, undefined);
-    seatA.user = userA;
-    const seatB = await launchSeat(`ab-b${repeat}`, userB, scratch, undefined);
-    seatB.user = userB;
-    try {
-      for (const testCase of activeCases()) {
-        const rawA = await runCase(seatA.base, userA, "A", testCase, undefined);
-        persistRecord(dir, `A${repeat}`, rawA, corpusIdsA);
-        const scoreA = scoreCase(rawA, testCase, corpusIdsA);
-        scoreA.repeat = `A${repeat}`;
-        scoresA.push(scoreA);
-
-        const rawB = await runCase(seatB.base, userB, "B", testCase, guidance);
-        persistRecord(dir, `B${repeat}`, rawB, corpusIdsB);
-        const scoreB = scoreCase(rawB, testCase, corpusIdsB);
-        scoreB.repeat = `B${repeat}`;
-        scoresB.push(scoreB);
-
-        console.log(
-          `  [r${repeat}] ${testCase.id}: A ${scoreA.pass ? "PASS" : "fail"} · B ${scoreB.pass ? "PASS" : "fail"}`,
-        );
-        await sleep(500);
-      }
-    } finally {
-      seatA.child.kill();
-      seatB.child.kill();
-      await sleep(1500);
-    }
-  }
-
-  const aggA = aggregate(scoresA, activeCases());
-  const aggB = aggregate(scoresB, activeCases());
-  printAggregate("ARM A (current prompt)", aggA);
-  printAggregate("ARM B (with memory guidance)", aggB);
-  perCaseTable(scoresA, scoresB, activeCases());
-  const test = permutationTest(scoresA, scoresB, activeCases());
-  console.log(
-    `\npaired permutation test: mean per-case delta ${(test.observed_mean_delta * 100).toFixed(1)}pp, p(two-sided) = ${test.p_two_sided.toFixed(4)} (20k permutations, deterministic)`,
+/**
+ * The one-invocation interleaved A/B was removed: it kept two seats alive
+ * concurrently, which is unsafe now that eval seats share one seat-data dir
+ * (SQLite store + OAuth credential rotate in place; both require sequential
+ * seats — see launchSeat/carryCredential). The measured A/B is driven through
+ * the sequential chunked phases: serve → seed per user → alternating
+ * run --guidance off/on → rescore.
+ */
+function phaseAb() {
+  console.error(
+    "--phase ab was removed: concurrent seats conflict with the shared seat-data dir (sequential-seat invariant).\n" +
+      "Drive the A/B with the chunked phases: serve → seed per user → alternating run --guidance off/on → rescore.",
   );
-  writeFileSync(
-    path.join(dir, "summary.json"),
-    JSON.stringify(
-      { phase: "ab", model: MODEL, guidance_chars: guidance.length, arm_a: aggA, arm_b: aggB, permutation: test, scores_a: scoresA, scores_b: scoresB },
-      null,
-      1,
-    ),
-  );
-  console.log(`summary: ${path.join(dir, "summary.json")}`);
+  process.exit(2);
 }
 
 async function phaseRescore() {
@@ -1313,7 +1264,23 @@ async function phaseRescore() {
     console.log(
       `\npaired permutation test: mean per-case delta ${(test.observed_mean_delta * 100).toFixed(1)}pp, p = ${test.p_two_sided.toFixed(4)}`,
     );
+    // Pre-declared stratum reporting: the needle stratum is the ungameable
+    // one (content unknowable without retrieval), so it gets its own paired
+    // test alongside the overall number rather than being inferred from it.
+    for (const stratum of ["needle", "world", "graph"]) {
+      const stratumCases = activeCases().filter((testCase) => testCase.stratum === stratum);
+      if (stratumCases.length < 2) continue;
+      const stratumTest = permutationTest(scoresByArm.A, scoresByArm.B, stratumCases);
+      console.log(
+        `  ${stratum}: delta ${(stratumTest.observed_mean_delta * 100).toFixed(1)}pp, p = ${stratumTest.p_two_sided.toFixed(4)} (${stratumCases.length} cases)`,
+      );
+    }
   }
+  writeFileSync(
+    path.join(RESULTS_ARG, "rescore-summary.json"),
+    JSON.stringify({ scores_a: scoresByArm.A, scores_b: scoresByArm.B }, null, 1),
+  );
+  console.log(`\nrescore summary: ${path.join(RESULTS_ARG, "rescore-summary.json")}`);
 }
 
 async function main() {

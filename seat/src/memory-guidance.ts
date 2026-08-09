@@ -22,7 +22,31 @@
  * context on every turn.
  *
  * The A/B harness injects this text verbatim as the treatment arm, so what is
- * measured is byte-identical to what ships.
+ * measured is byte-identical to what would ship.
+ *
+ * ── A/B VERDICT (claude-haiku-4-5, 8 repeats/arm, 168 trials/arm, interleaved,
+ *    fresh seeded user per run, paired permutation test) ──────────────────────
+ *
+ *   control 60.7% ± 9.4pp · guidance 67.9% ± 6.1pp · +7.1pp, p = 0.167
+ *   needle stratum (retrieval-only evidence): 52.1% → 68.8% (z = 1.67)
+ *   native recall_memory usage: 0.02 → 0.35 calls/case (citations sourced
+ *   from native recall: 3 → 78); full-UUID citation-contract violations 1 → 0
+ *   REGRESSION (nuanced): the absence case fell 2/8 → 0/8 under the suite's
+ *   strict zero-citation rule, but the arm-B transcripts all answer honestly
+ *   ("no records of rail strikes…") while citing REAL adjacent memories as
+ *   context — over-citation, not fabrication. The fabricated-citations
+ *   counter (7 → 14) is dominated in BOTH arms by the model echoing the id
+ *   of a memory it has just written (write-capture), which the corpus-
+ *   membership check mislabels; genuinely unexplained ids: ~2 vs ~8.
+ *
+ * NOT WIRED into BASE_SYSTEM_PROMPT: the pre-registered bar was a measured
+ * improvement, and p = 0.167 does not clear it. The effect is directionally
+ * positive and the mechanism (the model actually searching memory instead of
+ * treating the 3-memory proactive block as the whole store) demonstrably
+ * moved, but establishing a ~7pp effect at this variance needs roughly 30+
+ * repeats per arm. Anyone revisiting: sharpen the citation-restraint line
+ * (or the absence rule) against contextual over-citation, then re-run
+ * seat/eval/memory-guidance-ab.mjs before wiring this in.
  */
 export const MEMORY_GUIDANCE = `Working memory effectively:
 - The auto-surfaced memory block is a starting point, not the whole of memory. Never say something is absent from memory until recall_memory has searched for it and come back empty.
