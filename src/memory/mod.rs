@@ -300,16 +300,14 @@ pub struct MemorySystem {
     /// `user_id` to this owner. `None` preserves the prior behaviour.
     default_user_id: Option<String>,
 
-    /// Flag: new memories stored since last fact extraction cycle.
+    /// Flag: fact extraction has pending work.
     /// When false, fact extraction is skipped entirely (no RocksDB scan, no clones).
-    /// Set to true in remember(), cleared by maintenance after extraction runs.
+    /// Set to true in remember(); a heavy maintenance cycle consumes it and
+    /// re-arms it itself when part of the corpus was still too young to
+    /// consolidate (`ConsolidationResult::memories_eligible` < corpus), so a
+    /// store that goes quiet after a burst of writes still consolidates once
+    /// its memories age past `CONSOLIDATION_MIN_AGE_DAYS`.
     fact_extraction_needed: std::sync::atomic::AtomicBool,
-
-    /// Watermark: only memories with created_at > this timestamp (unix millis) are
-    /// processed for fact extraction. Persisted to RocksDB so server restarts don't
-    /// re-process the entire memory store. Initialized from the latest fact's
-    /// created_at or 0 if no facts exist.
-    fact_extraction_watermark: std::sync::atomic::AtomicI64,
 
     /// Prediction cache for feedback prediction error weighting (VTA/Dopamine system).
     ///
@@ -827,11 +825,9 @@ impl MemorySystem {
             // Owner unknown at construction; the manager sets it via
             // set_default_user_id() so per-user stores work outside the handler.
             default_user_id: None,
-            // Dirty flag for fact extraction: run on first cycle, then only when new memories stored
+            // Dirty flag for fact extraction: run on first cycle, then whenever
+            // new memories are stored or part of the corpus is still aging in.
             fact_extraction_needed: std::sync::atomic::AtomicBool::new(true),
-            // Watermark for incremental fact extraction — initialized to 0 (sentinel).
-            // On first maintenance call, loaded from RocksDB or derived from latest fact timestamp.
-            fact_extraction_watermark: std::sync::atomic::AtomicI64::new(0),
             // Prediction cache for VTA/dopamine-inspired feedback error weighting
             // TTL 10 minutes, max 500 entries (~4KB)
             prediction_cache: moka::sync::Cache::builder()
@@ -9221,42 +9217,46 @@ impl MemorySystem {
         {
             let all_memories = &all_memories_for_heavy;
             if !all_memories.is_empty() {
-                // Incremental: only process memories created since last extraction watermark.
-                // First run (watermark=0) processes everything; subsequent runs only new memories.
-                // Lazy init: if watermark is 0 (startup sentinel), load persisted value
-                // or derive from the latest fact's created_at timestamp.
-                let mut watermark_millis = self
-                    .fact_extraction_watermark
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                if watermark_millis == 0 {
-                    watermark_millis = self
-                        .long_term_memory
-                        .get_fact_watermark(user_id)
-                        .or_else(|| self.fact_store.latest_fact_created_at(user_id))
-                        .unwrap_or(0);
-                    if watermark_millis > 0 {
-                        self.fact_extraction_watermark
-                            .store(watermark_millis, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-                let watermark_dt = chrono::DateTime::from_timestamp_millis(watermark_millis)
-                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
-
+                // FULL corpus, every heavy cycle. Extraction used to be
+                // incremental — a persisted watermark filtered each cycle to
+                // memories created since the last one — and that design had two
+                // structural consequences that together produced ZERO facts on
+                // every live store:
+                //
+                //  1. THE BURN. The watermark advanced over every memory the
+                //     filter passed, but the consolidator only processes
+                //     memories at least CONSOLIDATION_MIN_AGE_DAYS old. With
+                //     heavy cycles every ~6h and a 7-day age floor, every
+                //     memory was watermarked past while still ineligible —
+                //     seen once too young, then excluded forever.
+                //  2. NO CROSS-CYCLE CORROBORATION. CONSOLIDATION_MIN_SUPPORT
+                //     requires the same pattern from >= 2 distinct memories,
+                //     but sub-threshold clusters are not persisted, so support
+                //     could only accumulate within ONE watermark window. Two
+                //     memories corroborating each other across cycles could
+                //     never mint a fact.
+                //
+                // The watermark's actual job — stopping re-derived facts from
+                // ratcheting confidence forever — is done at the correct layer
+                // now: `SemanticFactStore::ingest_candidate` makes any
+                // re-derivation from already-counted evidence a no-op
+                // (AlreadyAttested), so re-scanning is idempotent. The cost is
+                // re-running the (pure string) extraction pipeline over the
+                // corpus once per heavy cycle, the same work the first cycle
+                // always did.
                 let memories: Vec<Memory> = all_memories
                     .iter()
-                    .filter(|m| m.created_at > watermark_dt)
                     .map(|arc_mem| arc_mem.as_ref().clone())
                     .collect();
 
-                tracing::info!(
-                    total_memories = all_memories.len(),
-                    new_since_watermark = memories.len(),
-                    watermark = %watermark_dt.format("%Y-%m-%dT%H:%M:%S"),
-                    "Incremental fact extraction"
-                );
-
                 let consolidator = compression::SemanticConsolidator::new();
                 let consolidation_result = consolidator.consolidate(&memories);
+
+                tracing::info!(
+                    total_memories = memories.len(),
+                    eligible = consolidation_result.memories_eligible,
+                    "Fact extraction over full corpus"
+                );
 
                 if !consolidation_result.new_facts.is_empty() {
                     // Batch-encode all new fact texts for hybrid dedup
@@ -9357,20 +9357,15 @@ impl MemorySystem {
                     }
                 }
 
-                // Advance watermark to the LAST memory's created_at timestamp,
-                // NOT to now(). Using now() would skip memories created during the
-                // (potentially slow) fact extraction cycle — they'd have created_at
-                // < now() and never be processed for facts.
-                if !memories.is_empty() {
-                    let new_watermark = memories
-                        .iter()
-                        .map(|m| m.created_at.timestamp_millis())
-                        .max()
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-                    self.fact_extraction_watermark
-                        .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
-                    self.long_term_memory
-                        .set_fact_watermark(user_id, new_watermark);
+                // Part of the corpus was younger than the consolidator's age
+                // floor and was NOT processed this cycle. Re-arm the dirty
+                // flag so the next heavy cycle runs extraction even if nothing
+                // new is written in the meantime — a store seeded in one burst
+                // and then left quiet must still consolidate once its memories
+                // age in. Idempotent ingest makes the re-run side-effect free.
+                if consolidation_result.memories_eligible < memories.len() {
+                    self.fact_extraction_needed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         } else {
@@ -9796,8 +9791,11 @@ impl MemorySystem {
     ///
     /// # Arguments
     /// * `user_id` - User whose memories to consolidate
-    /// * `min_support` - Minimum memories needed to form a fact (default: 3)
-    /// * `min_age_days` - Minimum age of memories to consider (default: 7)
+    /// * `min_support` - Minimum distinct memories needed to mint a fact
+    ///   (clamped up to the corpus-size tier in `consolidate()`; the HTTP
+    ///   endpoint defaults to 2)
+    /// * `min_age_days` - Minimum age of memories to consider (the HTTP
+    ///   endpoint defaults to 1; pass 0 to distill a fresh store now)
     ///
     /// # Returns
     /// ConsolidationResult with stats and newly extracted facts
@@ -9807,39 +9805,18 @@ impl MemorySystem {
         min_support: usize,
         min_age_days: i64,
     ) -> Result<ConsolidationResult> {
-        // Get all memories for consolidation
+        // The FULL corpus, like the maintenance path. The incremental
+        // watermark that used to filter this scan is gone — it advanced over
+        // age-ineligible memories (excluding them from extraction forever)
+        // and it confined min_support corroboration to a single batch. See
+        // the fact-extraction block in `run_maintenance` for the full
+        // post-mortem; `SemanticFactStore::ingest_candidate` is what makes
+        // the repeated full scan idempotent.
         let all_memories = self.get_all_memories()?;
-
-        // Incremental: only process memories created since last extraction watermark
-        let mut watermark_millis = self
-            .fact_extraction_watermark
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if watermark_millis == 0 {
-            watermark_millis = self
-                .long_term_memory
-                .get_fact_watermark(user_id)
-                .or_else(|| self.fact_store.latest_fact_created_at(user_id))
-                .unwrap_or(0);
-            if watermark_millis > 0 {
-                self.fact_extraction_watermark
-                    .store(watermark_millis, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        let watermark_dt = chrono::DateTime::from_timestamp_millis(watermark_millis)
-            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
-
         let memories: Vec<Memory> = all_memories
             .iter()
-            .filter(|m| m.created_at > watermark_dt)
             .map(|arc_mem| arc_mem.as_ref().clone())
             .collect();
-
-        tracing::info!(
-            total_memories = all_memories.len(),
-            new_since_watermark = memories.len(),
-            watermark = %watermark_dt.format("%Y-%m-%dT%H:%M:%S"),
-            "Incremental fact extraction (on-demand)"
-        );
 
         // Create consolidator with custom thresholds
         let consolidator =
@@ -9847,6 +9824,12 @@ impl MemorySystem {
 
         // Run consolidation
         let result = consolidator.consolidate(&memories);
+
+        tracing::info!(
+            total_memories = memories.len(),
+            eligible = result.memories_eligible,
+            "On-demand fact distillation over full corpus"
+        );
 
         // Pattern separation gate (dentate gyrus analogy): before storing new
         // facts, check if each one matches an existing engram. If so, reinforce
@@ -9943,22 +9926,6 @@ impl MemorySystem {
             // Only ACTIVE facts: a newcomer that lost arbitration is retained
             // for audit and must stay unreachable by traversal.
             self.connect_facts_to_graph(&newly_active);
-        }
-
-        // Advance watermark to the LAST memory's created_at, NOT now(): using now()
-        // would skip memories created during the (potentially slow) extraction cycle
-        // — they'd have created_at < now() and never be processed for facts. Mirrors
-        // run_maintenance().
-        if !memories.is_empty() {
-            let new_watermark = memories
-                .iter()
-                .map(|m| m.created_at.timestamp_millis())
-                .max()
-                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-            self.fact_extraction_watermark
-                .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
-            self.long_term_memory
-                .set_fact_watermark(user_id, new_watermark);
         }
 
         Ok(result)
@@ -11161,6 +11128,93 @@ mod companion_rerank_tests {
             out.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
             head,
             "no connectivity -> original ranking survives"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fact_extraction_flag_tests {
+    use super::*;
+    use crate::memory::types::Experience;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 30,
+            importance_threshold: 0.3,
+        };
+        let system = MemorySystem::new(config, None).expect("memory system");
+        (system, temp_dir)
+    }
+
+    fn declarative(content: &str) -> Experience {
+        Experience {
+            content: content.to_string(),
+            experience_type: ExperienceType::Observation,
+            importance_override: Some(0.8),
+            ..Default::default()
+        }
+    }
+
+    fn flag(system: &MemorySystem) -> bool {
+        system
+            .fact_extraction_needed
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A heavy cycle that could not process part of the corpus (memories
+    /// younger than `CONSOLIDATION_MIN_AGE_DAYS`) must leave the dirty flag
+    /// SET. The flag used to be consumed unconditionally, so a store seeded
+    /// in one burst and then left quiet was never extracted again: every
+    /// heavy cycle before day 7 consumed the flag while nothing was eligible,
+    /// and nothing after day 7 ever set it back.
+    #[test]
+    fn heavy_cycle_rearms_flag_while_memories_are_still_aging_in() {
+        let (system, _dir) = setup();
+        system
+            .remember(
+                declarative("The build pipeline promotes artifacts to staging on green CI runs."),
+                None,
+            )
+            .expect("remember");
+        assert!(flag(&system), "remember() must set the dirty flag");
+
+        system
+            .run_maintenance(1.0, "flag-user", true)
+            .expect("heavy maintenance");
+        assert!(
+            flag(&system),
+            "a young corpus is unfinished work: the flag must stay set so a \
+             later heavy cycle extracts these memories once they age in"
+        );
+    }
+
+    /// Once every memory has been through extraction while eligible, the flag
+    /// must be CLEARED — quiet stores must not pay a full extraction scan on
+    /// every heavy cycle forever.
+    #[test]
+    fn heavy_cycle_clears_flag_when_the_whole_corpus_was_eligible() {
+        let (system, _dir) = setup();
+        let old = chrono::Utc::now() - chrono::Duration::days(10);
+        system
+            .remember(
+                declarative("The scheduler drains one worker at a time during rolling restarts."),
+                Some(old),
+            )
+            .expect("remember");
+        assert!(flag(&system));
+
+        system
+            .run_maintenance(1.0, "flag-user", true)
+            .expect("heavy maintenance");
+        assert!(
+            !flag(&system),
+            "everything eligible was processed; the flag must be consumed"
         );
     }
 }

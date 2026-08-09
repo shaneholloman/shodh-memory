@@ -401,41 +401,6 @@ impl SemanticFactStore {
         })
     }
 
-    /// Find the creation timestamp of the most recent fact for a user.
-    ///
-    /// Used at startup to initialize the fact extraction watermark when no
-    /// persisted watermark exists. Returns None if user has no facts.
-    pub fn latest_fact_created_at(&self, user_id: &str) -> Option<i64> {
-        let prefix = format!("facts:{user_id}:");
-        let mut max_millis: Option<i64> = None;
-
-        let iter = self.db.iterator(IteratorMode::From(
-            prefix.as_bytes(),
-            rocksdb::Direction::Forward,
-        ));
-
-        for item in iter {
-            let (key, value) = match item {
-                Ok(kv) => kv,
-                Err(_) => break,
-            };
-            let key_str = String::from_utf8_lossy(&key);
-            if !key_str.starts_with(&prefix) {
-                break;
-            }
-            // Skip index keys (entity/type sub-keys have extra colons)
-            if key_str.matches(':').count() > 2 {
-                continue;
-            }
-            if let Ok(fact) = decode_fact(&value) {
-                let millis = fact.created_at.timestamp_millis();
-                max_millis = Some(max_millis.map_or(millis, |cur| cur.max(millis)));
-            }
-        }
-
-        max_millis
-    }
-
     /// Find facts that should decay (no reinforcement for too long)
     pub fn find_decaying_facts(
         &self,
@@ -703,28 +668,31 @@ impl SemanticFactStore {
     /// `source_memories` on both rows keeps the trust chain back to the
     /// episodes intact.
     ///
-    /// # Idempotence (the sub-millisecond watermark)
+    /// # Idempotence (what makes full re-scans safe)
     ///
-    /// Both callers filter memories with `created_at > watermark`, where the
-    /// watermark is persisted as `timestamp_millis()` — a value truncated DOWN
-    /// from the nanosecond-precision `created_at` it came from. So the newest
-    /// memory of every cycle compares as strictly newer than the watermark it
-    /// itself produced, and is re-consolidated on the next cycle, forever.
-    /// (Truncating down is the fail-safe direction: it can only re-process,
-    /// never skip. That is why it is left alone here.)
+    /// Both callers re-run extraction over the FULL eligible corpus on every
+    /// cycle. There used to be an incremental watermark that filtered each
+    /// cycle to memories it had not seen; it advanced over every memory the
+    /// filter passed, including memories the consolidator's age gate had
+    /// excluded, so every memory on a live store was seen once too young and
+    /// then excluded forever — the zero-facts defect. It also confined
+    /// `CONSOLIDATION_MIN_SUPPORT` corroboration to a single cycle's batch,
+    /// so support could never accumulate across cycles. The watermark is
+    /// gone; re-derivation of already-stored facts is instead made inert
+    /// HERE, at the evidence level, which handles every re-derivation path
+    /// rather than one scheduling instance of it.
     ///
-    /// Re-processing was described as "merely wasteful". It was not. The
-    /// reinforcement branch refreshed `last_reinforced` and applied the
-    /// confidence boost UNCONDITIONALLY, so a fact derived from the newest
-    /// memory got a fresh half-life and a confidence bump on every single
-    /// cycle, from evidence that had already been counted — an immortal fact
-    /// manufactured by a rounding error. `support_count` was already guarded
-    /// against exactly this; the guard simply did not extend to the other two.
+    /// Re-processing is not "merely wasteful" without this guard. The
+    /// reinforcement branch used to refresh `last_reinforced` and apply the
+    /// confidence boost UNCONDITIONALLY, so a re-derived fact got a fresh
+    /// half-life and a confidence bump on every cycle, from evidence that had
+    /// already been counted — an immortal fact. `support_count` was already
+    /// guarded against exactly this; the guard simply did not extend to the
+    /// other two.
     ///
     /// Reinforcement is therefore idempotent with respect to evidence: no new
-    /// source memories ⇒ [`FactIngestOutcome::AlreadyAttested`] and NO write at
-    /// all. This fixes the whole class, not just the watermark instance — any
-    /// re-derivation from an already-counted source set is now inert.
+    /// source memories ⇒ [`FactIngestOutcome::AlreadyAttested`] and NO write
+    /// at all. Any re-derivation from an already-counted source set is inert.
     ///
     /// `now` is passed in so a caller processing a batch stamps every decision
     /// with one consistent instant.
@@ -1026,7 +994,12 @@ impl SemanticFactStore {
 /// Returns `true` for positive polarity (even negation count, including 0),
 /// `false` for negative polarity (odd negation count).
 /// Handles double-negation: "not unlike" = positive.
-fn detect_polarity(text_lower: &str) -> bool {
+///
+/// `pub(crate)`: `SemanticConsolidator::group_candidates_by_similarity` uses
+/// the SAME polarity notion to keep a claim and its negation in separate
+/// clusters, so what counts as "the same claim restated" is defined once —
+/// here — for both extraction-time clustering and store-time dedup.
+pub(crate) fn detect_polarity(text_lower: &str) -> bool {
     use crate::constants::FACT_NEGATION_MARKERS;
     let words: Vec<&str> = text_lower.split_whitespace().collect();
     let negation_count = words
