@@ -24,29 +24,34 @@
  * The A/B harness injects this text verbatim as the treatment arm, so what is
  * measured is byte-identical to what would ship.
  *
- * ── A/B VERDICT (claude-haiku-4-5, 8 repeats/arm, 168 trials/arm, interleaved,
- *    fresh seeded user per run, paired permutation test) ──────────────────────
+ * ── A/B VERDICT 1 — guidance alone (claude-haiku-4-5, 8 repeats/arm,
+ *    168 trials/arm, interleaved, paired permutation test) ───────────────────
  *
- *   control 60.7% ± 9.4pp · guidance 67.9% ± 6.1pp · +7.1pp, p = 0.167
- *   needle stratum (retrieval-only evidence): 52.1% → 68.8% (z = 1.67)
- *   native recall_memory usage: 0.02 → 0.35 calls/case (citations sourced
- *   from native recall: 3 → 78); full-UUID citation-contract violations 1 → 0
- *   REGRESSION (nuanced): the absence case fell 2/8 → 0/8 under the suite's
- *   strict zero-citation rule, but the arm-B transcripts all answer honestly
- *   ("no records of rail strikes…") while citing REAL adjacent memories as
- *   context — over-citation, not fabrication. The fabricated-citations
- *   counter (7 → 14) is dominated in BOTH arms by the model echoing the id
- *   of a memory it has just written (write-capture), which the corpus-
- *   membership check mislabels; genuinely unexplained ids: ~2 vs ~8.
+ *   Under the original scoring: control 60.7% ± 9.4pp · guidance 67.9% ±
+ *   6.1pp · +7.1pp, p = 0.167 — below the pre-registered bar, so guidance
+ *   alone stayed unwired. After the absence-rule scoring fix (the rule was
+ *   measured misfiring on honest "nothing recorded" answers that cited real
+ *   adjacent memories as context; see the absence-honesty case in
+ *   memory-guidance-ab.mjs), the same transcripts rescore to 63.7% ± 10.5pp
+ *   vs 72.6% ± 6.1pp (+8.9pp, p = 0.065) — still short of the bar.
  *
- * NOT WIRED into BASE_SYSTEM_PROMPT: the pre-registered bar was a measured
- * improvement, and p = 0.167 does not clear it. The effect is directionally
- * positive and the mechanism (the model actually searching memory instead of
- * treating the 3-memory proactive block as the whole store) demonstrably
- * moved, but establishing a ~7pp effect at this variance needs roughly 30+
- * repeats per arm. Anyone revisiting: sharpen the citation-restraint line
- * (or the absence rule) against contextual over-citation, then re-run
- * seat/eval/memory-guidance-ab.mjs before wiring this in.
+ * ── A/B VERDICT 2 — mechanism bundle, "mech1" (control ×4 vs bundle ×6
+ *    repeats, interleaved, fresh seeded user per run, pinned backend,
+ *    paired permutation test) ────────────────────────────────────────────────
+ *
+ *   This guidance is now WIRED via MemoryMechanisms.guidance
+ *   (conversation.ts) as one of five mechanisms measured as a single
+ *   ship-candidate bundle: guidance + proactive sample framing + recall
+ *   lineage rendering + deterministic verify loop + MCP redundant-tool
+ *   filter. Bundle verdict: control 66.7% ± 6.7pp · bundle 88.1% ± 4.0pp ·
+ *   mean per-case delta +21.4pp, p = 0.0012 — clears the pre-registered
+ *   p < 0.05 bar. Mechanism movement: native recall 0.02 → 1.09 calls/case,
+ *   mcp-recall bypass calls 15 → 0, full-UUID contract violations 2 → 0.
+ *   Per-mechanism attribution is deliberately NOT factored (one bundle arm
+ *   vs one control arm); the control is byte-identical to the pre-mechanism
+ *   seat. Residual failures concentrate in the two causal-chain cases —
+ *   bounded by the inferred graph substrate (the drift→strike edge was
+ *   absent in 7 of 7 probed user graphs), not by prompt or seat mechanics.
  */
 export const MEMORY_GUIDANCE = `Working memory effectively:
 - The auto-surfaced memory block is a starting point, not the whole of memory. Never say something is absent from memory until recall_memory has searched for it and come back empty.
