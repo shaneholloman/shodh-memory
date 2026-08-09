@@ -78,9 +78,9 @@ import shodhMark from "@/assets/shodh-mark.png";
  * anything to ask about, so an icon pays out to nobody. It gets shorter; it
  * does not get hidden.
  *
- * Read in two places — the rail (`Placeholder`, for destinations with nothing
- * behind them yet) and the header, next to the title (TopBar.tsx). Both read it
- * from here so the app cannot describe one destination two ways.
+ * Read in two places — the rail itself, and the header next to the title
+ * (TopBar.tsx). Both read it from here so the app cannot describe one
+ * destination two ways.
  */
 export const DESTINATIONS = [
   {
