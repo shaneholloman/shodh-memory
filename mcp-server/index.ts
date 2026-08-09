@@ -36,6 +36,7 @@ import { resolvePackageVersion } from "./version";
 import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 import { DrainController } from "./drain";
+import { renderCommandsResource } from "./commands-resource";
 import {
   decorateTool,
   isReadOnlyTool,
@@ -1644,6 +1645,20 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
               enum: ["daily", "weekly", "monthly"],
               description: "Recurrence pattern for repeating tasks",
             },
+            parent_id: {
+              type: "string",
+              description: "Parent todo ID or short prefix (e.g. SHO-8) to create this as a subtask of that todo",
+            },
+            blocked_by: {
+              type: "array",
+              items: { type: "string" },
+              description: "Todos this one depends on, as short keys (e.g. SHO-3) or UUIDs. This todo stays blocked until they are done. Unknown references are rejected.",
+            },
+            related_memory_ids: {
+              type: "array",
+              items: { type: "string" },
+              description: "Memory UUIDs that motivated this task — the 'why does this exist' link back to the memories it came from. Verified to exist before linking.",
+            },
           },
           required: ["content"],
         },
@@ -1747,6 +1762,16 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
             parent_id: {
               type: "string",
               description: "Parent todo ID or short prefix to make this a subtask. Pass empty string to remove parent.",
+            },
+            blocked_by: {
+              type: "array",
+              items: { type: "string" },
+              description: "Replace this todo's dependencies with these todos, as short keys (e.g. SHO-3) or UUIDs. Pass an empty array to clear them. Unknown references are rejected.",
+            },
+            related_memory_ids: {
+              type: "array",
+              items: { type: "string" },
+              description: "Replace the memory UUIDs this task traces back to. Pass an empty array to clear them. Verified to exist before linking.",
             },
           },
           required: ["todo_id"],
@@ -2982,7 +3007,6 @@ const handleCallTool = async (request: CallToolRequest) => {
         // payload passes them through.
         interface MemoryStats {
           total_memories: number;
-          memory_types?: Record<string, number>;
           total_importance?: number;
           avg_importance?: number;
           average_importance?: number; // API uses this name
@@ -3008,31 +3032,11 @@ const handleCallTool = async (request: CallToolRequest) => {
         response += `Graph: ${result.graph_nodes || 0} nodes │ ${result.graph_edges || 0} edges\n`;
         response += `Indexed Vectors: ${indexedCount}\n`;
         response += `Avg Importance: ${avgImportance.toFixed(2)}\n`;
+        response += `Tiers: ${result.working_memory_count ?? 0} working │ ${result.session_memory_count ?? 0} session │ ${result.long_term_memory_count ?? 0} long-term\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-
-        if (result.memory_types && Object.keys(result.memory_types).length > 0) {
-          response += `\nBy Type:\n`;
-          const typeIcons: Record<string, string> = {
-            'Decision': '📋',
-            'Learning': '💡',
-            'Context': '📁',
-            'Pattern': '🔄',
-            'Error': '⚠️',
-            'Observation': '👁️',
-            'Discovery': '🔍',
-            'Task': '✅',
-            'CodeEdit': '📝',
-            'FileAccess': '📄',
-            'Search': '🔎',
-            'Command': '⚡',
-            'Conversation': '💬',
-          };
-          for (const [type, count] of Object.entries(result.memory_types)) {
-            const icon = typeIcons[type] || '📦';
-            const bar = '█'.repeat(Math.min(20, Math.round((count as number) / (result.total_memories || 1) * 20)));
-            response += `   ${icon} ${type.padEnd(12)} ${bar} ${count}\n`;
-          }
-        }
+        // No "By Type" section: GET /api/users/{id}/stats returns no type
+        // histogram. list_memories computes one from the memories it lists.
+        response += `\nFor a breakdown by memory type, call list_memories.\n`;
 
         return {
           content: [{ type: "text", text: response.trimEnd() }],
@@ -3046,7 +3050,6 @@ const handleCallTool = async (request: CallToolRequest) => {
             total_retrievals: result.total_retrievals,
             graph_nodes: result.graph_nodes,
             graph_edges: result.graph_edges,
-            memory_types: result.memory_types,
           }),
         };
       }
@@ -4355,6 +4358,9 @@ const handleCallTool = async (request: CallToolRequest) => {
           blocked_on,
           notes,
           recurrence,
+          parent_id,
+          blocked_by,
+          related_memory_ids,
         } = args as {
           content: string;
           status?: string;
@@ -4366,6 +4372,9 @@ const handleCallTool = async (request: CallToolRequest) => {
           blocked_on?: string;
           notes?: string;
           recurrence?: string;
+          parent_id?: string;
+          blocked_by?: string[];
+          related_memory_ids?: string[];
         };
 
         if (!todoContent || todoContent.length === 0) {
@@ -4400,6 +4409,9 @@ const handleCallTool = async (request: CallToolRequest) => {
           blocked_on,
           notes,
           recurrence,
+          parent_id,
+          blocked_by,
+          related_memory_ids,
         });
 
         return {
@@ -4475,6 +4487,8 @@ const handleCallTool = async (request: CallToolRequest) => {
           notes,
           tags,
           parent_id,
+          blocked_by,
+          related_memory_ids,
         } = args as {
           todo_id: string;
           content?: string;
@@ -4487,6 +4501,8 @@ const handleCallTool = async (request: CallToolRequest) => {
           notes?: string;
           tags?: string[];
           parent_id?: string;
+          blocked_by?: string[];
+          related_memory_ids?: string[];
         };
 
         interface UpdateTodoResponse {
@@ -4507,6 +4523,8 @@ const handleCallTool = async (request: CallToolRequest) => {
           notes,
           tags,
           parent_id,
+          blocked_by,
+          related_memory_ids,
         });
 
         return {
@@ -5788,7 +5806,14 @@ const handleCallTool = async (request: CallToolRequest) => {
     } else if (message.includes('API error 401')) {
       helpText = '\n\nAuthentication failed. Check your SHODH_API_KEY.';
     } else if (message.includes('API error 404')) {
-      helpText = '\n\nEndpoint not found. The server may be running an older version.';
+      // A 404 carrying a structured error code came from a real handler that
+      // could not find the *thing* asked for (MEMORY_NOT_FOUND, TODO_NOT_FOUND,
+      // ...). That is a recoverable, id-level condition, and telling the agent
+      // to suspect a version mismatch sends it down the wrong path. Only an
+      // unrouted 404 — no code in the body — means the endpoint is missing.
+      if (!/"code"\s*:\s*"[^"]+"/.test(message)) {
+        helpText = '\n\nEndpoint not found. The server may be running an older version.';
+      }
     }
 
     return {
@@ -5873,69 +5898,57 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     if (uri.startsWith("shodh://")) {
       const resource = uri.replace("shodh://", "");
 
+      // shodh://search/{query} — the query is a URI-encoded path segment, so it
+      // cannot be matched by the fixed-name switch below.
+      if (resource === "search" || resource.startsWith("search/")) {
+        const raw = resource.slice("search".length).replace(/^\//, "");
+        let query: string;
+        try {
+          query = decodeURIComponent(raw);
+        } catch {
+          // Malformed percent-encoding: use the segment as typed rather than
+          // failing the read outright.
+          query = raw;
+        }
+        query = query.trim();
+        if (!query) {
+          throw new Error(
+            "Empty search query. Use shodh://search/{query}, e.g. shodh://search/bridge%20collapse",
+          );
+        }
+
+        const result = await apiCall<{ memories: Memory[] }>("/api/recall", "POST", {
+          user_id: USER_ID,
+          query,
+          mode: "hybrid",
+          limit: 10,
+        });
+
+        const memories = result.memories || [];
+        const lines = memories.length > 0
+          ? memories.map((m, i) => {
+              const tier = m.tier ? ` | ${m.tier}` : "";
+              return `${i + 1}. ${getContent(m)}\n   ${getType(m)}${tier} | ${m.id}`;
+            })
+          : ["No memories found."];
+
+        return {
+          contents: [{
+            uri,
+            mimeType: "text/plain",
+            text: `Search results for "${query}" (${memories.length})\n\n${lines.join("\n\n")}`,
+          }],
+        };
+      }
+
       switch (resource) {
         case "commands": {
-          const commandList = `# Shodh-Memory Commands
-
-## Memory Tools
-- **remember** - Store a memory (observation, decision, learning, etc.)
-- **recall** - Search memories (semantic, associative, or hybrid mode)
-- **recall_by_tags** - Find memories by tags
-- **recall_by_date** - Find memories in a date range
-- **forget** - Delete a specific memory
-- **context_summary** - Get recent learnings, decisions, and context
-- **proactive_context** - Surface relevant memories for current context
-- **list_memories** - List all stored memories
-- **memory_stats** - Get memory system statistics
-- **reinforce_memories** - Hebbian feedback: mark used memories helpful/misleading
-
-## Causal Lineage Tools
-- **trace_lineage** - Trace what led to a memory (backward) or what it caused (forward), with root cause
-- **list_causal_edges** - Survey the causal graph: relation totals, confidence, top edges
-- **add_causal_link** - Record an explicit causal edge between two memories
-- **validate_causal_link** - Confirm or reject an inferred causal edge
-
-## Knowledge Graph Tools
-- **explore_entity** - Walk the graph from a named entity: neighbors + typed relationships
-- **list_entities** - List graph entities ranked by salience
-
-## Anomaly & Facts Tools
-- **list_anomalies** - Rank recent memories by statistical deviation from your baseline
-- **search_facts** - Search distilled semantic facts (by query, entity, or recency)
-- **fact_narratives** - Topic-clustered fact summaries with causal chains
-
-## Todo Tools
-- **add_todo** - Add a task to your todo list
-- **list_todos** - View pending tasks
-- **update_todo** - Modify a todo
-- **complete_todo** - Mark a todo as done
-- **delete_todo** - Remove a todo
-- **list_projects** - View project hierarchy
-- **add_project** - Create a new project
-- **todo_stats** - Get todo statistics
-
-## System Tools
-- **verify_index** - Check memory index health
-- **repair_index** - Fix orphaned memories
-- **streaming_status** - Check streaming connection
-- **token_status** - MCP pipeline throughput (internal diagnostic)
-- **reset_token_session** - Reset token tracking
-
-## Reminders
-- **set_reminder** - Set a future reminder
-- **list_reminders** - View pending reminders
-- **dismiss_reminder** - Mark reminder as handled
-
-## Slash Commands (type / in chat)
-- **/mcp__shodh-memory__quick_recall** - Search memories
-- **/mcp__shodh-memory__session_summary** - Session overview
-- **/mcp__shodh-memory__what_i_know** - Everything about a topic
-- **/mcp__shodh-memory__pending_work** - View todos
-- **/mcp__shodh-memory__recent_memories** - Recent memories
-- **/mcp__shodh-memory__memory_health** - System status
-`;
           return {
-            contents: [{ uri, mimeType: "text/markdown", text: commandList }],
+            contents: [{
+              uri,
+              mimeType: "text/markdown",
+              text: renderCommandsResource(TOOL_DEFINITIONS, SHODH_PROMPTS),
+            }],
           };
         }
 
@@ -6022,9 +6035,14 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
         case "stats": {
           const stats = await apiCall<{
             total_memories: number;
-            memories_by_type: Record<string, number>;
-            memories_last_24h: number;
-            memories_last_7d: number;
+            working_memory_count: number;
+            session_memory_count: number;
+            long_term_memory_count: number;
+            vector_index_count: number;
+            average_importance: number;
+            total_retrievals: number;
+            graph_nodes: number;
+            graph_edges: number;
           }>(`/api/users/${encodeURIComponent(USER_ID)}/stats`, "GET");
 
           return {
@@ -6355,11 +6373,20 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
       }
 
       case "memory_health": {
+        // Only fields GET /api/users/{id}/stats actually returns. It has no
+        // recency counters and no type histogram: the previous version read
+        // memories_last_24h / memories_last_7d / memories_by_type, which do not
+        // exist, and printed "Last 24h: 0 / Last 7 days: 0" as though measured.
         const statsResult = await apiCall<{
           total_memories: number;
-          memories_by_type: Record<string, number>;
-          memories_last_24h: number;
-          memories_last_7d: number;
+          working_memory_count?: number;
+          session_memory_count?: number;
+          long_term_memory_count?: number;
+          vector_index_count?: number;
+          average_importance?: number;
+          total_retrievals?: number;
+          graph_nodes?: number;
+          graph_edges?: number;
         }>(`/api/users/${encodeURIComponent(USER_ID)}/stats`, "GET");
 
         const verifyResult = await apiCall<{
@@ -6369,19 +6396,24 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
         const parts: string[] = ["**Memory System Health:**\n"];
         parts.push(`Total memories: ${statsResult.total_memories || 0}`);
-        parts.push(`Last 24h: ${statsResult.memories_last_24h || 0}`);
-        parts.push(`Last 7 days: ${statsResult.memories_last_7d || 0}`);
+        parts.push(
+          `Tiers: ${statsResult.working_memory_count ?? 0} working │ ` +
+            `${statsResult.session_memory_count ?? 0} session │ ` +
+            `${statsResult.long_term_memory_count ?? 0} long-term`,
+        );
+        parts.push(`Indexed vectors: ${statsResult.vector_index_count ?? 0}`);
+        parts.push(`Graph: ${statsResult.graph_nodes ?? 0} nodes │ ${statsResult.graph_edges ?? 0} edges`);
+        if (typeof statsResult.average_importance === "number") {
+          parts.push(`Avg importance: ${statsResult.average_importance.toFixed(2)}`);
+        }
+        if (typeof statsResult.total_retrievals === "number") {
+          parts.push(`Total retrievals: ${statsResult.total_retrievals}`);
+        }
         parts.push(`\nIndex status: ${verifyResult.is_healthy ? "✓ Healthy" : "⚠ Needs repair"}`);
         if (verifyResult.orphaned_count > 0) {
           parts.push(`Orphaned entries: ${verifyResult.orphaned_count}`);
         }
-
-        if (statsResult.memories_by_type) {
-          parts.push("\n**By Type:**");
-          Object.entries(statsResult.memories_by_type).forEach(([type, count]) => {
-            parts.push(`- ${type}: ${count}`);
-          });
-        }
+        parts.push("\nFor a breakdown by memory type, call list_memories.");
 
         return {
           messages: [
