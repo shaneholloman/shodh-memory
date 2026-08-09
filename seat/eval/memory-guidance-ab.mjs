@@ -697,6 +697,14 @@ async function launchSeat(runName, runUser, scratch, fixturePort) {
               SHODH_USER_ID: runUser,
               SHODH_NO_AUTO_SPAWN: "true",
               SHODH_ALLOW_HTTP: "true",
+              // The MCP server's background capture (streamToolCall,
+              // mcp-server/index.ts) ingests a "Tool: <name>\nInput: …" memory
+              // on ANY bridged tool call. Measured in ab1 AND mech1: that junk
+              // entered eval stores (106 and 33 proactive injections of
+              // non-corpus memories respectively) and displaced real memories
+              // from proactive slots. An evaluation store must contain exactly
+              // the seeded corpus plus the model's own deliberate writes.
+              SHODH_STREAM: "false",
             },
           },
         ],
