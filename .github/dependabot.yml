@@ -20,6 +20,16 @@ updates:
         update-types:
           - patch
           - minor
+        # `ort` is a release candidate (2.0.0-rc.x). Cargo classifies rc-to-rc
+        # as a patch bump, but a release candidate makes no API-stability
+        # promise, so it does not belong in a group whose whole premise is
+        # "safe to merge on green". rc.11 -> rc.13 made `ort::Error` generic
+        # and broke every `anyhow::Context` call on a session builder
+        # (src/embeddings/gliner.rs, src/embeddings/minilm.rs) — it takes the
+        # entire embedding and NER stack down with it. Excluded so it arrives
+        # as its own reviewable PR with the migration attached.
+        exclude-patterns:
+          - "ort"
     commit-message:
       prefix: "deps"
 
