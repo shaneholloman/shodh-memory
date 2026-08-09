@@ -70,8 +70,8 @@ fn exp_type(s: &str) -> ExperienceType {
 /// memory_type, created_at), preserving fixture timestamps so the corpus is
 /// age-eligible exactly as it would be on a mature store.
 fn seed_corpus(system: &MemorySystem, path: &str) -> usize {
-    let corpus = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("fixture corpus {path}: {e}"));
+    let corpus =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("fixture corpus {path}: {e}"));
     let mut n = 0usize;
     for line in corpus.lines() {
         if line.trim().is_empty() {
@@ -143,7 +143,12 @@ fn report(system: &MemorySystem, user: &str, corpus: &str, seeded: usize) {
 fn smoke_corpus_fact_yield_report() {
     let (system, _dir) = setup();
     let seeded = seed_corpus(&system, "tests/recall/corpora/shodh-smoke.jsonl");
-    report(&system, "yield-smoke", "shodh-smoke (engineering log)", seeded);
+    report(
+        &system,
+        "yield-smoke",
+        "shodh-smoke (engineering log)",
+        seeded,
+    );
 }
 
 /// Conversational corpus (LoCoMo gate). ~2 minutes: 629 memories are embedded
@@ -154,5 +159,10 @@ fn smoke_corpus_fact_yield_report() {
 fn locomo_gate_fact_yield_report() {
     let (system, _dir) = setup();
     let seeded = seed_corpus(&system, "tests/recall/corpora/locomo-gate.jsonl");
-    report(&system, "yield-locomo", "locomo-gate (conversation)", seeded);
+    report(
+        &system,
+        "yield-locomo",
+        "locomo-gate (conversation)",
+        seeded,
+    );
 }
