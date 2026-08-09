@@ -19,15 +19,20 @@
 //!
 //! Known quality reading as of 2026-08-09 (record updated observations in
 //! the commit message when they change):
-//!   * shodh-smoke (80 engineering-log memories): the domain the specialist
-//!     extractors target.
-//!   * locomo-gate (629 conversational memories, `--ignored`, ~2 min): 4
-//!     facts, 3 of them conversational filler ("Nate: Hey Joanna, sorry to
-//!     hear about that") — on dialog corpora, repetition (the corroboration
-//!     signal) selects pleasantries, and speaker-prefixed interjections pass
-//!     `is_fact_shaped`. The 4th merges differently-numbered tournament wins
-//!     into one claim. Distillation over conversation needs discourse-aware
-//!     extraction, not a lower support bar.
+//!   * shodh-smoke (80 engineering-log memories): 0 facts — the corpus
+//!     restates nothing, so corroboration (min_support >= 2 distinct
+//!     memories) never fires. Zero is the policy, not a plumbing failure;
+//!     the report's `memories eligible` line is what distinguishes the two.
+//!   * locomo-gate (629 conversational memories, `--ignored`, ~3-6 min):
+//!     4 facts, byte-identical across repeat runs (clustering is
+//!     deterministic). Three are corroborated pleasantries ("Nate: Wow,
+//!     that looks great Joanna", 16 sources) — on dialog corpora,
+//!     repetition (the corroboration signal) selects small talk, and
+//!     speaker-prefixed interjections pass `is_fact_shaped`. The fourth
+//!     ("I won a really big video game tournament last week", 4 sources)
+//!     clusters DIFFERENT tournament wins into one claim. Distillation
+//!     over conversation needs discourse-aware extraction, not a lower
+//!     support bar.
 
 use tempfile::TempDir;
 
