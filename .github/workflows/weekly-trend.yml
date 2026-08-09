@@ -35,7 +35,7 @@ jobs:
       # without this, the ~149MB bundle gets re-downloaded from scratch every run.)
       SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -49,7 +49,7 @@ jobs:
 
       - name: Cache GLiNER typer assets
         id: gliner-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: models/gliner-bi-edge
           key: gliner-bi-edge-onnx-v1
@@ -76,7 +76,7 @@ jobs:
           test -s "$GD/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
 
       - name: Cache embedder model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/shodh-memory/models
           key: shodh-models-minilm-c9745ed1
@@ -143,7 +143,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: weekly-trend-logs
           path: |
