@@ -1930,3 +1930,288 @@ async fn remember_then_list() {
         "stats should show at least 1 memory: {body}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Capability-map defects: recall tag filter, lineage depth, backup reporting
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `/api/recall`'s `tags` filter compared tags exactly while the storage tag
+/// index (`search_by_tags`) normalises to lowercase, so `recall_by_tags(["X"])`
+/// matched a memory tagged "x" and `recall(tags: ["X"])` returned nothing. An
+/// agent reading "No memories found" concludes the corpus has no such memory.
+#[tokio::test]
+async fn recall_tag_filter_matches_regardless_of_case() {
+    let h = Harness::new();
+
+    let (status, _) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({
+                "user_id": "tag-case",
+                "content": "The Seagirt terminal gate processed a seasonal high of truck transactions.",
+                "tags": ["seagirt", "Terminal Gate"]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Every casing of a tag that exists must find the memory.
+    for tag in ["seagirt", "Seagirt", "SEAGIRT"] {
+        let (status, body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/recall",
+                json!({"user_id": "tag-case", "query": "terminal", "limit": 10, "tags": [tag]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "recall with tags=[{tag}] failed");
+        let count = recall_count(&body);
+        assert!(
+            count >= 1,
+            "tags=[{tag}] should match the seeded memory: {body}"
+        );
+    }
+
+    // A tag stored with capitals is equally reachable in lower case.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/recall",
+            json!({"user_id": "tag-case", "query": "terminal", "limit": 10, "tags": ["terminal gate"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        recall_count(&body) >= 1,
+        "lower-cased query of a capitalised tag should match: {body}"
+    );
+
+    // The filter must still exclude: a tag nothing carries returns nothing.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/recall",
+            json!({"user_id": "tag-case", "query": "terminal", "limit": 10, "tags": ["no-such-tag"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        recall_count(&body),
+        0,
+        "an absent tag must still filter everything out: {body}"
+    );
+}
+
+fn recall_count(body: &serde_json::Value) -> u64 {
+    body["count"]
+        .as_u64()
+        .or_else(|| body["memories"].as_array().map(|a| a.len() as u64))
+        .unwrap_or(0)
+}
+
+/// `/api/lineage/trace` reported a `depth` that was the count of visited nodes,
+/// so it always equalled `edges.len()` — a 5-hop request on a wide fan printed
+/// "Depth reached: 31 │ Edges: 31". Depth must be the hop distance actually
+/// walked, and can never exceed the requested `max_depth`.
+#[tokio::test]
+async fn lineage_trace_depth_is_hop_distance_not_edge_count() {
+    let h = Harness::new();
+    let user = "lineage-depth";
+
+    // A fan: one root with three direct children, so edges (3) > depth (1).
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let (status, body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/remember",
+                json!({"user_id": user, "content": format!("lineage depth node {i}")}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = body["memory_id"]
+            .as_str()
+            .or_else(|| body["id"].as_str())
+            .unwrap_or_else(|| panic!("no id in remember response: {body}"))
+            .to_string();
+        ids.push(id);
+    }
+
+    for target in ids.iter().skip(1) {
+        let (status, body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/lineage/link",
+                json!({
+                    "user_id": user,
+                    "from_memory_id": ids[0],
+                    "to_memory_id": target,
+                    "relation": "Caused"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "failed to link {target}: {body}");
+    }
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/lineage/trace",
+            json!({"user_id": user, "memory_id": ids[0], "direction": "forward", "max_depth": 1}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let depth = body["depth"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no depth: {body}"));
+    let edges = body["edges"].as_array().map(|a| a.len()).unwrap_or(0);
+
+    // The explicit fan is three edges. Automatic extraction may add more, so
+    // assert a floor rather than an exact count — the point of the test is the
+    // relationship between depth and edges, not the edge total.
+    assert!(
+        edges >= 3,
+        "expected at least the three fan-out edges: {body}"
+    );
+    assert_eq!(
+        depth, 1,
+        "one hop was requested and one hop was walked; depth reported {depth} \
+         against {edges} edges, which is the edge count, not a depth: {body}"
+    );
+    assert!(
+        depth <= 1,
+        "depth must never exceed the requested max_depth of 1: {body}"
+    );
+}
+
+/// `backup_restore` reported `["graph"]` while its description promised it
+/// "replaces all current data". The main memories DB is restored too — by
+/// `restore_comprehensive_backup`, which propagates failure — it was simply
+/// never named in the response, so an operator reading it would believe the
+/// memories had not come back.
+#[tokio::test]
+async fn backup_restore_reports_every_store_it_restored() {
+    let h = Harness::new();
+    let user = "backup-report";
+
+    let (status, _) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({"user_id": user, "content": "a memory worth backing up"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post("/api/backup/create", json!({"user_id": user})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "backup create failed: {body}");
+    assert_eq!(body["success"], json!(true), "backup create failed: {body}");
+    let backup_id = body["backup"]["backup_id"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no backup_id: {body}"));
+
+    // The count rendered as "Memories" must be a memory count, not a raw key
+    // count over the whole column family (which reported 897 for 88 memories).
+    let memory_count = body["backup"]["memory_count"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no memory_count: {body}"));
+    assert_eq!(
+        memory_count, 1,
+        "memory_count must count memories, not every RocksDB key: {body}"
+    );
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/backup/restore",
+            json!({"user_id": user, "backup_id": backup_id}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "restore failed: {body}");
+
+    let restored: Vec<String> = body["restored_stores"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no restored_stores: {body}"))
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+
+    assert!(
+        restored.iter().any(|s| s == "memories"),
+        "the memories DB is restored and must be reported: {restored:?}"
+    );
+    // Whatever is reported must be reported once — the vector index used to be
+    // pushed once per file found in the backup directory.
+    let mut deduped = restored.clone();
+    deduped.sort();
+    deduped.dedup();
+    assert_eq!(
+        deduped.len(),
+        restored.len(),
+        "restored_stores contains duplicates: {restored:?}"
+    );
+}
+
+/// Restoring a backup id that does not exist is a not-found condition, not a
+/// server fault. It surfaced as HTTP 500 `INTERNAL_ERROR: NotFound`, which a
+/// client cannot distinguish from a real backend failure.
+#[tokio::test]
+async fn backup_restore_unknown_id_is_not_found_not_server_error() {
+    let h = Harness::new();
+    let user = "backup-missing";
+
+    let (status, _) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({"user_id": user, "content": "seed so the user exists"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Create one backup so the user's backup directory exists — the failure
+    // under test is "that id is not among them", not "no backups at all".
+    let (status, body) = json_of(
+        h.app(),
+        authed_post("/api/backup/create", json!({"user_id": user})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], json!(true), "backup create failed: {body}");
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/backup/restore",
+            json!({"user_id": user, "backup_id": 424242}),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unknown backup id should be 404, got {status}: {body}"
+    );
+    assert_eq!(
+        body["code"].as_str(),
+        Some("BACKUP_NOT_FOUND"),
+        "a structured code lets a client tell 'no such backup' from 'server broken': {body}"
+    );
+}

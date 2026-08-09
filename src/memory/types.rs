@@ -2739,9 +2739,23 @@ impl Query {
         }
 
         // Tags filter (any match)
+        //
+        // Compared case-insensitively, because the storage tag index is written
+        // and read lowercased (`MemoryStorage::search_by_tags`). While this
+        // compared exactly, `recall_by_tags(["Seagirt"])` found ten memories
+        // tagged "seagirt" and `recall(tags: ["Seagirt"])` found none — the same
+        // vocabulary, reachable through one door and not the other. An agent
+        // reads the empty result as "the corpus has no such memories".
         if let Some(query_tags) = &self.tags {
             let memory_tags = &memory.experience.tags;
-            if memory_tags.is_empty() || !query_tags.iter().any(|qt| memory_tags.contains(qt)) {
+            if memory_tags.is_empty() {
+                return false;
+            }
+            let matched = query_tags.iter().any(|qt| {
+                let qt_lower = qt.to_lowercase();
+                memory_tags.iter().any(|mt| mt.to_lowercase() == qt_lower)
+            });
+            if !matched {
                 return false;
             }
         }

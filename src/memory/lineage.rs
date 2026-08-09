@@ -1331,6 +1331,13 @@ impl LineageGraph {
         queue.push_back((memory_id.clone(), 0));
         visited.insert(memory_id.clone());
 
+        // Deepest hop actually walked. `path` and `edges` gain one entry per
+        // newly-visited node, so `path.len() - 1` is the node count and equals
+        // `edges.len()` in every trace — it is not a depth. Reporting it as one
+        // made a max_depth=5 request print "Depth reached: 31 │ Edges: 31" and
+        // a model reading that mistrusts its own parameters.
+        let mut depth_reached = 0usize;
+
         while let Some((current_id, depth)) = queue.pop_front() {
             if depth >= max_depth {
                 continue;
@@ -1364,17 +1371,17 @@ impl LineageGraph {
                     path.push(next_id.clone());
                     edges.push(edge);
                     queue.push_back((next_id, depth + 1));
+                    depth_reached = depth_reached.max(depth + 1);
                 }
             }
         }
 
-        let depth = path.len().saturating_sub(1);
         Ok(LineageTrace {
             root: memory_id.clone(),
             direction,
             edges,
             path,
-            depth,
+            depth: depth_reached,
         })
     }
 
