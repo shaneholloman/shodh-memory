@@ -1669,6 +1669,39 @@ async fn verify_index_empty() {
     assert!(status.is_success());
 }
 
+/// Regression (capability-map F17): with no `since`, the consolidation report
+/// covered only the last hour while clients document a 24-hour default, so it
+/// reported "no activity" on stores that consolidated earlier the same day.
+/// The default window must span 24 hours.
+#[tokio::test]
+async fn consolidation_report_defaults_to_24h_window() {
+    let h = Harness::new();
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/consolidation/report",
+            json!({"user_id": "test-user"}),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "consolidation report: {body}");
+
+    let start = body["period"]["start"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .expect("period.start");
+    let end = body["period"]["end"]
+        .as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .expect("period.end");
+
+    let window_mins = (end - start).num_minutes();
+    assert!(
+        (window_mins - 24 * 60).abs() <= 5,
+        "default report window must span ~24h, got {window_mins} minutes"
+    );
+}
+
 #[tokio::test]
 async fn rebuild_index_empty() {
     let h = Harness::new();
