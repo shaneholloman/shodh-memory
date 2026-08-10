@@ -36,8 +36,15 @@ interface ResolvedApiKey {
   file?: string;
 }
 
+// Human-readable description of where the key came from, kept OUTSIDE the
+// resolved-key object: it holds no key material, and reading it must not require
+// touching the object that does.
+let KEY_ORIGIN_DESCRIPTION =
+  "the legacy dev key (no SHODH_API_KEY set and no shared key file found)";
+
 function resolveApiKey(): ResolvedApiKey {
   if (process.env.SHODH_API_KEY) {
+    KEY_ORIGIN_DESCRIPTION = "the SHODH_API_KEY environment variable";
     return { key: process.env.SHODH_API_KEY, source: "env" };
   }
   const fs = require("fs");
@@ -61,7 +68,10 @@ function resolveApiKey(): ResolvedApiKey {
     const file = path.join(root, ".api-key");
     try {
       const raw = fs.readFileSync(file, "utf-8").trim();
-      if (raw) return { key: raw, source: "shared-key-file", file };
+      if (raw) {
+        KEY_ORIGIN_DESCRIPTION = `the shared key file ${file}`;
+        return { key: raw, source: "shared-key-file", file };
+      }
     } catch {
       // File absent or unreadable — try the next candidate.
     }
@@ -370,12 +380,7 @@ async function verifyServerAuth(): Promise<AuthProbeResult> {
 
 /** Loud, actionable SessionStart failure: stderr block + user-visible systemMessage. */
 function reportAuthFailure(httpStatus: number): void {
-  const keyOrigin =
-    RESOLVED_API_KEY.source === "env"
-      ? "the SHODH_API_KEY environment variable"
-      : RESOLVED_API_KEY.source === "shared-key-file"
-        ? `the shared key file ${RESOLVED_API_KEY.file}`
-        : "the legacy dev key (no SHODH_API_KEY set and no shared key file found)";
+  const keyOrigin = KEY_ORIGIN_DESCRIPTION;
 
   const fixLines =
     RESOLVED_API_KEY.source === "legacy-dev-fallback"
