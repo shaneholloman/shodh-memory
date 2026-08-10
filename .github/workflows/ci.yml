@@ -68,8 +68,20 @@ jobs:
       - name: Run Clippy
         run: |
           set -o pipefail
-          # clippy runs -W: 30 pre-existing lints tracked for cleanup; flip to -D when cleared (see repo issue)
-          cargo clippy --all-targets -- -W clippy::all 2>&1 | tee clippy-output.txt
+          # The ~30 pre-existing lints tracked for cleanup are style/complexity,
+          # so clippy::all stays at -W until they are cleared.
+          #
+          # clippy::correctness is different and is denied here. Those lints are
+          # deny-by-default upstream because they flag code that is almost
+          # certainly wrong, and a blanket -W clippy::all was silently
+          # downgrading them: two assertions in tests/adaptive_memory_tests.rs
+          # compared unsigned counts >= 0, so they could never fail, and they
+          # kept passing while the subsystem they cover went inert (#489).
+          # A test that cannot fail is invisible to a failing-test sweep — this
+          # lint is the only thing that finds that class.
+          #
+          # -D comes AFTER -W so the deny wins for the correctness subset.
+          cargo clippy --all-targets -- -W clippy::all -D clippy::correctness 2>&1 | tee clippy-output.txt
           WARNINGS=$(grep -c "warning:" clippy-output.txt || true)
           WARNINGS=${WARNINGS:-0}
           echo "### Clippy Results" >> $GITHUB_STEP_SUMMARY
