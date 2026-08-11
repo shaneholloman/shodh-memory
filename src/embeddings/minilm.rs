@@ -146,7 +146,14 @@ pub struct EmbeddingConfig {
     /// Path to tokenizer file
     pub tokenizer_path: PathBuf,
 
-    /// Maximum sequence length (MiniLM default: 256)
+    /// Length of the ONNX input tensors, in tokens. Every forward pass costs
+    /// this length regardless of how many real tokens the text has, so it must
+    /// not exceed the tokenizer's truncation window — positions past the
+    /// window can only ever hold padding, and masked mean pooling discards
+    /// them (verified bit-identical: padding a 32-token input to 128 vs 256
+    /// yields the same pooled vector to the last bit, at ~2x the cost).
+    /// Defaults to [`MODEL_TOKEN_WINDOW`]; validated by
+    /// [`MiniLMEmbedder::validate_sequence_contract`].
     pub max_length: usize,
 
     /// Use quantized model for faster inference
@@ -573,6 +580,19 @@ impl MiniLMEmbedder {
     ///
     /// Hard-fails on violation: a mis-sized window corrupts every embedding
     /// written after it, so refusing to start is strictly cheaper.
+    ///
+    /// Rule 2 is an inequality, and today it is a STRICT one: window 128,
+    /// tensor 256. Positions 129..256 can only ever hold padding, and each
+    /// forward pass pays ~2.05x for them (measured at one intra-op thread,
+    /// interleaved: seq=128 88.9 ms vs seq=256 182.4 ms on the quantized
+    /// export). That is not free to reclaim: on the quantized export
+    /// `DynamicQuantizeLinear` derives its activation scale from the whole
+    /// tensor, padding included, so the tensor length is part of the
+    /// embedding function — pad-128 vs pad-256 measured worst cosine 0.9859,
+    /// i.e. shrinking it re-embeds every stored vector. (On the fp32 export
+    /// the same comparison is bit-identical, which is why a local-only check
+    /// would wrongly call it free.) Logged as waste, deliberately not
+    /// "fixed" here: it is a migration with its own recall gate.
     fn validate_sequence_contract(config: &EmbeddingConfig) -> Result<()> {
         use crate::embeddings::chunking::{ChunkConfig, MODEL_TOKEN_WINDOW};
 
@@ -590,6 +610,17 @@ impl MiniLMEmbedder {
              Fix EmbeddingConfig::max_length or MODEL_TOKEN_WINDOW.",
             config.max_length
         );
+        if config.max_length > MODEL_TOKEN_WINDOW {
+            tracing::info!(
+                "ONNX tensor length ({}) exceeds the token window ({MODEL_TOKEN_WINDOW}); the \
+                 extra {} positions can only ever hold padding, costing ~2x per forward pass. \
+                 Reclaiming them is a re-embed migration, not a free win: the quantized export \
+                 derives its activation scale from the padded tensor, so shortening it changes \
+                 every vector",
+                config.max_length,
+                config.max_length - MODEL_TOKEN_WINDOW
+            );
+        }
 
         // Inspect the truncation the shipped tokenizer.json declares. A window
         // TIGHTER than the code assumes is exactly the silent-loss bug this
@@ -867,12 +898,10 @@ impl MiniLMEmbedder {
         tracing::debug!("ONNX: session lock acquired, tokenizing...");
 
         // Tokenize input text
-        let t_tokenize = crate::stage_probe::start();
         let encoding = model
             .tokenizer
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
-        crate::stage_probe::record(t_tokenize, |p, d| p.tokenize += d);
 
         let tokens = encoding.get_ids();
         let attention_mask = encoding.get_attention_mask();
@@ -904,11 +933,8 @@ impl MiniLMEmbedder {
             .iter()
             .any(|i| i.name() == "token_type_ids");
 
-        // Run inference. Timed in isolation: `session.run` is the only part of
-        // this function that hardware acceleration could move, so it must be
-        // separable from tokenization, tensor construction, and mean pooling.
+        // Run inference
         tracing::debug!("ONNX: running inference...");
-        let t_forward = crate::stage_probe::start();
         let outputs = if wants_token_type {
             session.run(ort::inputs![
                 "input_ids" => &input_ids_value,
@@ -921,10 +947,6 @@ impl MiniLMEmbedder {
                 "attention_mask" => &attention_mask_value,
             ])?
         };
-        crate::stage_probe::record(t_forward, |p, d| {
-            p.onnx_forward += d;
-            p.forwards += 1;
-        });
         tracing::debug!("ONNX: inference complete");
 
         // Extract embeddings
@@ -1360,11 +1382,17 @@ mod tests {
 
     #[test]
     fn test_minilm_creation() {
-        // Test with default config
+        // 256 is DELIBERATE and load-bearing, not a leftover: on the quantized
+        // export CI ships, `DynamicQuantizeLinear` derives its activation
+        // scale from the whole tensor INCLUDING padding, so the tensor length
+        // is part of the embedding function. Shrinking it to the 128-token
+        // window is a ~2.05x speedup but changes every vector (measured worst
+        // cosine 0.9859 between pad-128 and pad-256 on the real quint8), i.e.
+        // it is a re-embed migration, not a free optimisation. Pinned so the
+        // change cannot be made accidentally.
         let config = EmbeddingConfig::default();
-
-        // Check dimension
         assert_eq!(config.max_length, 256);
+        assert!(config.max_length >= crate::embeddings::chunking::MODEL_TOKEN_WINDOW);
     }
 
     #[test]

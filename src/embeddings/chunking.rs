@@ -313,11 +313,18 @@ fn pack_units(units: Vec<Unit>, config: &ChunkConfig, content_budget: usize) -> 
     for unit in units {
         let fits = current.is_empty() || current_tokens + unit.tokens <= content_budget;
         if !fits {
-            // Close the current chunk and start the next one.
+            // Close the current chunk and start the next one. The carried
+            // sentence must leave room for the unit that forced the split:
+            // without this check a 24-token overlap in front of a
+            // budget-sized unit overflows the window, and the verification
+            // pass would have to rescue it with a WORD-level hard split —
+            // destroying exactly the sentence boundaries this module exists
+            // to preserve. When it does not fit, correctness wins: drop the
+            // overlap, keep the boundary.
             let overlap = if unit.boundary == Boundary::Soft {
-                last_unit
-                    .take()
-                    .filter(|(_, t)| *t <= config.overlap_tokens)
+                last_unit.take().filter(|(_, t)| {
+                    *t <= config.overlap_tokens && *t + unit.tokens <= content_budget
+                })
             } else {
                 None
             };
@@ -444,6 +451,46 @@ mod tests {
         assert_eq!(result.chunks.len(), 1);
         assert!(!result.was_chunked);
         assert_eq!(result.chunks[0], "This is a short text.");
+    }
+
+    /// Regression: a small trailing sentence carried as overlap must never be
+    /// prepended to a unit that already fills the budget. Before the fits
+    /// check in `pack_units`, `overlap + unit` overflowed the window and the
+    /// verification pass rescued it with a WORD-level `hard_split`, cutting
+    /// mid-sentence — the one thing structural chunking must not do.
+    #[test]
+    fn overlap_never_overflows_and_never_forces_a_word_split() {
+        // max_tokens 22 => content budget 20; overlap allowance 8.
+        let config = cfg(22, 8);
+        // Three sentences: 12-token filler, a 4-token carry candidate, then a
+        // sentence that alone exactly fills the 20-token content budget.
+        // Carrying the 4-token sentence in front of it would need 24.
+        let filler = (1..=12)
+            .map(|i| format!("f{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let small = "Alpha beta gamma delta.";
+        let big = (1..=20)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = format!("{filler}. {small} {big}.");
+        let result = chunk_text(&text, &config, &word_counter);
+
+        for chunk in &result.chunks {
+            assert!(
+                word_counter(chunk) <= config.max_tokens,
+                "chunk exceeds budget: {} tokens: {chunk:?}",
+                word_counter(chunk)
+            );
+        }
+        // The oversized sentence must survive intact in ONE chunk — proof no
+        // word-level hard split was needed to rescue an overlap overflow.
+        assert!(
+            result.chunks.iter().any(|c| c.contains("w1 ") && c.contains("w20")),
+            "the budget-filling sentence was split apart: {:?}",
+            result.chunks
+        );
     }
 
     #[test]
