@@ -43,6 +43,11 @@ pub fn pre_init_ort_runtime(offline_mode: bool) {
 struct LazyModel {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
+    /// Truncation-free, padding-free clone of `tokenizer`, used ONLY for
+    /// counting true sequence lengths (`Embedder::count_tokens`). The main
+    /// tokenizer truncates at [`chunking::MODEL_TOKEN_WINDOW`], so it can
+    /// never report how long a text really is.
+    count_tokenizer: Tokenizer,
 }
 
 impl LazyModel {
@@ -92,14 +97,42 @@ impl LazyModel {
             .commit_from_file(&config.model_path)
             .context("Failed to load ONNX model")?;
 
-        let tokenizer = Tokenizer::from_file(&config.tokenizer_path)
+        let mut tokenizer = Tokenizer::from_file(&config.tokenizer_path)
             .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {e}"))?;
 
-        tracing::info!("MiniLM-L6-v2 model loaded successfully");
+        // Enforce the sequence window IN CODE rather than trusting whatever
+        // truncation the shipped tokenizer.json declares. The startup
+        // validation (`validate_sequence_contract`) has already hard-failed if
+        // the shipped truncation is tighter than the window; here we pin it to
+        // exactly MODEL_TOKEN_WINDOW so the chunk budget and the tokenizer can
+        // never disagree again. Params match the shipped MiniLM config
+        // (LongestFirst / stride 0 / right), so this is byte-identical for the
+        // stock tokenizer.
+        use crate::embeddings::chunking::MODEL_TOKEN_WINDOW;
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: MODEL_TOKEN_WINDOW,
+                ..Default::default()
+            }))
+            .map_err(|e| anyhow::anyhow!("Failed to set tokenizer truncation: {e}"))?;
+
+        // Second instance for TRUE length counting: no truncation, no padding.
+        let mut count_tokenizer = Tokenizer::from_file(&config.tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load counting tokenizer: {e}"))?;
+        count_tokenizer
+            .with_truncation(None)
+            .map_err(|e| anyhow::anyhow!("Failed to clear counting truncation: {e}"))?;
+        count_tokenizer.with_padding(None);
+
+        tracing::info!(
+            "MiniLM-L6-v2 model loaded successfully (sequence window: {} tokens)",
+            MODEL_TOKEN_WINDOW
+        );
 
         Ok(Self {
             session: Mutex::new(session),
             tokenizer,
+            count_tokenizer,
         })
     }
 }
@@ -491,6 +524,12 @@ impl MiniLMEmbedder {
             }
         }
 
+        // Startup guard: the chunk budget, the tokenizer's truncation window,
+        // and the ONNX tensor length must agree, or content silently vanishes
+        // past the tightest layer. Runs at construction (i.e. server startup)
+        // even under lazy loading, so the failure is loud and immediate.
+        Self::validate_sequence_contract(&config)?;
+
         let (query_prefix, doc_prefix) = embedder_prefixes();
         let (native_hidden, dimension) = embedder_dims();
         let embedder = Self {
@@ -513,6 +552,89 @@ impl MiniLMEmbedder {
         }
 
         Ok(embedder)
+    }
+
+    /// Validate the three-layer sequence-length contract at startup:
+    ///
+    /// ```text
+    /// chunk budget  ≤  tokenizer truncation window  ≤  ONNX tensor length
+    /// ```
+    ///
+    /// This is the guard for the defect class where the chunker sized chunks
+    /// for ~200 tokens while the shipped tokenizer.json silently truncated at
+    /// 128 — the last third of every full-size chunk never reached the model
+    /// and nothing logged it. Three rules:
+    ///
+    /// 1. `ChunkConfig::default().max_tokens` must be ≤ `MODEL_TOKEN_WINDOW`.
+    /// 2. `MODEL_TOKEN_WINDOW` must be ≤ `config.max_length` (tensor length).
+    /// 3. The truncation declared inside the shipped tokenizer.json must not
+    ///    be TIGHTER than `MODEL_TOKEN_WINDOW`. (Looser is tolerated with a
+    ///    warning — `LazyModel::new` pins truncation to the window at load.)
+    ///
+    /// Hard-fails on violation: a mis-sized window corrupts every embedding
+    /// written after it, so refusing to start is strictly cheaper.
+    fn validate_sequence_contract(config: &EmbeddingConfig) -> Result<()> {
+        use crate::embeddings::chunking::{ChunkConfig, MODEL_TOKEN_WINDOW};
+
+        let chunk_budget = ChunkConfig::default().max_tokens;
+        anyhow::ensure!(
+            chunk_budget <= MODEL_TOKEN_WINDOW,
+            "Sequence contract violated: chunk budget ({chunk_budget} tokens) exceeds the \
+             model token window ({MODEL_TOKEN_WINDOW}). Chunks would be silently truncated \
+             before embedding. Fix ChunkConfig::default() or MODEL_TOKEN_WINDOW."
+        );
+        anyhow::ensure!(
+            MODEL_TOKEN_WINDOW <= config.max_length,
+            "Sequence contract violated: model token window ({MODEL_TOKEN_WINDOW}) exceeds \
+             the ONNX tensor length ({}). Tokens past the tensor length would be dropped. \
+             Fix EmbeddingConfig::max_length or MODEL_TOKEN_WINDOW.",
+            config.max_length
+        );
+
+        // Inspect the truncation the shipped tokenizer.json declares. A window
+        // TIGHTER than the code assumes is exactly the silent-loss bug this
+        // guard exists for — refuse to start.
+        let raw = std::fs::read_to_string(&config.tokenizer_path).with_context(|| {
+            format!(
+                "Sequence contract check: cannot read tokenizer file {:?}",
+                config.tokenizer_path
+            )
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "Sequence contract check: tokenizer file {:?} is not valid JSON",
+                config.tokenizer_path
+            )
+        })?;
+        if let Some(declared) = parsed
+            .get("truncation")
+            .and_then(|t| t.get("max_length"))
+            .and_then(|m| m.as_u64())
+        {
+            let declared = declared as usize;
+            anyhow::ensure!(
+                declared >= MODEL_TOKEN_WINDOW,
+                "Sequence contract violated: tokenizer.json at {:?} declares truncation at \
+                 {declared} tokens, tighter than the assumed model window \
+                 ({MODEL_TOKEN_WINDOW}). Content between {declared} and {MODEL_TOKEN_WINDOW} \
+                 tokens would silently never reach the model. Ship a tokenizer whose \
+                 truncation matches MODEL_TOKEN_WINDOW, or lower MODEL_TOKEN_WINDOW.",
+                config.tokenizer_path
+            );
+            if declared != MODEL_TOKEN_WINDOW {
+                tracing::warn!(
+                    "tokenizer.json declares truncation at {declared} tokens; the runtime \
+                     pins it to MODEL_TOKEN_WINDOW ({MODEL_TOKEN_WINDOW}) at load"
+                );
+            }
+        }
+
+        tracing::debug!(
+            "Sequence contract OK: chunk {chunk_budget} <= window {MODEL_TOKEN_WINDOW} <= \
+             tensor {}",
+            config.max_length
+        );
+        Ok(())
     }
 
     /// Ensure the model is loaded (thread-safe, idempotent)
@@ -745,10 +867,12 @@ impl MiniLMEmbedder {
         tracing::debug!("ONNX: session lock acquired, tokenizing...");
 
         // Tokenize input text
+        let t_tokenize = crate::stage_probe::start();
         let encoding = model
             .tokenizer
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
+        crate::stage_probe::record(t_tokenize, |p, d| p.tokenize += d);
 
         let tokens = encoding.get_ids();
         let attention_mask = encoding.get_attention_mask();
@@ -780,8 +904,11 @@ impl MiniLMEmbedder {
             .iter()
             .any(|i| i.name() == "token_type_ids");
 
-        // Run inference
+        // Run inference. Timed in isolation: `session.run` is the only part of
+        // this function that hardware acceleration could move, so it must be
+        // separable from tokenization, tensor construction, and mean pooling.
         tracing::debug!("ONNX: running inference...");
+        let t_forward = crate::stage_probe::start();
         let outputs = if wants_token_type {
             session.run(ort::inputs![
                 "input_ids" => &input_ids_value,
@@ -794,6 +921,10 @@ impl MiniLMEmbedder {
                 "attention_mask" => &attention_mask_value,
             ])?
         };
+        crate::stage_probe::record(t_forward, |p, d| {
+            p.onnx_forward += d;
+            p.forwards += 1;
+        });
         tracing::debug!("ONNX: inference complete");
 
         // Extract embeddings
@@ -1054,6 +1185,43 @@ impl Embedder for MiniLMEmbedder {
         self.dimension
     }
 
+    /// True sequence length (specials included, no truncation) from the real
+    /// tokenizer. Falls back to the calibrated heuristic when the model is
+    /// unavailable (simplified mode / load failure) — the chunker's
+    /// verification pass re-counts with this same function, so the guarantee
+    /// "no emitted chunk exceeds the budget under the active counter" holds
+    /// either way.
+    fn count_tokens(&self, text: &str) -> usize {
+        use crate::embeddings::chunking::SPECIAL_TOKEN_OVERHEAD;
+        if text.is_empty() {
+            return SPECIAL_TOKEN_OVERHEAD;
+        }
+        if !self.simplified_mode {
+            if let Ok(model) = self.ensure_model_loaded() {
+                if let Ok(encoding) = model.count_tokenizer.encode(text, true) {
+                    return encoding.get_ids().len();
+                }
+            }
+        }
+        crate::token_estimation::estimate_tokens(text) + SPECIAL_TOKEN_OVERHEAD
+    }
+
+    /// Document chunk budget: the model window minus the tokens the document
+    /// instruction prefix will consume at encode time (0 for symmetric
+    /// MiniLM; ~4 for e5's "passage: "). Keeps prefixed sequences inside the
+    /// tokenizer truncation window instead of silently pushing chunk tails
+    /// past it.
+    fn chunk_budget_tokens(&self) -> usize {
+        use crate::embeddings::chunking::{MODEL_TOKEN_WINDOW, SPECIAL_TOKEN_OVERHEAD};
+        if self.doc_prefix.is_empty() {
+            return MODEL_TOKEN_WINDOW;
+        }
+        let prefix_tokens = self
+            .count_tokens(&self.doc_prefix)
+            .saturating_sub(SPECIAL_TOKEN_OVERHEAD);
+        MODEL_TOKEN_WINDOW.saturating_sub(prefix_tokens)
+    }
+
     fn encode_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -1239,6 +1407,108 @@ mod tests {
         assert_eq!(embeddings.len(), 3);
         for emb in embeddings {
             assert_eq!(emb.len(), 384);
+        }
+    }
+
+    /// Sequence-contract validation must pass on the shipped model assets and
+    /// must hard-fail on a tokenizer whose truncation is tighter than the
+    /// assumed window (the exact defect class this guard exists for).
+    ///
+    /// Asset-gated like the other real-model tests: skips when the tokenizer
+    /// has not been downloaded (CI fetches model assets before testing).
+    #[test]
+    fn test_sequence_contract_validation() {
+        use crate::embeddings::chunking::MODEL_TOKEN_WINDOW;
+
+        let config = EmbeddingConfig::from_env();
+        if !config.tokenizer_path.exists() {
+            eprintln!(
+                "skipping test_sequence_contract_validation: tokenizer not present at {:?}",
+                config.tokenizer_path
+            );
+            return;
+        }
+
+        // 1. The shipped assets satisfy the contract.
+        MiniLMEmbedder::validate_sequence_contract(&config)
+            .expect("shipped tokenizer must satisfy the sequence contract");
+
+        // 2. A tokenizer that truncates TIGHTER than the window must be
+        // rejected loudly, not silently truncate chunk tails.
+        let dir = std::env::temp_dir().join("shodh-seq-contract-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tight_path = dir.join("tokenizer.json");
+        let raw = std::fs::read_to_string(&config.tokenizer_path).unwrap();
+        let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        parsed["truncation"]["max_length"] =
+            serde_json::Value::from((MODEL_TOKEN_WINDOW / 2) as u64);
+        std::fs::write(&tight_path, serde_json::to_string(&parsed).unwrap()).unwrap();
+
+        let tight_config = EmbeddingConfig {
+            tokenizer_path: tight_path,
+            ..config
+        };
+        let err = MiniLMEmbedder::validate_sequence_contract(&tight_config)
+            .expect_err("tighter-than-window truncation must fail the contract");
+        assert!(
+            err.to_string().contains("Sequence contract violated"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// End-to-end guarantee with the REAL tokenizer: every chunk the
+    /// production chunker emits for a long text fits the model window — i.e.
+    /// the loaded (truncating) tokenizer does not drop a single token of any
+    /// chunk. This is the regression test for the silent-truncation defect
+    /// (chunks sized ~200 tokens vs tokenizer window 128).
+    ///
+    /// Asset-gated: skips when model assets are not downloaded.
+    #[test]
+    fn test_chunks_fit_real_tokenizer_window() {
+        use crate::embeddings::chunking::{chunk_text, ChunkConfig, MODEL_TOKEN_WINDOW};
+        use crate::embeddings::Embedder;
+
+        let config = EmbeddingConfig::from_env();
+        if !config.tokenizer_path.exists() {
+            eprintln!(
+                "skipping test_chunks_fit_real_tokenizer_window: tokenizer not present at {:?}",
+                config.tokenizer_path
+            );
+            return;
+        }
+
+        let embedder = MiniLMEmbedder::new(config.clone()).expect("embedder init");
+
+        // A realistic long memory: prose paragraphs well past the window
+        // (the old chunker produced ~800-char chunks ≈ 170-200 tokens here).
+        let text = (1..=60)
+            .map(|i| {
+                format!(
+                    "Finding number {i}: the retrieval subsystem logged a measurable \
+                     latency regression after the index rebuild completed on node {i}."
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let budget = embedder.chunk_budget_tokens();
+        assert!(budget <= MODEL_TOKEN_WINDOW);
+        let chunk_config = ChunkConfig::for_budget(budget);
+        let counter = |t: &str| embedder.count_tokens(t);
+        let result = chunk_text(&text, &chunk_config, &counter);
+        assert!(result.was_chunked, "long text must be chunked");
+
+        // Count with a truncation-free tokenizer: every chunk must TRULY fit.
+        let mut free = Tokenizer::from_file(&config.tokenizer_path).unwrap();
+        free.with_truncation(None).unwrap();
+        free.with_padding(None);
+        for chunk in &result.chunks {
+            let true_len = free.encode(chunk.as_str(), true).unwrap().get_ids().len();
+            assert!(
+                true_len <= MODEL_TOKEN_WINDOW,
+                "chunk exceeds the model window ({true_len} > {MODEL_TOKEN_WINDOW} tokens): \
+                 its tail would be silently truncated: {chunk:?}"
+            );
         }
     }
 }
