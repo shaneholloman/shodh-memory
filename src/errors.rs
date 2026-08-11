@@ -365,8 +365,14 @@ mod tests {
         ));
         let message = leaky.client_message();
 
-        assert!(!message.contains("alice@example.com"), "user id reached the client body");
-        assert!(!message.contains("/Users/alice"), "filesystem path reached the client body");
+        assert!(
+            !message.contains("alice@example.com"),
+            "user id reached the client body"
+        );
+        assert!(
+            !message.contains("/Users/alice"),
+            "filesystem path reached the client body"
+        );
         assert!(message.contains("logged server-side"));
 
         // The detail still exists for the operator — it is what IntoResponse logs.
