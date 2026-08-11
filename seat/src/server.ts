@@ -203,8 +203,15 @@ export class SeatServer {
 		this.deps = deps;
 		this.server = http.createServer((request, response) => {
 			this.route(request, response).catch((error) => {
-				const status = error instanceof HttpError ? error.status : 500;
-				const message = error instanceof Error ? error.message : String(error);
+				// Only HttpError messages are written for clients. Anything else is an
+				// internal failure whose text (file paths, backend URLs) stays in the
+				// server log — same rule the health route documents for its detail field.
+				const isHttpError = error instanceof HttpError;
+				const status = isHttpError ? error.status : 500;
+				const message = isHttpError ? error.message : "Internal server error";
+				if (!isHttpError) {
+					console.error("[seat] unhandled route error:", error);
+				}
 				if (!response.headersSent) {
 					sendJson(response, status, { error: message });
 				} else {
@@ -422,7 +429,10 @@ export class SeatServer {
 			const health = await this.deps.backend.health();
 			backend = { ok: health.status === "ok" || health.status === "healthy", detail: health.status };
 		} catch (error) {
-			backend = { ok: false, detail: error instanceof Error ? error.message : String(error) };
+			// The probe's failure text can quote the backend URL — see the note on
+			// mcp_servers below for why that never goes out unauthenticated.
+			console.error("[seat] backend health probe failed:", error);
+			backend = { ok: false, detail: "unreachable" };
 		}
 		sendJson(response, backend.ok ? 200 : 503, {
 			seat: "ok",
