@@ -31,7 +31,10 @@
 import * as crypto from "node:crypto";
 import * as http from "node:http";
 import type { AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
-import type { ShodhBackend } from "./backend.js";
+import type { ShodhBackend, HealthDetail } from "./backend.js";
+// Value import, not type-only: handleHealth narrows with `instanceof`, which
+// needs the runtime binding.
+import { ShodhBackendError, healthDetailForHttp } from "./backend.js";
 import type { SeatConfig } from "./config.js";
 import {
 	Conversation,
@@ -424,15 +427,29 @@ export class SeatServer {
 	}
 
 	private async handleHealth(response: http.ServerResponse): Promise<void> {
-		let backend: { ok: boolean; detail: string };
+		let backend: { ok: boolean; detail: HealthDetail | "healthy" | "ok" | "unexpected-status" };
 		try {
 			const health = await this.deps.backend.health();
-			backend = { ok: health.status === "ok" || health.status === "healthy", detail: health.status };
+			const known = health.status === "ok" || health.status === "healthy";
+			// Normalised rather than echoed: `detail` is a closed vocabulary on the
+			// failure path, and a field that is an enum in one branch and free text
+			// in the other is a contract nobody can rely on.
+			backend = { ok: known, detail: known ? (health.status as "ok" | "healthy") : "unexpected-status" };
 		} catch (error) {
-			// The probe's failure text can quote the backend URL — see the note on
-			// mcp_servers below for why that never goes out unauthenticated.
+			// The probe's message quotes the backend host and port, so it stays in
+			// this log and never reaches the response. What makes `kind` safe to
+			// publish is that it is one of a fixed set of literals — not the trust
+			// level of the caller, which on this route is none: route() answers
+			// /healthz before authorize().
 			console.error("[seat] backend health probe failed:", error);
-			backend = { ok: false, detail: "unreachable" };
+			const failure = error instanceof ShodhBackendError ? error : null;
+			backend = {
+				ok: false,
+				// An HTTP status means the backend answered — reachable, and erroring.
+				// Collapsing that into "unreachable" sends operators to the network
+				// when the problem is the service. Status codes carry no secrets.
+				detail: failure?.kind === "http" ? healthDetailForHttp(failure.status) : (failure?.kind ?? "other"),
+			};
 		}
 		sendJson(response, backend.ok ? 200 : 503, {
 			seat: "ok",
