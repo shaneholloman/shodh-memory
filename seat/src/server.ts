@@ -31,9 +31,18 @@
 import * as crypto from "node:crypto";
 import * as http from "node:http";
 import type { AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
-import type { ShodhBackend } from "./backend.js";
+import type { ShodhBackend, HealthDetail } from "./backend.js";
+// Value import, not type-only: handleHealth narrows with `instanceof`, which
+// needs the runtime binding.
+import { ShodhBackendError, healthDetailForHttp } from "./backend.js";
 import type { SeatConfig } from "./config.js";
-import { Conversation, ConversationBusyError, type ConversationDeps, UnknownModelError } from "./conversation.js";
+import {
+	Conversation,
+	ConversationBusyError,
+	type ConversationDeps,
+	type MemoryMechanisms,
+	UnknownModelError,
+} from "./conversation.js";
 import type { SeatEvent } from "./events.js";
 import { LedgerError, type LearningLedger } from "./ledger.js";
 import { type McpHost, UnknownMcpServerError } from "./mcp.js";
@@ -61,6 +70,31 @@ interface CreateConversationBody {
 	model?: string;
 	system_prompt?: string;
 	harness_learning?: boolean;
+	/** Per-mechanism overrides (A/B evaluation arms); absent fields keep their ON defaults. */
+	memory_mechanisms?: {
+		guidance?: boolean;
+		proactive_framing?: boolean;
+		proactive_max?: number;
+		recall_lineage?: boolean;
+		verify_loop?: boolean;
+		mcp_memory_tool_filter?: boolean;
+	};
+}
+
+/** Map the wire's snake_case mechanism overrides onto MemoryMechanisms fields. */
+function parseMechanisms(body: CreateConversationBody): Partial<MemoryMechanisms> | undefined {
+	const wire = body.memory_mechanisms;
+	if (!wire || typeof wire !== "object") return undefined;
+	const overrides: Partial<MemoryMechanisms> = {};
+	if (typeof wire.guidance === "boolean") overrides.guidance = wire.guidance;
+	if (typeof wire.proactive_framing === "boolean") overrides.proactiveFraming = wire.proactive_framing;
+	if (typeof wire.proactive_max === "number" && Number.isInteger(wire.proactive_max) && wire.proactive_max >= 1 && wire.proactive_max <= 10) {
+		overrides.proactiveMax = wire.proactive_max;
+	}
+	if (typeof wire.recall_lineage === "boolean") overrides.recallLineage = wire.recall_lineage;
+	if (typeof wire.verify_loop === "boolean") overrides.verifyLoop = wire.verify_loop;
+	if (typeof wire.mcp_memory_tool_filter === "boolean") overrides.mcpMemoryToolFilter = wire.mcp_memory_tool_filter;
+	return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
 class HttpError extends Error {
@@ -172,8 +206,15 @@ export class SeatServer {
 		this.deps = deps;
 		this.server = http.createServer((request, response) => {
 			this.route(request, response).catch((error) => {
-				const status = error instanceof HttpError ? error.status : 500;
-				const message = error instanceof Error ? error.message : String(error);
+				// Only HttpError messages are written for clients. Anything else is an
+				// internal failure whose text (file paths, backend URLs) stays in the
+				// server log — same rule the health route documents for its detail field.
+				const isHttpError = error instanceof HttpError;
+				const status = isHttpError ? error.status : 500;
+				const message = isHttpError ? error.message : "Internal server error";
+				if (!isHttpError) {
+					console.error("[seat] unhandled route error:", error);
+				}
 				if (!response.headersSent) {
 					sendJson(response, status, { error: message });
 				} else {
@@ -386,12 +427,29 @@ export class SeatServer {
 	}
 
 	private async handleHealth(response: http.ServerResponse): Promise<void> {
-		let backend: { ok: boolean; detail: string };
+		let backend: { ok: boolean; detail: HealthDetail | "healthy" | "ok" | "unexpected-status" };
 		try {
 			const health = await this.deps.backend.health();
-			backend = { ok: health.status === "ok" || health.status === "healthy", detail: health.status };
+			const known = health.status === "ok" || health.status === "healthy";
+			// Normalised rather than echoed: `detail` is a closed vocabulary on the
+			// failure path, and a field that is an enum in one branch and free text
+			// in the other is a contract nobody can rely on.
+			backend = { ok: known, detail: known ? (health.status as "ok" | "healthy") : "unexpected-status" };
 		} catch (error) {
-			backend = { ok: false, detail: error instanceof Error ? error.message : String(error) };
+			// The probe's message quotes the backend host and port, so it stays in
+			// this log and never reaches the response. What makes `kind` safe to
+			// publish is that it is one of a fixed set of literals — not the trust
+			// level of the caller, which on this route is none: route() answers
+			// /healthz before authorize().
+			console.error("[seat] backend health probe failed:", error);
+			const failure = error instanceof ShodhBackendError ? error : null;
+			backend = {
+				ok: false,
+				// An HTTP status means the backend answered — reachable, and erroring.
+				// Collapsing that into "unreachable" sends operators to the network
+				// when the problem is the service. Status codes carry no secrets.
+				detail: failure?.kind === "http" ? healthDetailForHttp(failure.status) : (failure?.kind ?? "other"),
+			};
 		}
 		sendJson(response, backend.ok ? 200 : 503, {
 			seat: "ok",
@@ -451,6 +509,7 @@ export class SeatServer {
 				// Default true; `harness_learning: false` exists for A/B evaluation
 				// control arms only (see ConversationOptions.harnessLearning).
 				harnessLearning: body.harness_learning !== false,
+				memoryMechanisms: parseMechanisms(body),
 			});
 		} catch (error) {
 			throw new HttpError(400, error instanceof Error ? error.message : String(error));

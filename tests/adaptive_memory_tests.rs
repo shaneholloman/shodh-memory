@@ -635,8 +635,13 @@ fn test_fact_type_default() {
 
 #[test]
 fn test_consolidation_result_structure() {
+    // `memories_eligible` is deliberately different from `memories_processed`.
+    // The two are distinct counts — processed is what was looked at, eligible
+    // is what passed the age gate — and giving them the same value here would
+    // let a future swap of the two fields slip past this test.
     let result = ConsolidationResult {
         memories_processed: 10,
+        memories_eligible: 8,
         facts_extracted: 3,
         facts_reinforced: 5,
         new_fact_ids: vec!["f1".to_string(), "f2".to_string(), "f3".to_string()],
@@ -644,6 +649,7 @@ fn test_consolidation_result_structure() {
     };
 
     assert_eq!(result.memories_processed, 10);
+    assert_eq!(result.memories_eligible, 8);
     assert_eq!(result.facts_extracted, 3);
     assert_eq!(result.facts_reinforced, 5);
     assert_eq!(result.new_fact_ids.len(), 3);
@@ -963,7 +969,25 @@ fn test_adaptive_memory_workflow() {
     assert!(stats.memories_processed > 0);
 
     let graph_stats = system.graph_stats();
-    assert!(graph_stats.node_count > 0 || graph_stats.edge_count >= 0);
+    // Pins the SHIPPED semantics of the memory-to-memory coactivation layer,
+    // which has been inert since f6b730ee (2026-07-10): SHODH_COACT_STRENGTHEN_ONLY
+    // defaults true, but the only writer of the `mem_edge:` index lives in the
+    // now-dead `!strengthen_only` branch, so strengthen-only mode has nothing to
+    // strengthen. Reinforcing a tracked recall therefore leaves this graph empty.
+    //
+    // The previous assertion here was `node_count > 0 || edge_count >= 0`. Both
+    // counts are unsigned, so `>= 0` is a tautology and the disjunction could
+    // never fail — which is precisely why these two tests kept passing while the
+    // layer went inert underneath them.
+    //
+    // This is deliberately NOT asserting `> 0`: whether to remove the inert
+    // machinery or revive it with bounded seeding is an open owner decision, and
+    // asserting the revived behaviour would pre-empt it. If the layer is revived,
+    // this assertion must be updated as part of that change.
+    assert_eq!(
+        graph_stats.node_count, 0,
+        "memory coactivation layer is inert by default; reviving it must update this test: {graph_stats:?}"
+    );
 
     let prefetch = AnticipatoryPrefetch::new();
     let ctx = PrefetchContext {
@@ -992,7 +1016,14 @@ fn test_graph_maintenance() {
     system.graph_maintenance();
 
     let stats = system.graph_stats();
-    assert!(stats.node_count >= 0);
+    // Same shipped-semantics pin as in test_adaptive_memory_workflow: the
+    // memory-to-memory coactivation layer is inert, so maintenance runs over an
+    // empty graph. The old `node_count >= 0` was a tautology on an unsigned
+    // count and asserted nothing at all.
+    assert_eq!(
+        stats.node_count, 0,
+        "memory coactivation layer is inert by default; reviving it must update this test: {stats:?}"
+    );
 }
 
 #[test]

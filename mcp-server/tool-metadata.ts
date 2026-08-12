@@ -411,11 +411,6 @@ export const TOOL_OUTPUT_SCHEMAS: Record<string, JsonSchemaObject> = {
       total_retrievals: { type: "number" },
       graph_nodes: { type: "number" },
       graph_edges: { type: "number" },
-      memory_types: {
-        type: "object",
-        description: "Count keyed by memory type, when the backend reports the breakdown",
-        additionalProperties: { type: "number" },
-      },
     },
     required: ["total_memories"],
   },

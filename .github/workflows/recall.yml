@@ -65,7 +65,7 @@ jobs:
     # 60min keeps headroom for cold builds and unusually slow runners.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -86,7 +86,7 @@ jobs:
       # Assets are published as a repo release and cached by tag.
       - name: Cache GLiNER typer assets
         id: gliner-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: models/gliner-bi-edge
           key: gliner-bi-edge-onnx-v1
@@ -109,7 +109,7 @@ jobs:
       # embedder would make the recall numbers meaningless.
       - name: Cache MiniLM embedder weights
         id: minilm-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: models/minilm-l6
           key: minilm-l6-c9745ed1-v1
@@ -192,7 +192,7 @@ jobs:
 
       - name: Upload JSON report
         if: always() && hashFiles('current.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: recall-eval-report
           path: |
