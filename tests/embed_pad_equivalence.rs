@@ -198,7 +198,10 @@ fn probe_model(model_path: &std::path::Path, tokenizer_path: &std::path::Path, m
         .commit_from_file(model_path)
         .unwrap();
     let tokenizer = Tokenizer::from_file(tokenizer_path).unwrap();
-    let wants_token_type = session.inputs().iter().any(|i| i.name() == "token_type_ids");
+    let wants_token_type = session
+        .inputs()
+        .iter()
+        .any(|i| i.name() == "token_type_ids");
 
     // ── Corpus: all 100 real locomo-gate queries + longer texts spanning the
     //    length range up to and beyond the tokenizer's 128 truncation. ────────
@@ -227,9 +230,30 @@ fn probe_model(model_path: &std::path::Path, tokenizer_path: &std::path::Path, m
     let enc = tokenizer.encode(texts[0].as_str(), true).unwrap();
     let (toks, msk) = (enc.get_ids().to_vec(), enc.get_attention_mask().to_vec());
     // warm up the 256 shape so the control measures steady state
-    let _ = run_at_length(&mut session, &toks, &msk, max_length, hidden, wants_token_type);
-    let c1 = run_at_length(&mut session, &toks, &msk, max_length, hidden, wants_token_type);
-    let c2 = run_at_length(&mut session, &toks, &msk, max_length, hidden, wants_token_type);
+    let _ = run_at_length(
+        &mut session,
+        &toks,
+        &msk,
+        max_length,
+        hidden,
+        wants_token_type,
+    );
+    let c1 = run_at_length(
+        &mut session,
+        &toks,
+        &msk,
+        max_length,
+        hidden,
+        wants_token_type,
+    );
+    let c2 = run_at_length(
+        &mut session,
+        &toks,
+        &msk,
+        max_length,
+        hidden,
+        wants_token_type,
+    );
     let (nd_h, mx_h) = bitwise_diff(&c1.hidden_state, &c2.hidden_state);
     println!(
         "[control] same-shape repeat: hidden diffs = {nd_h}/{} (max {mx_h:e})",
@@ -268,16 +292,24 @@ fn probe_model(model_path: &std::path::Path, tokenizer_path: &std::path::Path, m
             }
         }
 
-        let r256 = run_at_length(&mut session, &toks, &msk, max_length, hidden, wants_token_type);
+        let r256 = run_at_length(
+            &mut session,
+            &toks,
+            &msk,
+            max_length,
+            hidden,
+            wants_token_type,
+        );
         lat_256.push(r256.run_time.as_secs_f64() * 1e3);
 
         for (s, &len) in shapes.iter().enumerate() {
             let r = run_at_length(&mut session, &toks, &msk, len, hidden, wants_token_type);
-            verdicts[s].latencies_ms.push(r.run_time.as_secs_f64() * 1e3);
+            verdicts[s]
+                .latencies_ms
+                .push(r.run_time.as_secs_f64() * 1e3);
             // Primary: raw hidden state at true (masked-in) positions only.
             let valid = true_len * hidden;
-            let (ndh, mxh) =
-                bitwise_diff(&r256.hidden_state[..valid], &r.hidden_state[..valid]);
+            let (ndh, mxh) = bitwise_diff(&r256.hidden_state[..valid], &r.hidden_state[..valid]);
             // Secondary: final embeddings.
             let (nde, mxe) = bitwise_diff(&r256.embedding, &r.embedding);
             let cos = cosine(&r256.embedding, &r.embedding);
@@ -317,7 +349,10 @@ fn probe_model(model_path: &std::path::Path, tokenizer_path: &std::path::Path, m
         true_lens[n / 2],
         true_lens[n - 1]
     );
-    println!("pad-256 session.run p50 = {:.2} ms", median(lat_256.clone()));
+    println!(
+        "pad-256 session.run p50 = {:.2} ms",
+        median(lat_256.clone())
+    );
     for (s, name) in shape_names.iter().enumerate() {
         let v = &verdicts[s];
         println!(
@@ -354,7 +389,11 @@ fn padded_vs_dynamic_equivalence() {
     // Model 1: whatever the production env resolution picks (on this machine:
     // ../models/minilm-l6/model_quantized.onnx — mislabeled fp32, used by the
     // local recall gate).
-    probe_model(&config.model_path, &config.tokenizer_path, config.max_length);
+    probe_model(
+        &config.model_path,
+        &config.tokenizer_path,
+        config.max_length,
+    );
 
     // Model 2: the real quint8_avx2 dynamic-quantized export from the
     // auto-download cache (what fresh installs run). Skip silently if absent.
