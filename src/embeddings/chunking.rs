@@ -487,7 +487,10 @@ mod tests {
         // The oversized sentence must survive intact in ONE chunk — proof no
         // word-level hard split was needed to rescue an overlap overflow.
         assert!(
-            result.chunks.iter().any(|c| c.contains("w1 ") && c.contains("w20")),
+            result
+                .chunks
+                .iter()
+                .any(|c| c.contains("w1 ") && c.contains("w20")),
             "the budget-filling sentence was split apart: {:?}",
             result.chunks
         );
@@ -596,7 +599,10 @@ mod tests {
         // Every turn is <= budget, so no chunk may contain a partial turn:
         // each speaker prefix in a chunk starts at a line boundary.
         for chunk in &result.chunks {
-            for (i, _) in chunk.match_indices("Alice:").chain(chunk.match_indices("Bob:")) {
+            for (i, _) in chunk
+                .match_indices("Alice:")
+                .chain(chunk.match_indices("Bob:"))
+            {
                 assert!(
                     i == 0 || chunk.as_bytes()[i - 1] == b'\n',
                     "turn split mid-chunk: {chunk:?}"
@@ -626,8 +632,7 @@ mod tests {
     fn pathological_single_token_run_is_bisected() {
         let config = cfg(10, 2);
         // Counter that charges 1 token per 4 chars — a 400-char unbroken blob.
-        let char_counter =
-            |t: &str| t.chars().count().div_ceil(4) + SPECIAL_TOKEN_OVERHEAD;
+        let char_counter = |t: &str| t.chars().count().div_ceil(4) + SPECIAL_TOKEN_OVERHEAD;
         let blob = "x".repeat(400);
         let result = chunk_text(&blob, &config, &char_counter);
         for chunk in &result.chunks {
