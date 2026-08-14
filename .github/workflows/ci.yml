@@ -116,9 +116,28 @@ jobs:
         working-directory: front/ui
         run: npm ci
 
+      # The Rust side has `cargo audit` wired in, so a Rust advisory fails the
+      # build. front/ui had nothing equivalent, which meant JavaScript
+      # advisories were invisible: nanoid sat on a high-severity infinite-loop
+      # advisory (GHSA-2v37-7h3g-55p8) through every green PR until someone
+      # happened to run `npm install` by hand. `--audit-level=high` matches the
+      # Rust gate — moderate and low are reported without failing.
+      - name: Audit
+        working-directory: front/ui
+        run: npm audit --audit-level=high
+
       - name: Typecheck
         working-directory: front/ui
         run: npx tsc -b --noEmit
+
+      # front/ui had no test runner at all until now, so a logic regression in
+      # the API layer could only be caught by a human opening the dashboard.
+      # isHumanProfile decides which profiles a person is ever shown, including
+      # the auto-select on first load — when it was too permissive the app
+      # opened on `.mcp-shims` and every surface truthfully reported empty.
+      - name: Test
+        working-directory: front/ui
+        run: npm test
 
       - name: Build
         working-directory: front/ui
@@ -148,6 +167,43 @@ jobs:
           echo "### Dashboard Build" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Single self-contained artifact: $SIZE bytes" >> $GITHUB_STEP_SUMMARY
+
+  seat:
+    name: Seat Harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: seat/package-lock.json
+
+      # seat/ was not compiled or tested by any workflow, so its type surface
+      # could break and every PR would still be green — the same gap the
+      # dashboard job above was added to close. It matters more than usual
+      # here: seat/src/backend.ts classifies backend failures into a closed
+      # vocabulary that GET /healthz publishes UNAUTHENTICATED, and the
+      # guarantee that only those literals can reach the response is enforced
+      # by the type checker. Nothing else enforces it.
+      - name: Install
+        working-directory: seat
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: seat
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: seat
+        run: npm run build
+
+      # Includes live-socket probes against closed ports and an unresolvable
+      # host: the classifier decodes shapes Node produces, and only a real
+      # socket proves those are the shapes it actually gets.
+      - name: Test
+        working-directory: seat
+        run: npm test
 
   feature-gates:
     name: Optional Features Compile
@@ -843,7 +899,7 @@ jobs:
     # skipped on pull requests (if: push to main), so requiring
     # `result == 'success'` here would fail every PR.
     needs:
-      [version-check, format, clippy, build, test-unit, test-integration, security, frontend, feature-gates, benchmark]
+      [version-check, format, clippy, build, test-unit, test-integration, security, frontend, seat, feature-gates, benchmark]
     if: always()
     steps:
       - name: Generate final summary
@@ -861,6 +917,7 @@ jobs:
           integration_icon="${{ needs.test-integration.result == 'success' && '✅' || '❌' }}"
           security_icon="${{ needs.security.result == 'success' && '✅' || '❌' }}"
           frontend_icon="${{ needs.frontend.result == 'success' && '✅' || '❌' }}"
+          seat_icon="${{ needs.seat.result == 'success' && '✅' || '❌' }}"
           features_icon="${{ needs.feature-gates.result == 'success' && '✅' || '❌' }}"
           bench_icon="${{ needs.benchmark.result == 'success' && '✅' || '⚠️' }}"
 
@@ -872,6 +929,7 @@ jobs:
           echo "| Integration Tests (Tier 2) | $integration_icon ${{ needs.test-integration.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Security Audit | $security_icon ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Dashboard Build | $frontend_icon ${{ needs.frontend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Seat Harness | $seat_icon ${{ needs.seat.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Optional Features Compile | $features_icon ${{ needs.feature-gates.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Benchmarks | $bench_icon ${{ needs.benchmark.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -884,6 +942,7 @@ jobs:
                 "${{ needs.test-integration.result }}" == "success" && \
                 "${{ needs.security.result }}" == "success" && \
                 "${{ needs.frontend.result }}" == "success" && \
+                "${{ needs.seat.result }}" == "success" && \
                 "${{ needs.feature-gates.result }}" == "success" ]]; then
             echo "### All critical checks passed" >> $GITHUB_STEP_SUMMARY
             exit 0
