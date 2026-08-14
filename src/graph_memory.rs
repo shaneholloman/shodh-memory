@@ -10027,7 +10027,10 @@ mod tests {
 
         // Outcome path on the same cold graph: all pairs are minted.
         let minted = graph.record_memory_coactivation_outcome(&ids).unwrap();
-        assert_eq!(minted, 3, "outcome-gated coactivation must mint all 3 pairs");
+        assert_eq!(
+            minted, 3,
+            "outcome-gated coactivation must mint all 3 pairs"
+        );
         assert_eq!(
             graph.get_stats().unwrap().relationship_count,
             3,
