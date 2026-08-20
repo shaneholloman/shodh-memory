@@ -114,6 +114,38 @@ pub const DELETION_RATIO_THRESHOLD: f32 = 0.30;
 /// Below this threshold, rebuild is strongly recommended
 pub const MIN_ACCEPTABLE_RECALL: f32 = 0.85;
 
+/// Environment variable selecting the query-time search list size (DiskANN `L`).
+pub const SEARCH_EF_ENV: &str = "SHODH_VAMANA_EF";
+
+/// Parse a query-time search list size from its raw environment value.
+///
+/// Returns `None` — meaning "leave the beam at the requested candidate count",
+/// i.e. the historical behaviour — for an absent, empty, unparseable or zero
+/// value. Split out as a pure function so it can be unit tested without
+/// mutating process environment (which races under a parallel test runner).
+fn parse_search_ef(raw: Option<&str>) -> Option<usize> {
+    raw?.trim().parse::<usize>().ok().filter(|&v| v > 0)
+}
+
+/// Query-time search list size from [`SEARCH_EF_ENV`], resolved once per process.
+///
+/// `None` (the default, variable unset) keeps `L = k`, so the shipped search
+/// path is unchanged. A value larger than the internal candidate count widens
+/// the beam; a smaller one is ignored (the beam is clamped up to `k`).
+///
+/// Cached in a `OnceLock` because `search()` is on the per-query hot path and
+/// the eval/production environment is fixed at process start.
+fn configured_search_ef() -> Option<usize> {
+    static SEARCH_EF: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *SEARCH_EF.get_or_init(|| {
+        let parsed = parse_search_ef(std::env::var(SEARCH_EF_ENV).ok().as_deref());
+        if let Some(ef) = parsed {
+            info!("Vamana query-time search list size ({SEARCH_EF_ENV}) = {ef}");
+        }
+        parsed
+    })
+}
+
 /// Main Vamana index
 pub struct VamanaIndex {
     pub(crate) config: VamanaConfig,
@@ -568,14 +600,44 @@ impl VamanaIndex {
         }
     }
 
-    /// Greedy search for nearest neighbors
+    /// Greedy search for nearest neighbors with the search list tied to `k`.
+    ///
+    /// Equivalent to [`Self::greedy_search_beam`] with `beam == k`.
+    fn greedy_search(&self, query: &[f32], k: usize, entry: u32) -> Result<Vec<SearchCandidate>> {
+        self.greedy_search_beam(query, k, k, entry)
+    }
+
+    /// Greedy search over the Vamana graph keeping a search list of
+    /// `L = max(beam, k)` candidates, returning the best `k` of them.
+    ///
+    /// DiskANN searches with a list size `L >= k` and reports the top `k` from
+    /// it. A larger `L` explores more of the graph, so both the *reach* (which
+    /// true neighbours are found at all) and the *order* of the returned `k`
+    /// move towards exact. This index previously hard-wired `L = k`, which is
+    /// maximally myopic for small `k` — at `k = 1` it degenerates to pure
+    /// hill-climbing, and `VamanaConfig::search_list_size` was consulted only
+    /// for `with_capacity` hints, never as an actual query-time beam.
+    ///
+    /// `beam` is clamped UP to `k`, so it can only ever widen the search; the
+    /// `beam == k` call site ([`Self::greedy_search`]) behaves exactly as the
+    /// previous implementation did.
     ///
     /// Optimized to use zero-copy slice access for vector data.
     /// Holds both graph and vector storage locks for the duration of the search
     /// to avoid per-neighbor lock acquisition overhead.
-    fn greedy_search(&self, query: &[f32], k: usize, entry: u32) -> Result<Vec<SearchCandidate>> {
+    fn greedy_search_beam(
+        &self,
+        query: &[f32],
+        k: usize,
+        beam: usize,
+        entry: u32,
+    ) -> Result<Vec<SearchCandidate>> {
         let graph = self.graph.read();
         let storage = self.vectors.read(); // Hold lock for entire search (zero-copy access)
+
+        // Search list size. Never below k — a beam smaller than the requested
+        // result count could not return k results.
+        let list_size = beam.max(k);
 
         let search_cap = self.config.search_list_size;
         let mut visited = HashSet::with_capacity(search_cap);
@@ -627,7 +689,8 @@ impl VamanaIndex {
                 let dist = self.distance(query, neighbor_slice);
 
                 // Defensive: check if closer than worst in w, or w not yet full
-                let should_add = w.len() < k || w.peek().map(|p| dist < p.distance).unwrap_or(true);
+                let should_add =
+                    w.len() < list_size || w.peek().map(|p| dist < p.distance).unwrap_or(true);
                 if should_add {
                     candidates.push(Reverse(SearchCandidate {
                         id: neighbor_id,
@@ -639,19 +702,21 @@ impl VamanaIndex {
                         distance: dist,
                     });
 
-                    if w.len() > k {
+                    if w.len() > list_size {
                         w.pop();
                     }
                 }
             }
         }
 
-        // Extract results
+        // Extract results: the search list holds up to `list_size` candidates;
+        // report only the best `k`. A no-op when `list_size == k` (the default).
         let mut results = Vec::new();
         while let Some(candidate) = w.pop() {
             results.push(candidate);
         }
         results.reverse();
+        results.truncate(k);
 
         Ok(results)
     }
@@ -761,7 +826,27 @@ impl VamanaIndex {
     }
 
     /// Search for k nearest neighbors (excludes soft-deleted vectors)
+    ///
+    /// The search list size is taken from `SHODH_VAMANA_EF` (see
+    /// [`configured_search_ef`]); unset — the default — leaves the beam equal
+    /// to the requested candidate count, exactly as before.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u32, f32)>> {
+        self.search_with_ef(query, k, configured_search_ef())
+    }
+
+    /// Search for k nearest neighbors with an explicit search list size.
+    ///
+    /// `ef` is the DiskANN search list size `L`. `None` (and any value below
+    /// the internal candidate count) leaves the beam at the candidate count,
+    /// which is the historical behaviour. A larger `ef` widens the beam without
+    /// changing how many results are returned, trading query time for a top-`k`
+    /// that is closer to exact in both membership and order.
+    pub fn search_with_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+    ) -> Result<Vec<(u32, f32)>> {
         // Check if index is empty
         if self.num_vectors.load(std::sync::atomic::Ordering::Acquire) == 0 {
             return Ok(Vec::new());
@@ -794,7 +879,10 @@ impl VamanaIndex {
             k
         };
 
-        let candidates = self.greedy_search(query, search_k, entry)?;
+        // The beam only ever widens: `greedy_search_beam` clamps it up to
+        // `search_k`, so `ef = None` reproduces the historical `L = k` search.
+        let candidates =
+            self.greedy_search_beam(query, search_k, ef.unwrap_or(search_k), entry)?;
 
         // Filter out deleted vectors and take k results
         let results: Vec<(u32, f32)> = candidates
@@ -1800,5 +1888,168 @@ mod tests {
         // Should take no action on fresh index
         let result = index.auto_maintain().unwrap();
         assert_eq!(result, "no_action");
+    }
+
+    // ---------------------------------------------------------------------
+    // Query-time search list size (SHODH_VAMANA_EF)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_search_ef_rejects_non_positive_and_garbage() {
+        assert_eq!(parse_search_ef(None), None);
+        assert_eq!(parse_search_ef(Some("")), None);
+        assert_eq!(parse_search_ef(Some("   ")), None);
+        assert_eq!(parse_search_ef(Some("0")), None);
+        assert_eq!(parse_search_ef(Some("-4")), None);
+        assert_eq!(parse_search_ef(Some("abc")), None);
+        assert_eq!(parse_search_ef(Some("1.5")), None);
+        assert_eq!(parse_search_ef(Some("1")), Some(1));
+        assert_eq!(parse_search_ef(Some(" 256 ")), Some(256));
+    }
+
+    /// Deterministic index built only through `add_vector`, which is the path
+    /// production and the recall harness actually use (no RNG: the random graph
+    /// initialisation lives in `build()`, which this never calls).
+    fn deterministic_incremental_index(n: usize, dim: usize, max_degree: usize) -> VamanaIndex {
+        let mut index = VamanaIndex::new(VamanaConfig {
+            dimension: dim,
+            max_degree,
+            search_list_size: 100,
+            alpha: 1.2,
+            use_mmap: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Deterministic pseudo-random unit vectors: a fixed integer hash, so the
+        // fixture is identical on every machine and every run.
+        for i in 0..n {
+            let mut v = Vec::with_capacity(dim);
+            for d in 0..dim {
+                let h = ((i as u64).wrapping_mul(6_364_136_223_846_793_005)
+                    ^ (d as u64).wrapping_mul(1_442_695_040_888_963_407))
+                .wrapping_mul(2_862_933_555_777_941_757);
+                // 31 random bits mapped to [-1, 1)
+                v.push(((h >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0);
+            }
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for x in &mut v {
+                *x /= norm;
+            }
+            index.add_vector(v).unwrap();
+        }
+        index
+    }
+
+    #[test]
+    fn test_search_ef_none_matches_beam_equal_k() {
+        let index = deterministic_incremental_index(300, 16, 4);
+        let query = index.get_vector(7).unwrap();
+
+        // `ef = None` and any `ef <= k` must both clamp to the k-wide beam,
+        // reproducing the historical search exactly.
+        let base = index.search_with_ef(&query, 10, None).unwrap();
+        let clamped = index.search_with_ef(&query, 10, Some(1)).unwrap();
+        let equal = index.search_with_ef(&query, 10, Some(10)).unwrap();
+
+        assert_eq!(base, clamped, "ef below k must clamp up to k");
+        assert_eq!(base, equal, "ef == k must be the historical behaviour");
+        assert_eq!(base.len(), 10);
+    }
+
+    #[test]
+    fn test_search_ef_returns_exactly_k_in_ascending_distance() {
+        let index = deterministic_incremental_index(300, 16, 4);
+        let query = index.get_vector(11).unwrap();
+
+        let wide = index.search_with_ef(&query, 10, Some(200)).unwrap();
+        assert_eq!(
+            wide.len(),
+            10,
+            "a wider beam must not change how many results are returned"
+        );
+
+        // Exercise the inner contract directly: `search_with_ef` also applies
+        // its own `.take(k)` when filtering soft-deleted ids, so going through
+        // the public path alone cannot tell whether `greedy_search_beam` honours
+        // "search with L, report k" or leaks the whole search list upward.
+        let entry = *index.medoid.read();
+        let raw = index.greedy_search_beam(&query, 10, 200, entry).unwrap();
+        assert_eq!(
+            raw.len(),
+            10,
+            "greedy_search_beam must report k, not the full search list"
+        );
+        for pair in wide.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].1,
+                "results must stay sorted by ascending distance: {:?}",
+                wide
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_ef_widens_beam_and_recovers_true_neighbors() {
+        // Production `max_degree` is 32; the harness index is built purely by
+        // `add_vector`, so this fixture is the same regime the eval runs in.
+        let index = deterministic_incremental_index(3000, 384, 32);
+
+        let k = 10;
+        let mut base_hits = 0usize;
+        let mut wide_hits = 0usize;
+        let mut total = 0usize;
+
+        for q in [3u32, 29, 71, 130, 244, 301, 388, 415, 502, 577] {
+            let query = index.get_vector(q).unwrap();
+            let exact: HashSet<u32> = index
+                .brute_force_search(&query, k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+
+            let base: HashSet<u32> = index
+                .search_with_ef(&query, k, None)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            let wide: HashSet<u32> = index
+                .search_with_ef(&query, k, Some(256))
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+
+            let base_q = base.intersection(&exact).count();
+            let wide_q = wide.intersection(&exact).count();
+
+            // Widening the search list can only ever ADD explored nodes, so it
+            // must never lose a true neighbour the narrow beam already found.
+            assert!(
+                wide_q >= base_q,
+                "query {q}: widening the beam lost ground ({base_q} -> {wide_q})"
+            );
+
+            base_hits += base_q;
+            wide_hits += wide_q;
+            total += exact.len();
+        }
+
+        // The default beam must be genuinely lossy on this fixture — if it were
+        // not, the test could not tell a working `ef` from an ignored one.
+        assert!(
+            base_hits < total,
+            "fixture must be lossy at beam == k, got {base_hits}/{total}"
+        );
+        // ...and the wider beam must strictly recover some of that loss.
+        assert!(
+            wide_hits > base_hits,
+            "ef=256 must beat beam==k: {base_hits}/{total} vs {wide_hits}/{total}"
+        );
+        eprintln!(
+            "vamana ef ablation: beam=k {base_hits}/{total}, ef=256 {wide_hits}/{total}"
+        );
     }
 }
