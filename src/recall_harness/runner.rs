@@ -1105,6 +1105,11 @@ struct LongMemEvalCase {
 }
 
 /// Aggregate LongMemEval result.
+///
+/// Serialisable so that a sharded run can be recombined: every mean is carried
+/// with its own count, so shards aggregate as a count-weighted mean rather than
+/// a mean of means.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LongMemEvalReport {
     pub questions: usize,
     pub recall_at_k: f64,
@@ -1120,6 +1125,24 @@ pub struct LongMemEvalReport {
     pub layers: BTreeMap<String, (f64, usize)>,
 }
 
+/// Resolve a shard's `[start, end)` window over a manifest of `len` cases.
+///
+/// `offset` skips that many cases; `limit` bounds how many follow. Both saturate
+/// at `len`, so an out-of-range shard yields an empty window rather than
+/// panicking — with a fixed shard count and a variable question total, the tail
+/// shards are routinely out of range.
+///
+/// The correctness claim this exists to pin: for `offset = i * per` and
+/// `limit = per`, the windows are disjoint and cover `0..len` exactly once.
+fn shard_window(len: usize, offset: Option<usize>, limit: Option<usize>) -> (usize, usize) {
+    let start = offset.unwrap_or(0).min(len);
+    let end = match limit {
+        Some(n) => start.saturating_add(n).min(len),
+        None => len,
+    };
+    (start, end)
+}
+
 /// Run the LongMemEval-S suite (ICLR 2025, the current SOTA long-term memory
 /// benchmark). UNLIKE LoCoMo, each question carries its OWN ~48-session haystack
 /// (~115K tokens), so this is a LOOP of mini-evals: per question, ingest its
@@ -1133,6 +1156,7 @@ pub struct LongMemEvalReport {
 pub fn run_longmemeval(
     base_dir: &Path,
     storage_root: &Path,
+    offset: Option<usize>,
     limit: Option<usize>,
     k: usize,
     layer_modes: &[LayerMode],
@@ -1146,9 +1170,14 @@ pub fn run_longmemeval(
     for line in manifest_txt.lines().filter(|l| !l.trim().is_empty()) {
         cases.push(serde_json::from_str(line).context("parsing LongMemEval manifest line")?);
     }
-    if let Some(n) = limit {
-        cases.truncate(n);
-    }
+    // Shard selection: skip `offset` cases, then take `limit`. LongMemEval-S
+    // gives every question its OWN ~490-turn haystack, so cost is linear in
+    // questions and a full run cannot fit one job's timeout. Disjoint
+    // (offset, limit) windows let parallel jobs cover the suite exactly once.
+    // The manifest order is deterministic - the converter's `--shuffle` is a
+    // stable sort - so the windows are stable across jobs and across reruns.
+    let (start, end) = shard_window(cases.len(), offset, limit);
+    cases = cases.drain(start..end).collect();
 
     let mut sum_recall = 0.0f64;
     let mut sum_p1 = 0.0f64;
@@ -3398,6 +3427,48 @@ mod tests {
             rank(&pf, "person"),
             rank(&full, "person")
         );
+    }
+
+    #[test]
+    fn shard_windows_tile_the_manifest_exactly_once() {
+        // The property the sharded LongMemEval workflow depends on: with a fixed
+        // shard count and `per = ceil(len / shards)`, the windows are disjoint
+        // and cover every case exactly once. If this breaks, a suite total is
+        // silently computed over duplicated or skipped questions.
+        const SHARDS: usize = 10;
+        for len in [0usize, 1, 7, 9, 10, 11, 47, 50, 149, 150, 479] {
+            let per = len.div_ceil(SHARDS).max(1);
+            let mut covered = vec![0u32; len];
+            for shard in 0..SHARDS {
+                let (start, end) = shard_window(len, Some(shard * per), Some(per));
+                assert!(start <= end, "len={len} shard={shard}: inverted window");
+                assert!(end <= len, "len={len} shard={shard}: window past the end");
+                for slot in covered.iter_mut().take(end).skip(start) {
+                    *slot += 1;
+                }
+            }
+            assert!(
+                covered.iter().all(|&c| c == 1),
+                "len={len}: every case must be covered exactly once, got {covered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_shard_yields_an_empty_window_not_a_panic() {
+        // Routine, not exceptional: the shard count is fixed at 10 while the
+        // question total varies, so the tail shards fall off the end whenever
+        // the total is small.
+        assert_eq!(shard_window(5, Some(50), Some(5)), (5, 5));
+        assert_eq!(shard_window(0, Some(0), Some(5)), (0, 0));
+        assert_eq!(shard_window(5, Some(3), Some(99)), (3, 5));
+    }
+
+    #[test]
+    fn absent_offset_and_limit_select_the_whole_manifest() {
+        assert_eq!(shard_window(42, None, None), (0, 42));
+        assert_eq!(shard_window(42, None, Some(10)), (0, 10));
+        assert_eq!(shard_window(42, Some(10), None), (10, 42));
     }
 
     #[test]
