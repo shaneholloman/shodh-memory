@@ -1935,7 +1935,10 @@ pub fn spreading_activation_retrieve_with_stats(
 
     // Step 6.5: Lateral inhibition — high-scoring memories suppress similar competitors
     // Mimics cortical winner-take-all dynamics (Rumelhart & Zipser 1985)
-    if scored_memories.len() > 1 {
+    // Ablatable as the `lateral_inhibition` family (see `memory::ablation`).
+    // This ran unconditionally with no gate anywhere in the repo, so its effect
+    // had never been measured in either direction.
+    if scored_memories.len() > 1 && crate::memory::ablation::is_enabled("lateral_inhibition") {
         let penalties = calculate_lateral_inhibition(&scored_memories);
         for (i, penalty) in penalties.iter().enumerate() {
             scored_memories[i].final_score -= penalty;
@@ -1979,7 +1982,15 @@ pub fn spreading_activation_retrieve_with_stats(
     // coactivation writes in mod.rs do — the traversed-edge STATS are still
     // collected above (`stats.traversed_edges`) so diagnostics are unaffected,
     // only the persistent strength MUTATION is skipped.
-    if !stats.traversed_edges.is_empty() && !recall_readonly() {
+    // Two independent suppressors, deliberately separate: `recall_readonly()` is
+    // measurement integrity (no recall-path writes during an eval), while the
+    // `graph_potentiation` family ablates THIS mechanism alone. Keeping them
+    // apart is what allows the potentiation write to be measured against a live
+    // run rather than only against a frozen one.
+    if !stats.traversed_edges.is_empty()
+        && !recall_readonly()
+        && crate::memory::ablation::is_enabled("graph_potentiation")
+    {
         if let Err(e) = graph.batch_strengthen_synapses(&stats.traversed_edges) {
             tracing::debug!("Spreading activation edge strengthening failed: {}", e);
         }

@@ -1434,6 +1434,28 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
             "+graph-boost-mult",
             vec![("SHODH_GRAPH_BOOST_MULTIPLICATIVE", "1")],
         ),
+        // Traversal direction. Without this flag `edge_neighbor` returns
+        // `edge.to_entity` unconditionally, so standing on a node and meeting an
+        // edge that ENDS there resolves to the node itself: every incoming edge
+        // is a self-loop and the walk can only follow outgoing edges. Reachable
+        // from the live path (`edge_neighbor` is called inside PPR), so this arm
+        // can differ from baseline.
+        ("+edge-dir", vec![("SHODH_GRAPH_EDGE_DIR", "1")]),
+        // Composition-by-traversal: beam-search the strongest intent-matching
+        // paths from the seeds and inject the reached endpoints. Shipped OFF
+        // since it landed and never carried an arm, so it has never appeared in
+        // the study at all.
+        ("+graph-traverse", vec![("SHODH_GRAPH_TRAVERSE", "1")]),
+        // The two graph-leg components that had no gate before `memory::ablation`
+        // existed, and so had never been ablated in either direction.
+        (
+            "-lateral-inhibition",
+            vec![("SHODH_DISABLE_BOOSTS", "hebbian,lateral_inhibition")],
+        ),
+        (
+            "-graph-potentiation",
+            vec![("SHODH_DISABLE_BOOSTS", "hebbian,graph_potentiation")],
+        ),
         (
             "+graph-boost-mult+expand",
             vec![
@@ -1464,6 +1486,9 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
 
         let mut by_cat: HashMap<SmokeCategory, Vec<f64>> = HashMap::new();
         let mut all: Vec<Metrics> = Vec::with_capacity(cases.len());
+        // Order-sensitive fingerprint over every retrieved id. An arm that
+        // matches baseline here provably changed nothing.
+        let mut fp = std::collections::hash_map::DefaultHasher::new();
         for case in &cases {
             let query = Query {
                 query_text: Some(case.query.clone()),
@@ -1473,6 +1498,14 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
             };
             let memories = system.read().recall(&query).unwrap_or_default();
             let retrieved: Vec<Uuid> = memories.iter().map(|m| m.id.0).collect();
+            {
+                use std::hash::{Hash, Hasher};
+                for id in &retrieved {
+                    id.hash(&mut fp);
+                }
+                // Separator so [a],[b] and [a,b] cannot collide.
+                0xFFu8.hash(&mut fp);
+            }
             let relevance = build_relevance_map(case, &id_map);
             let m = Metrics::compute(&retrieved, &relevance, SMOKE_K);
             by_cat.entry(case.category).or_default().push(m.recall_at_k);
@@ -1501,7 +1534,45 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
             mrr: all.iter().map(|m| m.mrr).sum::<f64>() / n,
             p_at_1: all.iter().map(|m| m.p_at_1).sum::<f64>() / n,
             by_category_recall,
+            retrieval_fingerprint: {
+                use std::hash::Hasher;
+                fp.finish()
+            },
+            vacuous_vs_baseline: false,
         });
+    }
+
+    // Vacuity check. An arm whose retrieved ids are byte-identical to baseline's
+    // did not exercise the code path it names, and its metrics are attributable
+    // to nothing. The `+spread-fix` arms were vacuous this way for months --
+    // SHODH_SPREAD_FIX only reached the legacy BFS spread, but SHODH_PPR defaults
+    // ON and its branch precedes it, so the flag could not execute while the rows
+    // read as evidence. Flag it in the report rather than failing the run: an arm
+    // may also be legitimately inert (it executed and changed no ranking), and
+    // only the fingerprint distinguishes the two.
+    let baseline_fp = rows
+        .iter()
+        .find(|r| r.name.starts_with("baseline"))
+        .map(|r| r.retrieval_fingerprint);
+    if let Some(base) = baseline_fp {
+        for row in rows.iter_mut() {
+            if row.name.starts_with("baseline") || row.flags.is_empty() {
+                continue;
+            }
+            if row.retrieval_fingerprint == base {
+                row.vacuous_vs_baseline = true;
+                tracing::warn!(
+                    arm = %row.name,
+                    flags = %row.flags.join(" "),
+                    "VACUOUS ABLATION ARM: retrieval is byte-identical to baseline, so this                      config did not reach the code path it names. Its numbers measure nothing.                      Confirm the flag is readable from the live path before trusting this row."
+                );
+                eprintln!(
+                    "  !! VACUOUS ARM `{}` ({}) -- byte-identical to baseline, measures nothing",
+                    row.name,
+                    row.flags.join(" ")
+                );
+            }
+        }
     }
 
     Ok(AblationReport {

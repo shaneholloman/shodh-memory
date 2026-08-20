@@ -6,6 +6,7 @@
 //! - Multi-modal retrieval (similarity, temporal, causal)
 //! - Automatic memory consolidation
 
+pub mod ablation;
 pub mod compression;
 pub mod context;
 pub mod facts;
@@ -3632,60 +3633,12 @@ impl MemorySystem {
 
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
-        // SHODH_DISABLE_BOOSTS=<family,...> — ablation kill-switch for the post-fusion
-        // boost stack. Each token disables one boost family at recall time so its
-        // marginal contribution can be measured against the calibrated FLAT baseline
-        // (the stack predates calibrated fusion and was never ablated against it).
-        // Layer 4.45-4.9 families: attribute, temporal_prefilter, temporal_fact,
-        // interference, prospective, fact_source, ontological. Layer 5-5.7 families:
-        // hebbian, recency, arousal, credibility, temporal_match, feedback, importance,
-        // tag_penalty, quality, linguistic, competition. "all" disables every family.
-        // Default unset → all boosts active (shipped behavior unchanged).
-        const BOOST_FAMILIES: [&str; 18] = [
-            "attribute",
-            "temporal_prefilter",
-            "temporal_fact",
-            "interference",
-            "prospective",
-            "fact_source",
-            "ontological",
-            "hebbian",
-            "recency",
-            "arousal",
-            "credibility",
-            "temporal_match",
-            "feedback",
-            "importance",
-            "tag_penalty",
-            "quality",
-            "linguistic",
-            "competition",
-        ];
-        // DEFAULT: the Layer-5 hebbian RANK BOOST is disabled. The L5 bisect (run
-        // 27251798933) measured it as a strict ordering saboteur: disabling only
-        // hebbian lifted p@1 ALL 0.4100→0.4767 (+6.7pp), single_hop +11pp,
-        // open_domain 2x, multi_hop up, temporal HELD, MRR +0.042 — with recall@10
-        // bit-identical (L5 is post-truncation). Mechanism: heb scores come from
-        // graph co-activation and edges strengthen on EVERY retrieval (not on
-        // outcome), so frequently co-retrieved hub memories climb within the
-        // top-10 and displace gold at rank 1 — retrieval-gated rich-get-richer.
-        // Hebbian LEARNING (edge strengthening, spreading activation) is untouched;
-        // only the L5 score multiplier is off. Setting SHODH_DISABLE_BOOSTS
-        // explicitly (even to "") replaces this default — the escape hatch.
-        let disabled_boosts: std::collections::HashSet<String> =
-            std::env::var("SHODH_DISABLE_BOOSTS")
-                .map(|v| {
-                    v.split(',')
-                        .map(|t| t.trim().to_ascii_lowercase())
-                        .filter(|t| !t.is_empty())
-                        .collect()
-                })
-                .unwrap_or_else(|_| std::iter::once("hebbian".to_string()).collect());
-        for tok in &disabled_boosts {
-            if tok != "all" && !BOOST_FAMILIES.contains(&tok.as_str()) {
-                tracing::warn!("SHODH_DISABLE_BOOSTS: unknown boost family '{tok}' (ignored)");
-            }
-        }
+        // Ablation kill-switch. The family list, the default-disabled set, the
+        // parsing and the unknown-token warning all live in `memory::ablation`,
+        // which is the single source of truth shared with the graph leg — see
+        // that module for `SHODH_DISABLE_BOOSTS` semantics and for why `hebbian`
+        // is disabled by default.
+        let disabled_boosts = crate::memory::ablation::disabled_families();
         let boost_on = |family: &str| -> bool {
             !(disabled_boosts.contains("all") || disabled_boosts.contains(family))
         };

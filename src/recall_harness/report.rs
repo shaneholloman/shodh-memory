@@ -229,6 +229,17 @@ pub struct AblationRow {
     /// Per-category recall@10 (category name → value), so a config that helps one
     /// capability but hurts another is visible, not hidden in the average.
     pub by_category_recall: std::collections::BTreeMap<String, f64>,
+    /// Order-sensitive fingerprint of every id this arm retrieved, across every
+    /// case. Two arms with the same fingerprint returned byte-identical results.
+    #[serde(default)]
+    pub retrieval_fingerprint: u64,
+    /// True when this arm's fingerprint equals the baseline arm's, i.e. the
+    /// config provably changed nothing and its metrics are attributable to
+    /// nothing. The `+spread-fix` arms were vacuous this way for months: the flag
+    /// they set could not reach the live code path, so the rows silently
+    /// duplicated baseline while reading as evidence.
+    #[serde(default)]
+    pub vacuous_vs_baseline: bool,
 }
 
 /// Unified ablation report: one ingest, N query-time configs, one comparison
