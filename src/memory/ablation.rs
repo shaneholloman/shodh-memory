@@ -27,6 +27,12 @@ use std::collections::HashSet;
 /// Graph leg (`memory/graph_retrieval.rs`):
 /// * `lateral_inhibition` — Step 6.5 winner-take-all, penalising a candidate
 ///   within `GRAPH_LATERAL_INHIBITION_THRESHOLD` cosine of a higher-ranked one.
+/// * `quality_verbosity` — the raw content-LENGTH factor inside the Layer-5
+///   quality gate, `(len/200).min(1.0)`, which multiplies a short correct answer
+///   (a person name) below a longer wrong one (an org name). Disabling the family
+///   keeps only the structural `elaboration` term. Previously reachable only via
+///   `SHODH_FUSION_V2`, which also switched fusion to weighted-Borda, so the
+///   verbosity factor could never be measured on its own.
 /// * `graph_potentiation` — retrieval-driven edge strengthening
 ///   (`batch_strengthen_synapses`). Distinct from the `hebbian` family, which is
 ///   the semantic leg's L5 RANK boost; this is the WRITE that feeds
@@ -37,7 +43,7 @@ use std::collections::HashSet;
 /// Adding a name here is what makes a component measurable; adding one without a
 /// matching [`is_enabled`] call at the component's site makes the family a lie,
 /// so the two changes belong in the same commit.
-pub const FAMILIES: [&str; 20] = [
+pub const FAMILIES: [&str; 21] = [
     "attribute",
     "temporal_prefilter",
     "temporal_fact",
@@ -58,6 +64,7 @@ pub const FAMILIES: [&str; 20] = [
     "competition",
     "lateral_inhibition",
     "graph_potentiation",
+    "quality_verbosity",
 ];
 
 /// Families disabled when `SHODH_DISABLE_BOOSTS` is unset.
@@ -159,12 +166,15 @@ mod tests {
     }
 
     #[test]
-    fn the_graph_leg_families_ship_enabled() {
-        // Both were ungated before this module existed. Declaring them must not
-        // change shipped behaviour, only make it measurable.
+    fn newly_declared_families_ship_enabled() {
+        // All three were ungated or unreachable before this module existed.
+        // Declaring them must not change shipped behaviour, only make it
+        // measurable - `quality_verbosity` in particular is a KNOWN-HARMFUL
+        // factor that stays on until its removal is measured on its own.
         with_env(None, || {
             assert!(is_enabled("lateral_inhibition"));
             assert!(is_enabled("graph_potentiation"));
+            assert!(is_enabled("quality_verbosity"));
         });
     }
 
