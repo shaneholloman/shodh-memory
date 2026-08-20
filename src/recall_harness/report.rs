@@ -298,6 +298,16 @@ pub struct LayerReport {
     pub ndcg_at_10: f64,
     #[serde(rename = "recall@10")]
     pub recall_at_10: f64,
+    /// Hit-rate at 10: fraction of CASES with at least one gold in the top-10.
+    ///
+    /// Sits next to `recall_at_10`, which is the mean FRACTION of each case's
+    /// gold found. The two diverge sharply where gold is dense: 3.13 gold per
+    /// multi_hop case means two-of-three scores 0.67 on recall and 1.00 here,
+    /// while single_hop (1.06 gold/case) has them nearly coincide. Most published
+    /// memory/RAG "recall@k" numbers are this hit-rate form, so any external
+    /// comparison has to name which of the two it means.
+    #[serde(rename = "hit@10", default)]
+    pub hit_at_10: f64,
     #[serde(rename = "precision@10")]
     pub precision_at_10: f64,
     pub mrr: f64,
@@ -331,6 +341,16 @@ pub struct CategoryReport {
     pub ndcg_at_10: f64,
     #[serde(rename = "recall@10")]
     pub recall_at_10: f64,
+    /// Hit-rate at 10: fraction of CASES with at least one gold in the top-10.
+    ///
+    /// Sits next to `recall_at_10`, which is the mean FRACTION of each case's
+    /// gold found. The two diverge sharply where gold is dense: 3.13 gold per
+    /// multi_hop case means two-of-three scores 0.67 on recall and 1.00 here,
+    /// while single_hop (1.06 gold/case) has them nearly coincide. Most published
+    /// memory/RAG "recall@k" numbers are this hit-rate form, so any external
+    /// comparison has to name which of the two it means.
+    #[serde(rename = "hit@10", default)]
+    pub hit_at_10: f64,
     #[serde(rename = "precision@10")]
     pub precision_at_10: f64,
     pub mrr: f64,
@@ -438,6 +458,7 @@ pub fn aggregate_layer(per_case: &[Metrics], latencies_ms: &[f64]) -> LayerRepor
     LayerReport {
         ndcg_at_10: mean(|m| m.ndcg_at_k),
         recall_at_10: mean(|m| m.recall_at_k),
+        hit_at_10: mean(|m| m.hit_at_k),
         precision_at_10: mean(|m| m.precision_at_k),
         mrr: mean(|m| m.mrr),
         p_at_1: mean(|m| m.p_at_1),
@@ -465,6 +486,7 @@ pub fn aggregate_category(per_case: &[Metrics]) -> CategoryReport {
     CategoryReport {
         ndcg_at_10: mean(|m| m.ndcg_at_k),
         recall_at_10: mean(|m| m.recall_at_k),
+        hit_at_10: mean(|m| m.hit_at_k),
         precision_at_10: mean(|m| m.precision_at_k),
         mrr: mean(|m| m.mrr),
         p_at_1: mean(|m| m.p_at_1),
@@ -724,6 +746,7 @@ mod tests {
             mrr: values,
             p_at_1: values,
             map: values,
+            hit_at_k: values,
         }
     }
 
@@ -778,6 +801,7 @@ mod tests {
             LayerReport {
                 ndcg_at_10: ndcg,
                 recall_at_10: recall,
+                hit_at_10: recall,
                 precision_at_10: 0.2,
                 mrr,
                 p_at_1: p1,
@@ -850,6 +874,7 @@ mod tests {
         CategoryReport {
             ndcg_at_10: recall,
             recall_at_10: recall,
+            hit_at_10: recall,
             precision_at_10: recall,
             mrr: recall,
             p_at_1: p1,
