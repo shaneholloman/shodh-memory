@@ -40,10 +40,21 @@ use std::collections::HashSet;
 ///   suppresses it for measurement integrity — this family ablates the mechanism
 ///   while leaving other recall-path writes alone, so the two can be separated.
 ///
+/// * `linguistic_resort` — whether the linguistic signal is applied as a SEPARATE
+///   sort-only re-rank (enabled, current) or folded additively into the single
+///   `.score` (disabled). Composes with the `linguistic` family, which controls
+///   whether the signal applies at all. This one selects between two FORMS rather
+///   than deleting a component; the alternative was a second config idiom, and one
+///   documented mechanism beats two clean ones.
+/// * `size_gated_final_sort` — the SIZE GATE on the final re-sort. Enabled
+///   (current) means the sort runs only when `len > max_results`, so result-set
+///   size decides whether the lexical re-rank or `.score` wins the final order.
+///   Disabling removes the gate and always sorts by score.
+///
 /// Adding a name here is what makes a component measurable; adding one without a
 /// matching [`is_enabled`] call at the component's site makes the family a lie,
 /// so the two changes belong in the same commit.
-pub const FAMILIES: [&str; 21] = [
+pub const FAMILIES: [&str; 23] = [
     "attribute",
     "temporal_prefilter",
     "temporal_fact",
@@ -65,6 +76,8 @@ pub const FAMILIES: [&str; 21] = [
     "lateral_inhibition",
     "graph_potentiation",
     "quality_verbosity",
+    "linguistic_resort",
+    "size_gated_final_sort",
 ];
 
 /// Families disabled when `SHODH_DISABLE_BOOSTS` is unset.

@@ -5356,10 +5356,11 @@ impl MemorySystem {
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         // RH-8 gate: linguistic re-sort only runs in `Full` mode.
         if layer_full && boost_linguistic && !query_analysis.focal_entities.is_empty() {
-            let v2_single = std::env::var("SHODH_FUSION_V2")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if v2_single {
+            // `linguistic_resort` ENABLED (current) = separate sort-only re-rank,
+            // which the final sort silently discards when len <= max_results.
+            // DISABLED = fold the signal into the single `.score` instead. Parked
+            // behind SHODH_FUSION_V2 until now, so it could never be attributed.
+            if !crate::memory::ablation::is_enabled("linguistic_resort") {
                 // Conscious restructure: FOLD the linguistic signal into the single
                 // .score (additive) instead of a separate sort-only re-rank that the
                 // final sort silently discards when len>max. One score, one sort.
@@ -5611,10 +5612,12 @@ impl MemorySystem {
         // linguistic signal is already folded into .score above — so sort by .score
         // UNCONDITIONALLY, not only when len>max. That branch is what let result-set
         // SIZE decide whether the lexical re-sort or .score won the final order.
-        let v2_single_sort = std::env::var("SHODH_FUSION_V2")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if v2_single_sort || memories.len() > query.max_results {
+        // `size_gated_final_sort` ENABLED (current) means this sort runs ONLY when
+        // the result set is larger than the window - so result-set SIZE decides
+        // whether the preceding lexical re-rank or `.score` wins the final order.
+        // Disabling removes the gate and always sorts by score.
+        let size_gated = crate::memory::ablation::is_enabled("size_gated_final_sort");
+        if !size_gated || memories.len() > query.max_results {
             // Score desc → recency desc → MemoryId asc — deterministic competition cutoff.
             // Quantize the score to 1e-6 before comparing: fused scores are accumulated
             // by `+=` over a HashMap in non-deterministic iteration order, so f32
