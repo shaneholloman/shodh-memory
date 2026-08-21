@@ -2555,8 +2555,23 @@ impl MemorySystem {
                 } else {
                     g.entities_average_density(&seed_uuids).ok().flatten()
                 };
-                let use_rerank =
-                    !density.is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+                // The ontological re-rank is disabled above a seed-density
+                // threshold, on the theory that a hub-dense neighbourhood makes
+                // type filtering noisy. On this corpus that theory silently
+                // disables the layer: `ONTOLOGICAL_DENSITY_THRESHOLD` is 8.0 and
+                // mean seed-entity degree is 7.7, with hubs to 301 — so whether
+                // the ontology runs is decided by hub structure rather than by
+                // anything ontological, and the E5 diagnostic measures its
+                // contribution as exactly +0.0000.
+                //
+                // `SHODH_ONTOLOGY_DENSITY_MAX` overrides the threshold so the
+                // layer can be measured at all; `inf` disables the gate entirely
+                // and lets the re-rank always run. Unset = shipped behaviour.
+                let density_max = std::env::var("SHODH_ONTOLOGY_DENSITY_MAX")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .unwrap_or(crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+                let use_rerank = !density.is_some_and(|d| d >= density_max);
                 (density, use_rerank)
             } else {
                 (None, false)
@@ -2569,9 +2584,13 @@ impl MemorySystem {
         {
             crate::metrics::ONTOLOGICAL_FALLBACK_TOTAL.inc();
         }
-        if graph_density_for_rerank
-            .is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD)
-        {
+        // Count skips against the EFFECTIVE threshold, not the constant, so the
+        // counter still reports honestly when the override is in use.
+        let effective_density_max = std::env::var("SHODH_ONTOLOGY_DENSITY_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+        if graph_density_for_rerank.is_some_and(|d| d >= effective_density_max) {
             crate::metrics::ONTOLOGICAL_DENSITY_SKIP_TOTAL.inc();
         }
 
