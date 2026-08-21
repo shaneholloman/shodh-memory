@@ -691,6 +691,25 @@ fn run_one_pass(
         .map(std::path::PathBuf::from);
     let mut feature_lines: Vec<String> = Vec::new();
 
+    // Candidate-pool export (`SHODH_POOL_EXPORT=<jsonl path>`, Full mode only).
+    //
+    // Writes, per case: the query, the gold ids, and the RECALL_DIAG_K-deep
+    // candidate pool in rank order. That is everything an OFFLINE rescoring
+    // experiment needs -- a cross-encoder, a late-interaction MaxSim scorer, a
+    // fine-tuned or JEPA-style adapter -- because the pool is exactly the set a
+    // reranker would see and the gold ids are the labels. Candidate TEXT is
+    // deliberately not duplicated here: the corpus jsonl already holds it keyed
+    // by id, so the consumer joins rather than the harness bloating every line.
+    //
+    // The point is to convert "would X improve ranking?" from a 45-minute CI run
+    // into a script. ~32pp of gold sits in ranks 11-100, so every rescoring idea
+    // is testable against this file without touching the Rust pipeline at all.
+    let pool_export: Option<std::path::PathBuf> = std::env::var("SHODH_POOL_EXPORT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
+    let mut pool_lines: Vec<String> = Vec::new();
+
     for mode in layer_modes {
         let mut per_case = Vec::with_capacity(cases.len());
         let mut latencies_ms = Vec::with_capacity(cases.len());
@@ -823,6 +842,20 @@ fn run_one_pass(
                     .retrieved
                     .clone()
             };
+            if pool_export.is_some() && matches!(*mode, LayerMode::Full) {
+                let mut gold: Vec<String> = relevance.keys().map(|u| u.to_string()).collect();
+                gold.sort();
+                pool_lines.push(
+                    serde_json::json!({
+                        "case_id": case.id,
+                        "category": category_name(case.category),
+                        "query": case.query,
+                        "gold": gold,
+                        "pool": deep_retrieved,
+                    })
+                    .to_string(),
+                );
+            }
             deep_ranks.push(CaseRankList {
                 case_id: case.id.clone(),
                 retrieved: deep_retrieved,
@@ -859,6 +892,22 @@ fn run_one_pass(
                 deep_ranks,
             },
         );
+    }
+
+    if let Some(path) = &pool_export {
+        if !pool_lines.is_empty() {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(path)
+                .with_context(|| format!("creating pool export {}", path.display()))?;
+            for line in &pool_lines {
+                writeln!(f, "{line}")?;
+            }
+            eprintln!(
+                "  pool export: {} cases -> {}",
+                pool_lines.len(),
+                path.display()
+            );
+        }
     }
 
     if let Some(path) = &feature_export {

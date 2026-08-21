@@ -390,5 +390,6 @@ jobs:
             locomo-recall.log
             locomo-reachability.json
             locomo-reachability.log
+            pool.jsonl
             learning-curve.json
             learning-curve.log
