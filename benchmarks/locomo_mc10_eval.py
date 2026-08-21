@@ -92,6 +92,18 @@ class ShodhMemoryClient:
 # LLM Provider Abstraction
 # ============================================================================
 
+# Completion budget for the judge's answer.
+#
+# This was hardcoded at 10 for every provider. A reasoning model spends its
+# first tokens thinking, so at 10 it returns `content: None` with
+# `finish_reason: "length"` and never emits the digit — measured against
+# `stealth/ox-alpha`, which answers correctly at 64 (29 completion tokens,
+# 19 of them internal) and returns nothing at 10. Ten tokens silently
+# disqualifies an entire class of judge. Override with
+# SHODH_JUDGE_MAX_TOKENS.
+JUDGE_MAX_TOKENS = int(os.environ.get("SHODH_JUDGE_MAX_TOKENS", "64"))
+
+
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
 
@@ -113,10 +125,12 @@ class OpenAIProvider(LLMProvider):
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            max_tokens=JUDGE_MAX_TOKENS,
             temperature=0
         )
-        return response.choices[0].message.content.strip()
+        # `content` is None when the budget was spent on internal reasoning
+        # tokens; return "" so the caller reports an abstention, not a crash.
+        return (response.choices[0].message.content or "").strip()
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -134,10 +148,12 @@ class OpenAICompatibleProvider(LLMProvider):
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            max_tokens=JUDGE_MAX_TOKENS,
             temperature=0
         )
-        return response.choices[0].message.content.strip()
+        # `content` is None when the budget was spent on internal reasoning
+        # tokens; return "" so the caller reports an abstention, not a crash.
+        return (response.choices[0].message.content or "").strip()
 
 
 class AnthropicProvider(LLMProvider):
@@ -151,10 +167,10 @@ class AnthropicProvider(LLMProvider):
     def complete(self, prompt: str) -> str:
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=10,
+            max_tokens=JUDGE_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}]
         )
-        return response.content[0].text.strip()
+        return (response.content[0].text or "").strip() if response.content else ""
 
 
 class OllamaProvider(LLMProvider):
@@ -175,9 +191,9 @@ class OllamaProvider(LLMProvider):
         response = ollama.chat(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0, "num_predict": 10}
+            options={"temperature": 0, "num_predict": JUDGE_MAX_TOKENS}
         )
-        return response["message"]["content"].strip()
+        return (response["message"]["content"] or "").strip()
 
 
 class BasetenProvider(LLMProvider):
@@ -201,7 +217,7 @@ class BasetenProvider(LLMProvider):
             headers={"Authorization": f"Api-Key {self.api_key}"},
             json={
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 10,
+                "max_tokens": JUDGE_MAX_TOKENS,
                 "temperature": 0
             }
         )
@@ -399,6 +415,14 @@ Your answer (single digit 0-9):"""
 
     try:
         answer_text = provider.complete(prompt)
+        if not answer_text:
+            # Reasoning models exhaust the completion budget on internal
+            # tokens and return an empty body with finish_reason="length".
+            print(
+                "LLM Empty: no completion body — raise SHODH_JUDGE_MAX_TOKENS "
+                f"(currently {JUDGE_MAX_TOKENS})"
+            )
+            return None
         # Extract digit from response
         for char in answer_text:
             if char.isdigit():
