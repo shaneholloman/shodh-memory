@@ -156,14 +156,24 @@ pub const INSERT_PRUNE_ENV: &str = "SHODH_VAMANA_INSERT_PRUNE";
 /// untouched. A pure function so it is unit-testable without mutating process
 /// environment (which races under a parallel test runner).
 fn parse_insert_prune(raw: Option<&str>) -> bool {
-    matches!(raw.map(str::trim), Some(v) if v == "1" || v.eq_ignore_ascii_case("true"))
+    // Opt-OUT. Unset means ON, because a-RNG construction is what makes this a
+    // Vamana index rather than a greedy kNN graph; skipping it is the deviation,
+    // not the default. Only an explicit `0`/`false` disables it.
+    !matches!(raw.map(str::trim), Some(v) if v == "0" || v.eq_ignore_ascii_case("false"))
 }
 
 /// Insert-prune policy from [`INSERT_PRUNE_ENV`], resolved once per process.
 ///
-/// `false` (the default, variable unset) keeps `add_vector`'s historical
-/// greedy top-k neighbor selection bit-for-bit. `true` switches the insert
-/// path to full α-RNG construction (see [`VamanaIndex::add_vector_with_policy`]).
+/// DEFAULT ON. α-RNG construction is what makes this a Vamana index; the
+/// incremental path skipped it "for speed" and silently built a greedy kNN
+/// graph instead -- one whose own true neighbours greedy search could not
+/// reach (45.6% self-recall at beam=k on clustered data, against 99.9% with
+/// α-RNG). No beam width recovers a neighbour the graph has no edge to, which
+/// is why widening `ef` only ever recovered a third of the loss.
+///
+/// `SHODH_VAMANA_INSERT_PRUNE=0` restores the historical greedy path bit-for-bit
+/// for A/B measurement. It is an escape hatch, not a performance option: the
+/// insert-latency it buys costs index navigability.
 ///
 /// Cached in a `OnceLock`: ingest is a hot path and the eval/production
 /// environment is fixed at process start. The `info!` line doubles as the
@@ -172,8 +182,10 @@ fn configured_insert_prune() -> bool {
     static INSERT_PRUNE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *INSERT_PRUNE.get_or_init(|| {
         let enabled = parse_insert_prune(std::env::var(INSERT_PRUNE_ENV).ok().as_deref());
-        if enabled {
-            info!("Vamana insert-time α-RNG pruning ({INSERT_PRUNE_ENV}) enabled");
+        if !enabled {
+            info!(
+                "Vamana insert-time α-RNG pruning DISABLED via {INSERT_PRUNE_ENV} — the index                  will be a greedy kNN graph, not a Vamana graph"
+            );
         }
         enabled
     })
@@ -930,8 +942,7 @@ impl VamanaIndex {
 
         // The beam only ever widens: `greedy_search_beam` clamps it up to
         // `search_k`, so `ef = None` reproduces the historical `L = k` search.
-        let candidates =
-            self.greedy_search_beam(query, search_k, ef.unwrap_or(search_k), entry)?;
+        let candidates = self.greedy_search_beam(query, search_k, ef.unwrap_or(search_k), entry)?;
 
         // Filter out deleted vectors and take k results
         let results: Vec<(u32, f32)> = candidates
@@ -2148,9 +2159,7 @@ mod tests {
             wide_hits > base_hits,
             "ef=256 must beat beam==k: {base_hits}/{total} vs {wide_hits}/{total}"
         );
-        eprintln!(
-            "vamana ef ablation: beam=k {base_hits}/{total}, ef=256 {wide_hits}/{total}"
-        );
+        eprintln!("vamana ef ablation: beam=k {base_hits}/{total}, ef=256 {wide_hits}/{total}");
     }
 
     // ---------------------------------------------------------------------
@@ -2158,17 +2167,23 @@ mod tests {
     // ---------------------------------------------------------------------
 
     #[test]
-    fn test_parse_insert_prune_accepts_only_explicit_enable() {
-        assert!(!parse_insert_prune(None));
-        assert!(!parse_insert_prune(Some("")));
+    fn test_parse_insert_prune_is_opt_out_and_fails_safe() {
+        // α-RNG construction is the default; only an explicit 0/false disables
+        // it. A typo must fail SAFE, i.e. leave the index navigable.
+        assert!(parse_insert_prune(None), "unset must mean α-RNG ON");
+        assert!(parse_insert_prune(Some("")));
+        assert!(parse_insert_prune(Some("1")));
+        assert!(parse_insert_prune(Some("true")));
+        assert!(parse_insert_prune(Some("yes")));
+        assert!(parse_insert_prune(Some("2")));
+        assert!(
+            parse_insert_prune(Some("flase")),
+            "a typo must not disable it"
+        );
         assert!(!parse_insert_prune(Some("0")));
         assert!(!parse_insert_prune(Some("false")));
-        assert!(!parse_insert_prune(Some("yes")));
-        assert!(!parse_insert_prune(Some("2")));
-        assert!(parse_insert_prune(Some("1")));
-        assert!(parse_insert_prune(Some(" 1 ")));
-        assert!(parse_insert_prune(Some("true")));
-        assert!(parse_insert_prune(Some("TRUE")));
+        assert!(!parse_insert_prune(Some("FALSE")));
+        assert!(!parse_insert_prune(Some(" false ")));
     }
 
     /// The α-RNG rule must keep the closest candidate AND the geometrically
@@ -2242,8 +2257,8 @@ mod tests {
             })
             .unwrap();
             let vectors = [
-                vec![1.0, 0.0, 0.0, 0.0],           // 0: hub H (medoid/entry)
-                vec![0.0, 1.0, 0.0, 0.0],           // 1: far diverse F
+                vec![1.0, 0.0, 0.0, 0.0],            // 0: hub H (medoid/entry)
+                vec![0.0, 1.0, 0.0, 0.0],            // 1: far diverse F
                 vec![0.992, 0.126_231_93, 0.0, 0.0], // 2: close c1
                 vec![0.990, 0.141_067_36, 0.0, 0.0], // 3: close c2 ≈ c1
             ];
@@ -2378,6 +2393,72 @@ mod tests {
         index
     }
 
+    /// The shipped index must be NAVIGABLE, not merely populated.
+    ///
+    /// This is the guard that did not exist when `add_vector` was allowed to skip
+    /// the α-RNG rule "for speed". Nothing failed when that landed. The index kept
+    /// accepting vectors, kept returning results, and kept passing every test —
+    /// it had simply stopped being a Vamana graph. Greedy search could not reach
+    /// over half of the index's own true neighbours, and no beam width recovers a
+    /// neighbour the graph has no edge to, which is why widening `ef` only ever
+    /// bought back a third of the loss.
+    ///
+    /// The comparative test above proves α-RNG beats greedy. That is not the same
+    /// guarantee: two equally broken constructions would still satisfy it. This
+    /// one pins an absolute floor on the DEFAULT policy, so a future trade of
+    /// construction quality for insert latency fails here rather than showing up
+    /// months later as an unexplained retrieval deficit.
+    #[test]
+    fn shipped_default_index_is_navigable_on_clustered_data() {
+        // α-RNG measures 99.9% on this fixture and greedy 45.6%; 0.90 sits far
+        // from both, so the test discriminates the construction rule rather than
+        // tracking fixture noise.
+        const SELF_RECALL_FLOOR: f64 = 0.90;
+
+        let n = 1200;
+        let dim = 384;
+        let clusters = 40;
+        let k = 120;
+
+        // `parse_insert_prune(None)` is the SHIPPED default with the variable
+        // unset — deliberately not `configured_insert_prune()`, whose OnceLock
+        // can be poisoned by whichever test in this binary reads the env first.
+        let default_policy = parse_insert_prune(None);
+        let index = clustered_incremental_index(n, dim, clusters, 32, default_policy);
+
+        let queries: Vec<u32> = (0..40).map(|i| (i * 29 + 3) % n as u32).collect();
+        let mut hits = 0usize;
+        let mut total = 0usize;
+        for &q in &queries {
+            let query = index.get_vector(q).unwrap();
+            let exact: std::collections::HashSet<u32> = index
+                .brute_force_search(&query, k)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            total += exact.len();
+            hits += index
+                .search_with_ef(&query, k, None)
+                .unwrap()
+                .into_iter()
+                .filter(|(id, _)| exact.contains(id))
+                .count();
+        }
+
+        let ratio = hits as f64 / total as f64;
+        eprintln!(
+            "shipped default (insert_prune={default_policy}): index self-recall \
+             {hits}/{total} = {ratio:.4} at beam=k"
+        );
+        assert!(
+            ratio >= SELF_RECALL_FLOOR,
+            "the shipped index cannot navigate to its own true neighbours: \
+             {hits}/{total} = {ratio:.4} at beam=k, floor {SELF_RECALL_FLOOR}. \
+             The construction rule has regressed — greedy top-k inserts build a \
+             kNN graph, not a Vamana graph."
+        );
+    }
     /// Root-cause fixture for the ANN-vs-exact gap at the pipeline's real
     /// operating point (k = 120, max_degree = 32, incremental inserts only):
     /// on clustered vectors the greedy-insert graph must be measurably lossy
@@ -2460,13 +2541,13 @@ mod tests {
     /// build the identical graph when the flag is unset — the default path is
     /// bit-identical to the pre-flag implementation.
     #[test]
-    fn test_add_vector_default_matches_policy_false() {
-        // Guard: this test is only meaningful when the env flag is unset (the
-        // CI/test default). If someone exports SHODH_VAMANA_INSERT_PRUNE=1
-        // globally, failing loudly here is correct — the "default" path would
-        // no longer be the shipped default.
+    fn test_add_vector_default_matches_policy_true() {
+        // Guard: only meaningful when the env flag is unset (the CI/test
+        // default). If someone exports SHODH_VAMANA_INSERT_PRUNE=0 globally,
+        // failing loudly here is correct — the "default" path would no longer
+        // be the shipped default.
         assert!(
-            !configured_insert_prune(),
+            configured_insert_prune(),
             "{INSERT_PRUNE_ENV} must be unset when running the test suite"
         );
 
@@ -2504,7 +2585,7 @@ mod tests {
 
         assert_eq!(
             make(None),
-            make(Some(false)),
+            make(Some(true)),
             "env-default add_vector must match the explicit historical policy"
         );
         assert_ne!(
