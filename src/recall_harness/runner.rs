@@ -843,7 +843,18 @@ fn run_one_pass(
                     .clone()
             };
             if pool_export.is_some() && matches!(*mode, LayerMode::Full) {
-                let mut gold: Vec<String> = relevance.keys().map(|u| u.to_string()).collect();
+                // Corpus ids, matching `pool` -- `relevance` is keyed by Uuid while
+                // the rank lists are already corpus ids, so exporting the raw Uuid
+                // made the two sets disjoint and every offline join scored zero.
+                let mut gold: Vec<String> = relevance
+                    .keys()
+                    .map(|u| {
+                        uuid_to_corpus_id
+                            .get(u)
+                            .cloned()
+                            .unwrap_or_else(|| u.to_string())
+                    })
+                    .collect();
                 gold.sort();
                 pool_lines.push(
                     serde_json::json!({
