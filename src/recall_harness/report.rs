@@ -661,6 +661,17 @@ pub struct GraphStructure {
     pub hub_threshold: usize,
     /// Top entity degrees, descending (the hub tail).
     pub top_degrees: Vec<usize>,
+    /// Co-occurrence edges never minted because an endpoint had already
+    /// saturated `SHODH_HUB_DEGREE_MAX`.
+    ///
+    /// The cap is a hard SKIP, not an eviction, and the condition is `||`: one
+    /// saturated endpoint kills the edge even when the other is rare and highly
+    /// discriminative. So which associations exist is decided by ingest ARRIVAL
+    /// ORDER, on a criterion uncorrelated with information — while the PMI-squared
+    /// gate beside it culls on exactly that criterion. A large number here means
+    /// the graph's shape is an artefact of ingest sequence.
+    #[serde(default)]
+    pub hub_saturation_skipped_edges: u64,
 }
 
 /// Reachability tallies for one category (cumulative within-N-hops counts).

@@ -152,6 +152,7 @@ jobs:
           print(f"### Graph structure (anti-hub scoreboard)")
           print(f"- entities: {gs.get('total_entities',0)}  edges(est): {gs.get('total_edges',0)}  mean degree: {gs.get('mean_degree',0):.1f}")
           print(f"- **max degree: {gs.get('max_degree',0)}**  hubs (degree>{gs.get('hub_threshold',50)}): **{gs.get('hub_count',0)}**  top degrees: {gs.get('top_degrees',[])}")
+          print(f"- **edges SKIPPED by hub saturation: {gs.get('hub_saturation_skipped_edges',0)}** (hard skip, decided by ingest ARRIVAL ORDER not by information)")
           print(f"  (max degree + hub count should FALL with IDF edges / lower hub_max)\n")
           print(f"- max_hops: {d['max_hops']}  (≤2hop% = canonical double-hop signal)")
           print("\n| category | cases | gold | ≤1hop% | ≤2hop% | unreach% | no-seed% | cases≥2seed% | gold≥2seed% |")

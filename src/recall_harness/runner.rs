@@ -2126,6 +2126,7 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             } else {
                 degree_sum as f64 / total_entities as f64
             },
+            hub_saturation_skipped_edges: crate::metrics::HUB_SATURATION_EDGE_SKIP_TOTAL.get(),
             hub_count: degrees
                 .iter()
                 .filter(|d| **d > HUB_REPORT_THRESHOLD)
