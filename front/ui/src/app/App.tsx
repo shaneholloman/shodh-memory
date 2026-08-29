@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { HashRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Providers } from "./providers";
@@ -11,10 +12,12 @@ import { GeoView } from "@/features/geo/GeoView";
 import { GraphView } from "@/features/graph/GraphView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
+import { BriefingView } from "@/features/briefing/BriefingView";
 import { ChatView } from "@/features/chat/ChatView";
 import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
 import { ProvidersView } from "@/features/providers/ProvidersView";
 import { AnomaliesView } from "@/features/anomalies/AnomaliesView";
+import { initTheme } from "@/stores/theme";
 import type { Reachability } from "@/lib/api";
 
 /**
@@ -33,10 +36,16 @@ import type { Reachability } from "@/lib/api";
  * one embedded `index.html` inside the Rust binary, where a hash is the only
  * routing that survives being opened from anywhere.
  *
- * Two things from Gridline are deliberately absent. Its theme switch and the
- * MutationObserver behind it: this product is dark-only, so the control would
- * toggle nothing. Its version strip: there is no version feed behind it, and
- * chrome that displays invented data is worse than chrome that is absent.
+ * Gridline's version strip is deliberately absent: there is no version feed
+ * behind it, and chrome that displays invented data is worse than chrome that
+ * is absent.
+ *
+ * Its theme switch was absent too, on the grounds that the product was
+ * dark-only and the control would toggle nothing. That stopped being true with
+ * the briefing, which is a reading surface rather than a console and is
+ * recognised by its paper ground. There are now two grounds and a third state
+ * that follows the system -- see stores/theme.ts. The rest of the chrome
+ * follows for free because it was already built on semantic tokens.
  */
 
 // Kept in lockstep with the Inspector's own width (Inspector.tsx) — must
@@ -59,6 +68,9 @@ const ROUTES_WITH_SEARCH = ["/recall", "/geo"];
 
 function Shell({ reach }: { reach: Reachability }) {
   const { pathname } = useLocation();
+  // Applies the stored ground and keeps the "system" state live. Here rather
+  // than at module scope so it unsubscribes with the shell.
+  useEffect(() => initTheme(), []);
   const seat = useSeatHealth();
   const destination = DESTINATIONS.find((d) => d.path === pathname);
   const showInspector = ROUTES_WITH_INSPECTOR.includes(pathname) && reach.state === "online";
@@ -73,8 +85,11 @@ function Shell({ reach }: { reach: Reachability }) {
 
       <main className={cn("h-full pt-12", RAIL_OFFSET, showInspector && INSPECTOR_OFFSET)}>
         <Routes>
-          {/* The seat is the product's primary surface, so it is home. */}
-          <Route path="/" element={<Navigate to="/chat" replace />} />
+          {/* The briefing is the only surface that says something without being
+              asked, so it is home. Everything else answers a question you
+              already had. */}
+          <Route path="/" element={<Navigate to="/briefing" replace />} />
+          <Route path="/briefing" element={<BriefingView reach={reach} />} />
           <Route path="/chat" element={<ChatView reach={reach} seat={seat} />} />
           <Route path="/recall" element={<RecallView reach={reach} />} />
           <Route path="/geo" element={<GeoView reach={reach} />} />
@@ -84,7 +99,7 @@ function Shell({ reach }: { reach: Reachability }) {
           <Route path="/providers" element={<ProvidersView seat={seat} />} />
           {/* A hash the app does not know is a typo or a stale link, not an
               error worth a page — send it home rather than showing a dead end. */}
-          <Route path="*" element={<Navigate to="/chat" replace />} />
+          <Route path="*" element={<Navigate to="/briefing" replace />} />
         </Routes>
       </main>
 
