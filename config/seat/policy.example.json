@@ -1,6 +1,10 @@
 {
   "default": "withhold",
   "rules": [
+    { "match": "mcp__corpus__list_documents",   "effect": "allow",    "reason": "Reading the analyst's own documents is the job." },
+    { "match": "mcp__corpus__read_document",    "effect": "allow",    "reason": "Read-only by construction; there is no write tool to withhold." },
+    { "match": "mcp__corpus__search_documents", "effect": "allow",    "reason": "Search is read-only." },
+    { "match": "ui_*",                          "effect": "allow",    "reason": "Moving the operator's screen. Withhold this to stop the agent navigating for them." },
     { "match": "mcp__shodh__recall*",        "effect": "allow",    "reason": "Reading memory is the seat's purpose." },
     { "match": "mcp__shodh__list_*",         "effect": "allow",    "reason": "Listing is read-only." },
     { "match": "mcp__shodh__search_*",       "effect": "allow",    "reason": "Search is read-only." },
