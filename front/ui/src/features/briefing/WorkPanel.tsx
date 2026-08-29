@@ -69,7 +69,7 @@ export function WorkPanel({ reach }: { reach: Reachability }) {
   const profile = useSession((s) => s.profile);
   const enabled = reach.state === "online" && profile !== null;
 
-  const { data, isFetching } = useQuery({
+  const { data, error, isFetching } = useQuery({
     queryKey: ["todos", profile],
     queryFn: ({ signal }) => listTodos({ user_id: profile!, limit: 200 }, signal),
     enabled,
@@ -78,6 +78,25 @@ export function WorkPanel({ reach }: { reach: Reachability }) {
   // No panel at all until there is an answer. A heading over a spinner claims
   // there is work here before anyone has looked.
   if (!data && isFetching) return null;
+
+  // A FAILED FETCH IS NOT AN EMPTY BACKLOG. Returning null here would render
+  // exactly like "nothing open" -- the quiet form of the same bug the corpus
+  // branch in BriefingView fixes loudly, and the more dangerous form: a false
+  // claim can be argued with, an absence cannot even be noticed. So the panel
+  // stays, and says which of the two it is.
+  if (error && !data) {
+    return (
+      <section>
+        <h2 className="font-mono text-xs tracking-widest text-muted-foreground uppercase">
+          What you're working on
+        </h2>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Open work could not be read, so none is being reported — this is not the same as having
+          none.
+        </p>
+      </section>
+    );
+  }
 
   const all = data?.todos ?? [];
   const open = all.filter(isOpen);
