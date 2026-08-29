@@ -530,10 +530,22 @@ export class Conversation {
 		// change what the agent can reach between runs — and it is the only
 		// place a server that reconnected, dropped, or changed its tool list
 		// since the last turn actually takes effect.
-		this.agent.state.tools = [
-			...this.memoryTools,
-			...permitted(this.deps, withoutRedundantMcpTools(this.deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter)),
-		];
+		const bridged = withoutRedundantMcpTools(this.deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter);
+		const { allowed, withheld } = this.deps.policy
+			? this.deps.policy.apply(bridged)
+			: { allowed: bridged, withheld: [] };
+		this.agent.state.tools = [...this.memoryTools, ...allowed];
+
+		// Recorded BEFORE the turn runs, and deliberately not caught: an
+		// unrecorded constraint is indistinguishable from no constraint, so if
+		// the ledger cannot be written the honest outcome is that the turn does
+		// not happen. Same rule as a named policy file that cannot be read.
+		if (withheld.length > 0) {
+			await this.deps.ledger.append("policy_withheld", "user", this.userId, this.id, this.turn, {
+				withheld: withheld.map((d) => ({ tool: d.tool, by: d.by, reason: d.reason })),
+				offered: this.memoryTools.length + allowed.length,
+			});
+		}
 
 		// Reset per-run state.
 		this.surfaced = new Map();
