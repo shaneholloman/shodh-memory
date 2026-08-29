@@ -62,13 +62,27 @@ function Turn({
   const select = useChat((s) => s.select);
 
   // Citation targets: every memory this turn put in front of the model.
+  //
+  // Carries the memory itself, not just its id, because the chip shows what
+  // the memory SAYS — `mem:4a59ea4b` is the seat/model protocol and means
+  // nothing to a reader. The id is still here for the click target and the
+  // tooltip.
   const citationMap = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, { id: string; content: string; memory_type?: string }>();
     for (const op of turn.ops) {
-      if (op.type === "memory_recall") {
-        for (const memory of op.memories) map.set(shortId(memory.id), memory.id);
-      } else if (op.type === "proactive_context") {
-        for (const memory of op.memories) map.set(shortId(memory.id), memory.id);
+      if (op.type === "memory_recall" || op.type === "proactive_context") {
+        for (const memory of op.memories) {
+          // The two ops carry different shapes: proactive_context surfaces
+          // memories flat, memory_recall nests them under `experience`. One
+          // map either way, because the citation does not care which op put
+          // the memory in front of the model.
+          const proactive = "content" in memory;
+          map.set(shortId(memory.id), {
+            id: memory.id,
+            content: proactive ? memory.content : memory.experience.content,
+            memory_type: (proactive ? memory.memory_type : memory.experience.memory_type) ?? undefined,
+          });
+        }
       }
     }
     return map;
@@ -134,9 +148,10 @@ function Turn({
         <div className="max-w-[92%]">
           <Markdown
             text={turn.assistantText}
+            cited={citationMap}
             onCitationClick={(cited) => {
-              const memoryId = citationMap.get(cited.slice(0, 8));
-              if (memoryId) select({ conversationId, turn: turn.turn, memoryId });
+              const hit = citationMap.get(cited.slice(0, 8));
+              if (hit) select({ conversationId, turn: turn.turn, memoryId: hit.id });
             }}
           />
           {turn.pending ? (
