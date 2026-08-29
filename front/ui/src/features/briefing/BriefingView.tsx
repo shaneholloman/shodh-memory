@@ -129,7 +129,7 @@ export function BriefingView({ reach }: { reach: Reachability }) {
           <h2 className="font-mono text-xs tracking-widest text-muted-foreground uppercase">
             The world
           </h2>
-          <div className="mt-3 max-w-[26rem]">
+          <div className="mt-3 max-w-[34rem]">
             <DotMap
               shapes={WORLD}
               bounds={WORLD_BOUNDS}
@@ -147,7 +147,7 @@ export function BriefingView({ reach }: { reach: Reachability }) {
           <h2 className="font-mono text-xs tracking-widest text-muted-foreground uppercase">
             India
           </h2>
-          <div className="mt-3 max-w-[20rem]">
+          <div className="mt-3 max-w-[26rem]">
             <DotMap
               shapes={INDIA}
               bounds={INDIA_BOUNDS}

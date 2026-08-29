@@ -94,6 +94,7 @@ export function drawDotMap({
     styles.getPropertyValue(name).trim() || fallback;
 
   const ink = token("--paper-ink-4", "#9a9484");
+  const outline = token("--paper-ink-3", "#6d6959");
   const ground = token("--paper-bg", "#e9e6dc");
   const accent = token("--paper-accent", "#c0391a");
 
@@ -107,6 +108,51 @@ export function drawDotMap({
         ctx.fillRect(Math.round(x) - 0.5, Math.round(y) - 0.5, 1.4, 1.4);
       }
     }
+  }
+
+  // The silhouette, drawn over the mesh.
+  //
+  // A dot matrix carries density well and shape badly: at this size India is
+  // about 114 cells across, and the peninsula, the Kutch and the north-east
+  // arm all dissolve into texture. The pitch is in CSS pixels, so a retina
+  // screen makes the dots sharper without making them more numerous — the
+  // shape does not come back by itself.
+  //
+  // A hairline over the top restores the outline at any size while the mesh
+  // keeps doing what it is good at. Stroked after the fill so the coast reads
+  // as an edge rather than as another row of dots.
+  // Split at the antimeridian. Two of the world rings -- the Eurasia/Americas
+  // landmass and Antarctica -- run a full 360 degrees of longitude, because a
+  // ring that crosses 180E re-enters at 180W. Drawn segment by segment in an
+  // equirectangular projection that crossing is a jump the width of the plate,
+  // so a naive stroke lays a straight line edge to edge across the map.
+  //
+  // The FILL never showed this, which is why the shapes shipped looking fine:
+  // the sampler asks whether a cell centre is inside the path, and a chord of
+  // zero area contains nothing. A stroke draws every segment it is given.
+  //
+  // So a segment jumping more than half the world starts a new sub-path, and
+  // only a ring that never wrapped is closed -- closing a wrapped one would
+  // reintroduce the same chord between the two loose ends.
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = 0.6;
+  ctx.lineJoin = "round";
+  for (const ring of shapes) {
+    let wrapped = false;
+    ctx.beginPath();
+    for (let i = 0; i < ring.length; i++) {
+      const [x, y] = project(ring[i][0], ring[i][1]);
+      if (i > 0 && Math.abs(ring[i][0] - ring[i - 1][0]) > 180) {
+        wrapped = true;
+        ctx.moveTo(x, y);
+      } else if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    if (!wrapped) ctx.closePath();
+    ctx.stroke();
   }
 
   // Located memories, as discs area-scaled by count. The halo is the *ground*
