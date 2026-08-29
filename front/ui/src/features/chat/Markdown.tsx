@@ -2,6 +2,8 @@ import { memo, useMemo } from "react";
 import { Marked } from "marked";
 import DOMPurify from "dompurify";
 
+import { templateStripper } from "./shared-template";
+
 /**
  * Assistant text: markdown, sanitized, with memory citations as live elements.
  *
@@ -72,18 +74,30 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/** One line, collapsed and trimmed to fit inline. */
-function label(memory: CitedMemory): string {
-  const flat = memory.content.replace(/\s+/g, " ").trim();
+/**
+ * One line, collapsed, template stripped, trimmed to fit inline.
+ *
+ * The type prefix is dropped once the template is gone. It earns its place
+ * when memories differ in kind, and on a corpus where every one is a Task it
+ * spends six of the forty-six characters saying so on every chip.
+ */
+function label(memory: CitedMemory, strip: (s: string) => string): string {
+  const flat = strip(memory.content.replace(/\s+/g, " ").trim());
   const body = flat.length > LABEL_CHARS ? `${flat.slice(0, LABEL_CHARS - 1).trimEnd()}…` : flat;
-  return memory.memory_type ? `${memory.memory_type}: ${body}` : body;
+  return body;
 }
 
 function render(text: string, cited: Map<string, CitedMemory>): string {
+  // Computed across every memory the conversation could cite, not just the
+  // ones in this message: the template is a property of the corpus, and
+  // deriving it per message would make the same memory read differently in
+  // two paragraphs.
+  const strip = templateStripper([...cited.values()].map((m) => m.content.replace(/\s+/g, " ").trim()));
+
   const withCitations = text.replace(CITATION, (_all, id: string) => {
     const short = id.slice(0, 8).toLowerCase();
     const memory = cited.get(short);
-    const shown = (memory ? label(memory) : `mem:${short}`).replace(/\s+/g, " ");
+    const shown = (memory ? label(memory, strip) : `mem:${short}`).replace(/\s+/g, " ");
     // The full id lives in the tooltip so it stays copyable, and the memory's
     // own text lives there too when the label had to be cut. Single line,
     // always. This string goes into an HTML attribute inside
