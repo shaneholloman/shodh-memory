@@ -46,6 +46,7 @@ import { MEMORY_GUIDANCE } from "./memory-guidance.js";
 import { createMemoryTools } from "./memory-tools.js";
 import type { ModelRegistry } from "./models-registry.js";
 import type { ToolPolicy } from "./policy.js";
+import { createUiTools } from "./ui-tools.js";
 
 const HARNESS_SUFFIX = ".seat-harness";
 /** Backend limit: src/validation.rs MAX_USER_ID_LENGTH = 128. */
@@ -340,6 +341,8 @@ export class Conversation {
 	 *  changed set of MCP tools without recreating them (they close over this
 	 *  conversation's ids and event sink). */
 	private readonly memoryTools: AgentTool<any>[];
+	/** Screen control. Built once; policed per turn with the bridged tools. */
+	private readonly uiTools: AgentTool<any>[];
 
 	private turn = 0;
 	private currentSink?: SeatEventSink;
@@ -395,6 +398,8 @@ export class Conversation {
 		if (options.systemPrompt?.trim()) promptBlocks.push(options.systemPrompt.trim());
 		this.baseSystemPrompt = promptBlocks.join("\n\n");
 
+		this.uiTools = createUiTools({ emit: (event) => this.currentSink?.(event) });
+
 		this.memoryTools = createMemoryTools({
 			backend: deps.backend,
 			userId: this.userId,
@@ -421,7 +426,10 @@ export class Conversation {
 				thinkingLevel: "off",
 				tools: [
 					...this.memoryTools,
-					...permitted(deps, withoutRedundantMcpTools(deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter)),
+					...permitted(deps, [
+						...this.uiTools,
+						...withoutRedundantMcpTools(deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
+					]),
 				],
 				// Restored transcripts were produced by this same agent and
 				// persisted verbatim (store.ts) — the cast re-labels what the
@@ -530,10 +538,17 @@ export class Conversation {
 		// change what the agent can reach between runs — and it is the only
 		// place a server that reconnected, dropped, or changed its tool list
 		// since the last turn actually takes effect.
-		const bridged = withoutRedundantMcpTools(this.deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter);
+		// UI tools are policed alongside the bridged ones, and that asymmetry
+		// with memoryTools is deliberate: recall and remember are what the seat
+		// IS, but moving an operator's screen is exactly the capability someone
+		// approving a deployment may want to withhold.
+		const policeable = [
+			...this.uiTools,
+			...withoutRedundantMcpTools(this.deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
+		];
 		const { allowed, withheld } = this.deps.policy
-			? this.deps.policy.apply(bridged)
-			: { allowed: bridged, withheld: [] };
+			? this.deps.policy.apply(policeable)
+			: { allowed: policeable, withheld: [] };
 		this.agent.state.tools = [...this.memoryTools, ...allowed];
 
 		// Recorded BEFORE the turn runs, and deliberately not caught: an

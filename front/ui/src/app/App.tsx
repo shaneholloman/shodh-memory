@@ -18,6 +18,7 @@ import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
 import { ProvidersView } from "@/features/providers/ProvidersView";
 import { AnomaliesView } from "@/features/anomalies/AnomaliesView";
 import { initTheme } from "@/stores/theme";
+import { useUiCommands } from "./useUiCommands";
 import type { Reachability } from "@/lib/api";
 
 /**
@@ -71,6 +72,9 @@ function Shell({ reach }: { reach: Reachability }) {
   // Applies the stored ground and keeps the "system" state live. Here rather
   // than at module scope so it unsubscribes with the shell.
   useEffect(() => initTheme(), []);
+  // Agent-issued screen changes, applied through the same router and stores
+  // the rail and the profile switcher use.
+  const announcement = useUiCommands();
   const seat = useSeatHealth();
   const destination = DESTINATIONS.find((d) => d.path === pathname);
   const showInspector = ROUTES_WITH_INSPECTOR.includes(pathname) && reach.state === "online";
@@ -104,6 +108,25 @@ function Shell({ reach }: { reach: Reachability }) {
       </main>
 
       {showInspector ? <Inspector /> : null}
+
+      {/* The agent moved the screen. Announced because a view that changes by
+          itself with no explanation reads as a fault, and the operator has to
+          be able to tell "the agent did this" from "something broke".
+          aria-live so it is not a visual-only event. */}
+      {announcement ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className={cn(
+            "border-border bg-popover text-popover-foreground pointer-events-none",
+            "absolute bottom-4 left-1/2 z-40 -translate-x-1/2 rounded-sm border px-3 py-1.5",
+            "text-[12px] shadow-lg",
+          )}
+        >
+          <span className="text-muted-foreground font-mono text-[11px]">agent · </span>
+          {announcement.text}
+        </div>
+      ) : null}
 
       {/* Outside <Routes> deliberately: the conversation is available from
           every destination, so it must not unmount when the route changes —
