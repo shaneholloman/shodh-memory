@@ -3,7 +3,9 @@ import { useMemo } from "react";
 import { useCorpus } from "@/lib/api/corpus";
 import type { Reachability } from "@/lib/api/health";
 
+import { AttentionPanel } from "./AttentionPanel";
 import { DotMap } from "./DotMap";
+import { WorkPanel } from "./WorkPanel";
 import type { PlacedPoint } from "./dot-map";
 import {
   INDIA,
@@ -22,9 +24,22 @@ import {
  * since you last looked, and what is worth looking at now. That is why it is
  * the landing view.
  *
- * It adds no fetches. Everything here is derived from the corpus cache entry
- * the geo and recall views already populate, so opening the briefing first
- * makes those two instant rather than making this one slow.
+ * Everything except open work is DERIVED, not fetched: the maps and the anomaly
+ * lenses both read the corpus cache entry geo and recall already populate, so
+ * opening the briefing first makes those destinations instant rather than
+ * making this one slow. Open work is the one fetch, and it strikes the same
+ * bargain in the other direction -- it warms /tasks. (This comment used to say
+ * "it adds no fetches", and kept saying it after the fetch landed. A file that
+ * asserts its own behaviour instead of the behaviour being checked is how the
+ * geo map came to carry a comment promising a zoom it did not have.)
+ *
+ * WHY THE MAPS ARE NOT THE WHOLE BRIEFING. They were, and on a profile whose
+ * memories carry no coordinates that made the landing view two empty plates
+ * under a headline reading "0 of them carrying a place" -- a briefing with
+ * nothing to say on the majority of profiles, because geo-tagging is the
+ * exception in this store, not the rule. The maps stay the centrepiece where
+ * there is geography; where there is none they collapse to one line and the
+ * panels that do not depend on coordinates carry the screen.
  */
 
 /** Coordinates within ~55km collapse to one mark; below that the discs merge anyway. */
@@ -85,6 +100,30 @@ export function BriefingView({ reach }: { reach: Reachability }) {
     };
   }, [memories]);
 
+  // A FAILED FETCH IS NOT AN EMPTY CORPUS. Without this branch the briefing
+  // renders `derived` over `memories ?? []` and states "0 memories in this
+  // profile", three lenses reporting "not enough data", and no map -- a
+  // confident description of a profile nobody managed to read. Caught live:
+  // the backend returned 502 and this screen said the profile was empty
+  // moments after drawing 28 memories from it.
+  //
+  // Reachability does not cover this. It is polled, so it still read
+  // "Connected" while every corpus request was failing, and a per-request
+  // error is the only thing that knows this request failed.
+  if (corpus.error && !corpus.data) {
+    return (
+      <section className="grid h-full place-items-center p-8 text-center">
+        <div className="max-w-md">
+          <h2 className="text-base font-semibold">The corpus could not be read</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Nothing is being claimed about this profile until it can be. The memory server
+            answered with an error — {String(corpus.error.message ?? corpus.error)}
+          </p>
+        </div>
+      </section>
+    );
+  }
+
   // `isFetching` is true on background refetches too, so gate on "no data yet"
   // as well: a refresh must not blank a briefing the reader is already reading.
   if (corpus.isFetching && !corpus.data) {
@@ -103,10 +142,23 @@ export function BriefingView({ reach }: { reach: Reachability }) {
   return (
     <section className="h-full overflow-y-auto px-8 py-7">
       <header className="border-b border-border pb-5">
+        {/* The place count leads only when there IS one. "0 of them carrying a
+            place" as the first line of the landing view opens the product on
+            an absence, and it is the wrong absence to lead with -- coordinates
+            are the exception in this store, not the expectation. Where none
+            exist the headline states what the profile holds, and the collapsed
+            map section below says why there is no map. */}
         <h1 className="max-w-2xl text-2xl leading-snug font-semibold">
-          <span className="text-primary">{derived.total.toLocaleString()}</span> memories,{" "}
-          <span className="text-primary">{derived.located.toLocaleString()}</span> of them
-          carrying a place.
+          <span className="text-primary">{derived.total.toLocaleString()}</span> memories
+          {derived.located > 0 ? (
+            <>
+              ,{" "}
+              <span className="text-primary">{derived.located.toLocaleString()}</span> of them
+              carrying a place.
+            </>
+          ) : (
+            " in this profile."
+          )}
         </h1>
 
         {/* Memory kinds, not entity types. Labelled, because the two are one
@@ -120,6 +172,21 @@ export function BriefingView({ reach }: { reach: Reachability }) {
         </ul>
       </header>
 
+      <div className="mt-7 grid gap-8 lg:grid-cols-2">
+        <WorkPanel reach={reach} />
+        <AttentionPanel memories={memories ?? []} />
+      </div>
+
+      {derived.located === 0 ? (
+        /* One line, not two blank plates. An empty map is not a finding about
+           the corpus, it is an absence of the input this graphic needs, and
+           drawing it anyway spends the top of the screen saying so twice. */
+        <p className="mt-8 border-t border-border pt-5 font-mono text-xs text-muted-foreground">
+          No memory in this profile carries coordinates, so there is no map to draw. Geo-tagged
+          profiles show the world and India here.
+        </p>
+      ) : (
+      <>
       {/* The maps derive their height from their own width and the bounds'
           aspect, so an unbounded column gives India a ~900px plate. Cap the
           plate rather than the column: the captions and headings still want
@@ -161,6 +228,8 @@ export function BriefingView({ reach }: { reach: Reachability }) {
           </p>
         </section>
       </div>
+      </>
+      )}
 
       {/*
         DELIBERATELY ABSENT, and this is a note against re-adding it carelessly.
