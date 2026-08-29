@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import { computeEgress } from "./egress";
 import type { McpServerInfo, SeatModelInfo } from "@/lib/seat/types";
 
-const localModel = { billing: "none", provider: "ollama" } as SeatModelInfo;
-const hostedModel = { billing: "api", provider: "anthropic" } as SeatModelInfo;
+const localModel = { billing: "none", provider: "ollama" } as unknown as SeatModelInfo;
+const hostedModel = { billing: "api", provider: "anthropic" } as unknown as SeatModelInfo;
 
 const server = (over: Partial<McpServerInfo>): McpServerInfo =>
-  ({ name: "s", status: "ready", transport: "stdio", command: "node x.js" , ...over }) as McpServerInfo;
+  ({ name: "s", status: "ready", transport: "stdio", command: "node x.js" , ...over }) as unknown as McpServerInfo;
 
 /**
  * These pin the claim, not the wording. Each corresponds to a way the badge

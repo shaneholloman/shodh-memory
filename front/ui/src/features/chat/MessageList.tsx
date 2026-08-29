@@ -50,43 +50,58 @@ function UsageFooter({ turn }: { turn: ChatTurn }) {
   );
 }
 
+type CitationMap = Map<string, { id: string; content: string; memory_type?: string }>;
+
+/**
+ * Citation targets for the whole conversation.
+ *
+ * Scoped to the conversation, not the turn, and that is the whole point: a
+ * model cites a memory it saw three turns ago as readily as one from this
+ * recall. Measured on a live conversation before this changed — 77 citations,
+ * 0 resolved against the turn-scoped map, 77 against this one. The fallback to
+ * a raw id was defensible as an edge case and was in fact the norm.
+ *
+ * Carries the memory itself, not just its id, because the chip shows what the
+ * memory SAYS. `mem:4a59ea4b` is the seat/model protocol and means nothing to
+ * a reader.
+ *
+ * The two ops carry different shapes — proactive_context surfaces memories
+ * flat, memory_recall nests them under `experience`. One map either way,
+ * because a citation does not care which op put the memory in front of it.
+ */
+function useCitationMap(turns: ChatTurn[]): CitationMap {
+  return useMemo(() => {
+    const map: CitationMap = new Map();
+    for (const turn of turns) {
+      for (const op of turn.ops) {
+        if (op.type === "memory_recall" || op.type === "proactive_context") {
+          for (const memory of op.memories) {
+            const proactive = "content" in memory;
+            map.set(shortId(memory.id), {
+              id: memory.id,
+              content: proactive ? memory.content : memory.experience.content,
+              memory_type: (proactive ? memory.memory_type : memory.experience.memory_type) ?? undefined,
+            });
+          }
+        }
+      }
+    }
+    return map;
+  }, [turns]);
+}
+
 function Turn({
   turn,
   conversationId,
   model,
+  citationMap,
 }: {
+  citationMap: CitationMap;
   turn: ChatTurn;
   conversationId: string;
   model: ModelRef | null;
 }) {
   const select = useChat((s) => s.select);
-
-  // Citation targets: every memory this turn put in front of the model.
-  //
-  // Carries the memory itself, not just its id, because the chip shows what
-  // the memory SAYS — `mem:4a59ea4b` is the seat/model protocol and means
-  // nothing to a reader. The id is still here for the click target and the
-  // tooltip.
-  const citationMap = useMemo(() => {
-    const map = new Map<string, { id: string; content: string; memory_type?: string }>();
-    for (const op of turn.ops) {
-      if (op.type === "memory_recall" || op.type === "proactive_context") {
-        for (const memory of op.memories) {
-          // The two ops carry different shapes: proactive_context surfaces
-          // memories flat, memory_recall nests them under `experience`. One
-          // map either way, because the citation does not care which op put
-          // the memory in front of the model.
-          const proactive = "content" in memory;
-          map.set(shortId(memory.id), {
-            id: memory.id,
-            content: proactive ? memory.content : memory.experience.content,
-            memory_type: (proactive ? memory.memory_type : memory.experience.memory_type) ?? undefined,
-          });
-        }
-      }
-    }
-    return map;
-  }, [turn.ops]);
 
   const waiting = turn.pending && turn.assistantText.length === 0;
 
@@ -182,6 +197,7 @@ export function MessageList({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
+  const citationMap = useCitationMap(turns);
 
   // Follow the stream only while the reader is already at the bottom;
   // scrolling up to re-read must never be fought by the autoscroller.
@@ -203,7 +219,13 @@ export function MessageList({
     >
       <div className={cn("mx-auto flex w-full max-w-[760px] flex-col gap-6 px-4 py-5")}>
         {turns.map((turn) => (
-          <Turn key={turn.turn} turn={turn} conversationId={conversationId} model={model} />
+          <Turn
+            key={turn.turn}
+            turn={turn}
+            conversationId={conversationId}
+            model={model}
+            citationMap={citationMap}
+          />
         ))}
       </div>
     </div>

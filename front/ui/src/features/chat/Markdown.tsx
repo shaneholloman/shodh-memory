@@ -29,10 +29,15 @@ import DOMPurify from "dompurify";
  * the click target and in the tooltip, because provenance you cannot copy is
  * not provenance — but the visible label is what the memory actually says.
  *
- * A citation the turn did not surface falls back to the id. That happens when
- * a model cites something it saw in an earlier turn, and showing the raw
- * handle is the honest rendering: the alternative is inventing a label for a
- * memory this turn cannot produce.
+ * Resolution is CONVERSATION-scoped, not turn-scoped, and that took a
+ * measurement to learn: a first pass scoped it to the turn on the reasoning
+ * that a citation the turn did not surface should honestly show its raw
+ * handle. On a live conversation that was 77 citations, 0 resolved. Models
+ * cite what they saw three turns ago as readily as what they just recalled,
+ * so the fallback was not an edge case, it was the whole feature.
+ *
+ * The fallback remains for a genuinely unknown id, which is now rare enough to
+ * mean something when it appears.
  */
 
 const marked = new Marked({ gfm: true, breaks: false, async: false });
@@ -78,10 +83,16 @@ function render(text: string, cited: Map<string, CitedMemory>): string {
   const withCitations = text.replace(CITATION, (_all, id: string) => {
     const short = id.slice(0, 8).toLowerCase();
     const memory = cited.get(short);
-    const shown = memory ? label(memory) : `mem:${short}`;
+    const shown = (memory ? label(memory) : `mem:${short}`).replace(/\s+/g, " ");
     // The full id lives in the tooltip so it stays copyable, and the memory's
-    // own text lives there too when the label had to be cut.
-    const tip = memory ? `${memory.content.replace(/\s+/g, " ").trim()}\n\nmem:${short}` : `mem:${short}`;
+    // own text lives there too when the label had to be cut. Single line,
+    // always. This string goes into an HTML attribute inside
+    // MARKDOWN source, and marked ends an inline HTML block at a blank line --
+    // a newline here splits the <button> across two paragraphs and the rest of
+    // the tag renders as visible prose. Collapse everything.
+    const tip = memory
+      ? `${memory.content.replace(/\s+/g, " ").trim()} — mem:${short}`
+      : `mem:${short}`;
     return `<button type="button" class="mem-cite" data-mem="${escapeHtml(short)}" title="${escapeHtml(tip)}">${escapeHtml(shown)}</button>`;
   });
   const html = marked.parse(withCitations) as string;
