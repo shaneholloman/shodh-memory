@@ -4,11 +4,21 @@
 Every check here exists because the class was found in the wild, not because it
 is a general code smell:
 
-  flags        172 env flags, 124 of which nothing outside src/ ever sets. A
-               flag no test or workflow ever flips has never been ablated, so
-               its default is an assumption. Seven graph levers were called
-               "inert" on measurements taken with one such default (the PMI
-               edge gate) silently culling 97.4% of the graph.
+  flags        172 env flags, 85 of which nothing outside src/ ever sets.
+
+               CAREFUL WITH THIS ONE. "Never set by anything checked in" is NOT
+               "never measured" -- most of these carry a documented A/B in the
+               source comment beside them, with a CI run id. The finding is
+               narrower and different: those measurements are NOT REPRODUCIBLE.
+               The evidence lives in commit prose and run ids that expire, at
+               baselines from another era (recall@10 0.6976 and 0.7124 against
+               today's 0.5268), with no committed arm to re-run and no
+               regression guard. A first pass of this audit reported them as
+               unmeasured, which was wrong.
+
+               The sharp case is SHODH_PPR: its default-ON justification cites
+               "funnel graph present% 51->76", and the funnel was independently
+               established to have run without the neural NER.
 
   dormant      Two whole modules (context.rs, injection.rs) were found alive
                only via their own tests. Code with no production caller is not
@@ -127,7 +137,12 @@ def audit_flags(rust, ext):
                     default = "OFF"
                 i = src.find(flag, i + 1)
         engine = any(w.startswith(e) or w == e for w in where for e in ENGINE)
-        rows.append((flag, default, ext.count(flag), engine, where))
+        # ASSIGNED, not merely mentioned. Counting mentions lets documentation
+        # silence the detector: adding this flag's name to a workflow input
+        # description made it drop off its own list, which is a false negative
+        # introduced by writing about it.
+        assigned = len(re.findall(r"%s\s*[:=]" % re.escape(flag), ext))
+        rows.append((flag, default, assigned, engine, where))
 
     never = [r for r in rows if r[2] == 0]
     on_never = [r for r in never if r[1] == "ON" and r[3]]
@@ -135,8 +150,10 @@ def audit_flags(rust, ext):
     print("## flags — %d total" % len(rows))
     print("   %d never set by any workflow, script or test." % len(never))
     print()
-    print("   DEFAULT-ON BEHAVIOURAL FLAGS NEVER ABLATED (%d):" % len(on_never))
-    print("   Live in production; nothing has ever measured turning them off.")
+    print("   DEFAULT-ON BEHAVIOURAL FLAGS NOT EXERCISED BY ANYTHING CHECKED IN (%d):" % len(on_never))
+    print("   Live in production. Most carry an A/B in the source comment beside")
+    print("   them -- read it before assuming unmeasured. What is missing is a")
+    print("   re-runnable arm, so nothing would catch a regression.")
     for flag, _, _, _, where in sorted(on_never):
         print("     %-36s %s" % (flag, where[0] if where else ""))
     return len(on_never)
