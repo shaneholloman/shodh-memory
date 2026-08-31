@@ -54,6 +54,18 @@ on:
         description: 'Comma-separated graph flags to test one at a time, each set to 1.'
         required: false
         default: 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT'
+      disable:
+        description: >-
+          Comma-separated flags to set to 0, one arm each. `levers` turns things
+          ON; this turns things OFF, which is the only way to ablate a
+          default-ON behaviour. Nine default-ON behavioural flags exist that
+          nothing checked in ever flips -- their A/B evidence lives in commit
+          prose and CI run ids, at baselines from another era, with no
+          committed arm to re-run. SHODH_PPR is the sharp case: its
+          justification cites a funnel figure that was produced without the
+          neural NER.
+        required: false
+        default: ''
       max_cases:
         description: 'SHODH_MAX_CASES cap (blank = all)'
         required: false
@@ -137,12 +149,20 @@ jobs:
         env:
           SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
           LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
+          DISABLE: ${{ github.event.inputs.disable }}
           SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          # The substrate scoreboard. state.rs logs "edge typing provenance" per
+          # memory at info; without this the counters never reach the log and the
+          # generic share stays an audit note of unknown vintage rather than a
+          # number from today's graph. Omitting it is what made the first run of
+          # this workflow unable to answer the question it was closest to.
+          RUST_LOG: shodh_memory::handlers::state=info
           SHODH_MODEL_PATH: $HOME/.cache/shodh-memory/models/minilm-l6
           SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: |
           set -u
           IFS=',' read -ra LEVER_LIST <<< "$LEVERS"
+          IFS=',' read -ra OFF_LIST <<< "${DISABLE:-}"
 
           # Every arm is (gate, lever) with its own ingest and its own store.
           # `none` is the gate-matched baseline each lever is measured against —
@@ -178,18 +198,74 @@ jobs:
               rm -rf "./s-${TAG}"
               echo "::endgroup::"
             done
+
+            # Ablation arms: set a default-ON flag to 0. Same gate-matched
+            # baseline, so the delta is the cost of removing the behaviour.
+            for OFF in ${OFF_LIST[@]+"${OFF_LIST[@]}"}; do
+              [ -z "$OFF" ] && continue
+              TAG="gate${GATE}-off-${OFF}"
+              echo "::group::arm ${TAG}"
+              env SHODH_GRAPH_PMI_GATE="$GATE" "${OFF}=0"                 ./target/release/recall-eval                   --suite "$SUITE"                   --output "arm-${TAG}.json"                   --storage "./s-${TAG}" 2>"${TAG}.log" | tail -4 || echo "ARM ${TAG} FAILED"
+              grep -m1 '^NER_BACKEND=' "${TAG}.log" || echo "NER_BACKEND=<not reported> for ${TAG}"
+              rm -rf "./s-${TAG}"
+              echo "::endgroup::"
+            done
           done
+
+      # WHAT SHARE OF THE GRAPH IS THE HAIRBALL?
+      #
+      # Co-occurrence is symmetric and fully determined by entity->episode
+      # incidence, which is already indexed (entity_episodes_cf). Materialising
+      # it turns n entities in one memory into n(n-1)/2 edges -- issue #90 saw
+      # 240k edges from 3k memories. Every generic edge stored is a fact the
+      # store could derive.
+      #
+      # It also decides whether typed path composition has substrate: a path
+      # grammar over CoOccurs is the abelian case in costume, and if generic is
+      # ~80% of edges then a fully-typed 2-hop path is ~4% of pairs.
+      - name: Edge-type census
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, glob, collections
+          KEYS = ("semantic", "cue", "pair_table", "learned", "generic",
+                  "fragment_blocked", "pmi_gated")
+          print("## Edge-type census - what share of the graph is derivable?")
+          print()
+          print("| arm | typed | generic | pmi_gated | generic share of stored |")
+          print("| --- | --- | --- | --- | --- |")
+          for log in sorted(glob.glob("gate*.log")):
+              tot = collections.Counter()
+              for line in open(log, errors="ignore"):
+                  if "edge typing provenance" not in line:
+                      continue
+                  for k, v in re.findall(r"(\w+)=(\d+)", line):
+                      if k in KEYS:
+                          tot[k] += int(v)
+              typed = tot["semantic"] + tot["cue"] + tot["pair_table"] + tot["learned"]
+              stored = typed + tot["generic"]
+              if stored == 0:
+                  continue
+              share = 100.0 * tot["generic"] / stored
+              print(f"| `{log[:-4]}` | {typed} | {tot['generic']} | {tot['pmi_gated']} | **{share:.1f}%** |")
+          print()
+          print("generic = untyped co-occurrence, symmetric, derivable from incidence.")
+          print("A high share means most stored edges carry no relation, so typed")
+          print("path composition has almost no substrate to walk.")
+          PY
 
       - name: Confound table
         if: always()
         env:
           LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
+          DISABLE: ${{ github.event.inputs.disable }}
           SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
         run: |
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, os, pathlib
 
           levers = [l for l in os.environ["LEVERS"].split(",") if l]
+          disabled = [l for l in os.environ.get("DISABLE", "").split(",") if l]
           suite = os.environ["SUITE"]
 
           def arm(gate, lever):
@@ -248,6 +324,25 @@ jobs:
                   else:
                       flag = "no"
               print(f"| `{lever}` | {fmt(d1)} | {fmt(d0)} | {flag} |")
+
+          if disabled:
+              print()
+              print("### Cost of REMOVING a default-ON behaviour")
+              print()
+              print("| flag set to 0 | delta @ gate=1 | delta @ gate=0 |")
+              print("| --- | --- | --- |")
+              for flag in disabled:
+                  cells = []
+                  for g in (1, 0):
+                      a = arm(g, f"off-{flag}")
+                      b = base[g]
+                      cells.append(None if (a is None or b is None) else a[1][METRIC] - b[1][METRIC])
+                  fmt = lambda d: "n/a" if d is None else f"{d:+.4f}"
+                  print(f"| `{flag}=0` | {fmt(cells[0])} | {fmt(cells[1])} |")
+              print()
+              print("A delta near zero means the behaviour is not earning its default.")
+              print("A large negative means it is load-bearing and the escape hatch is")
+              print("expensive. An arm that FAILED means the escape hatch does not run.")
 
           print()
           print(f"_Delta is {METRIC} against the gate-matched baseline. Read recall@10 rather")
