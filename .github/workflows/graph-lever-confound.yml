@@ -1,0 +1,225 @@
+# Graph lever × PMI-gate confound matrix.
+#
+# THE PROBLEM THIS EXISTS TO SETTLE. Seven graph levers have been measured inert
+# here — predicate weights, typed-only, edge direction, the 100-edge cap,
+# traversal, taxonomy edges, activation normalisation. Every one of those
+# measurements was taken with SHODH_GRAPH_PMI_GATE at its default, and that
+# default flipped to ON on 2026-07-03 (src/handlers/state.rs). The gate drops
+# incidental co-occurrence edges AT BIRTH and its own A/B measured −97.4% edges.
+#
+# So every "this lever does nothing" verdict was measured on a graph missing
+# most of its edges. A lever that reweights, filters or directs edges cannot
+# show an effect on edges that were never stored. The 100-edge-cap null is the
+# clearest case: a cap cannot bind on a graph that small.
+#
+# That does not mean the levers work. It means we do not know, and seven
+# negative results are currently being treated as knowledge. This workflow
+# produces the comparison that decides it:
+#
+#   for gate in {0, 1}:
+#     baseline, then each lever alone
+#
+# and reports each lever's delta against its OWN gate-matched baseline. The
+# question is not "is the lever positive" but "does its measured effect change
+# when the edges it acts on actually exist". If the gate=0 column matches the
+# gate=1 column, the inert verdicts stand and we stop re-litigating them. If it
+# does not, seven conclusions need retracting.
+#
+# WHY EACH ARM RE-INGESTS. SHODH_GRAPH_PMI_GATE applies at edge birth, so it
+# cannot be varied over a shared store the way a query-time flag can. Every arm
+# gets its own ingest and its own storage directory. That is what makes this
+# expensive and why it is dispatch-only.
+#
+# NOT INCLUDED, deliberately:
+#   - SHODH_GRAPH_TRAVERSE — measured to collapse recall 0.5686 → 0.1070. It
+#     would dominate every other arm and tells us nothing about the confound.
+#   - Taxonomy edges and activation normalisation — those flags do not exist on
+#     main; they live on unmerged branches. Adding them here would test nothing.
+#
+# READ recall@10, NOT p@1. recall@10 averages a continuous per-case value, so it
+# can move arbitrarily little. p@1 counts whole cases and on a 100-case suite
+# moves only in steps of 0.01 — see scripts/recall_diff.py's resolution note.
+name: Graph Lever Confound
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'locomo-gate (100 cases, fast) or locomo (1,531 held-out, slow)'
+        required: false
+        default: 'locomo-gate'
+        type: choice
+        options: ['locomo-gate', 'locomo']
+      levers:
+        description: 'Comma-separated graph flags to test one at a time, each set to 1.'
+        required: false
+        default: 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT'
+      max_cases:
+        description: 'SHODH_MAX_CASES cap (blank = all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graph-lever-confound-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    name: lever x gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache embedder model
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Run the matrix
+        env:
+          SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
+          LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
+          SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+        run: |
+          set -u
+          IFS=',' read -ra LEVER_LIST <<< "$LEVERS"
+
+          # Every arm is (gate, lever) with its own ingest and its own store.
+          # `none` is the gate-matched baseline each lever is measured against —
+          # comparing a gate=0 lever to a gate=1 baseline would reintroduce the
+          # very confound this is here to remove.
+          for GATE in 0 1; do
+            for LEVER in none "${LEVER_LIST[@]}"; do
+              TAG="gate${GATE}-${LEVER}"
+              echo "::group::arm ${TAG}"
+              # A non-zero exit is an arm failing, not the matrix failing: the
+              # remaining arms still carry information and the table marks the
+              # hole. Losing five good arms to one bad one wastes the whole run.
+              if [ "$LEVER" = "none" ]; then
+                env SHODH_GRAPH_PMI_GATE="$GATE" \
+                  ./target/release/recall-eval \
+                    --suite "$SUITE" \
+                    --output "arm-${TAG}.json" \
+                    --storage "./s-${TAG}" 2>"${TAG}.log" | tail -4 || echo "ARM ${TAG} FAILED"
+              else
+                env SHODH_GRAPH_PMI_GATE="$GATE" "${LEVER}=1" \
+                  ./target/release/recall-eval \
+                    --suite "$SUITE" \
+                    --output "arm-${TAG}.json" \
+                    --storage "./s-${TAG}" 2>"${TAG}.log" | tail -4 || echo "ARM ${TAG} FAILED"
+              fi
+              # Storage is per-arm and large; drop it once the report is written.
+              rm -rf "./s-${TAG}"
+              echo "::endgroup::"
+            done
+          done
+
+      - name: Confound table
+        if: always()
+        env:
+          LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
+          SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+
+          levers = [l for l in os.environ["LEVERS"].split(",") if l]
+          suite = os.environ["SUITE"]
+
+          def arm(gate, lever):
+              p = pathlib.Path(f"arm-gate{gate}-{lever}.json")
+              if not p.exists():
+                  return None
+              d = json.loads(p.read_text())
+              full = d["layers"].get("full") or next(iter(d["layers"].values()))
+              return d, full
+
+          print(f"## Graph lever x PMI-gate confound — suite `{suite}`\n")
+          print("Each lever is compared against the baseline **at its own gate setting**.")
+          print("`gate=1` is how every previous measurement was taken (default since")
+          print("2026-07-03, -97.4% edges). `gate=0` is the same lever on a graph that")
+          print("kept its edges.\n")
+
+          base = {g: arm(g, "none") for g in (0, 1)}
+          for g in (0, 1):
+              if base[g] is None:
+                  print(f"> **Baseline gate={g} did not produce a report — its column is unusable.**\n")
+
+          if base[0] and base[1]:
+              b0, b1 = base[0][1], base[1][1]
+              print("### Does un-culling alone move anything?\n")
+              print("| metric | gate=1 (default) | gate=0 (un-culled) | delta |")
+              print("| --- | --- | --- | --- |")
+              for m in ("recall@10", "ndcg@10", "mrr", "p@1"):
+                  print(f"| {m} | {b1[m]:.4f} | {b0[m]:.4f} | {b0[m]-b1[m]:+.4f} |")
+              print()
+
+          print("### Lever effect, measured both ways\n")
+          print("| lever | delta @ gate=1 | delta @ gate=0 | verdict changes? |")
+          print("| --- | --- | --- | --- |")
+          METRIC = "recall@10"
+          for lever in levers:
+              cells = []
+              for g in (1, 0):
+                  a, b = arm(g, lever), base[g]
+                  cells.append(None if (a is None or b is None) else a[1][METRIC] - b[1][METRIC])
+              d1, d0 = cells
+              fmt = lambda d: "n/a" if d is None else f"{d:+.4f}"
+              if d1 is None or d0 is None:
+                  flag = "incomplete"
+              else:
+                  # "Inert" here means below the smallest delta anyone has argued
+                  # is real in this repo. Sign flips and order-of-magnitude
+                  # changes are what would retract a verdict.
+                  inert = 0.0050
+                  was, now = abs(d1) < inert, abs(d0) < inert
+                  if was and not now:
+                      flag = "**YES — was inert, is not**"
+                  elif (d1 < 0) != (d0 < 0) and not (was and now):
+                      flag = "**YES — sign flips**"
+                  elif was and now:
+                      flag = "no — inert either way"
+                  else:
+                      flag = "no"
+              print(f"| `{lever}` | {fmt(d1)} | {fmt(d0)} | {flag} |")
+
+          print()
+          print(f"_Delta is {METRIC} against the gate-matched baseline. Read recall@10 rather")
+          print("than p@1: p@1 counts whole cases and cannot resolve small moves on a")
+          print("100-case suite._")
+          PY
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-lever-confound
+          path: |
+            arm-*.json
+            *.log
