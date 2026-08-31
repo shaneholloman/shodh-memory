@@ -151,6 +151,12 @@ jobs:
           LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
           DISABLE: ${{ github.event.inputs.disable }}
           SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          # The substrate scoreboard. state.rs logs "edge typing provenance" per
+          # memory at info; without this the counters never reach the log and the
+          # generic share stays an audit note of unknown vintage rather than a
+          # number from today's graph. Omitting it is what made the first run of
+          # this workflow unable to answer the question it was closest to.
+          RUST_LOG: shodh_memory::handlers::state=info
           SHODH_MODEL_PATH: $HOME/.cache/shodh-memory/models/minilm-l6
           SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: |
@@ -205,6 +211,48 @@ jobs:
               echo "::endgroup::"
             done
           done
+
+      # WHAT SHARE OF THE GRAPH IS THE HAIRBALL?
+      #
+      # Co-occurrence is symmetric and fully determined by entity->episode
+      # incidence, which is already indexed (entity_episodes_cf). Materialising
+      # it turns n entities in one memory into n(n-1)/2 edges -- issue #90 saw
+      # 240k edges from 3k memories. Every generic edge stored is a fact the
+      # store could derive.
+      #
+      # It also decides whether typed path composition has substrate: a path
+      # grammar over CoOccurs is the abelian case in costume, and if generic is
+      # ~80% of edges then a fully-typed 2-hop path is ~4% of pairs.
+      - name: Edge-type census
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, glob, collections
+          KEYS = ("semantic", "cue", "pair_table", "learned", "generic",
+                  "fragment_blocked", "pmi_gated")
+          print("## Edge-type census - what share of the graph is derivable?")
+          print()
+          print("| arm | typed | generic | pmi_gated | generic share of stored |")
+          print("| --- | --- | --- | --- | --- |")
+          for log in sorted(glob.glob("gate*.log")):
+              tot = collections.Counter()
+              for line in open(log, errors="ignore"):
+                  if "edge typing provenance" not in line:
+                      continue
+                  for k, v in re.findall(r"(\w+)=(\d+)", line):
+                      if k in KEYS:
+                          tot[k] += int(v)
+              typed = tot["semantic"] + tot["cue"] + tot["pair_table"] + tot["learned"]
+              stored = typed + tot["generic"]
+              if stored == 0:
+                  continue
+              share = 100.0 * tot["generic"] / stored
+              print(f"| `{log[:-4]}` | {typed} | {tot['generic']} | {tot['pmi_gated']} | **{share:.1f}%** |")
+          print()
+          print("generic = untyped co-occurrence, symmetric, derivable from incidence.")
+          print("A high share means most stored edges carry no relation, so typed")
+          print("path composition has almost no substrate to walk.")
+          PY
 
       - name: Confound table
         if: always()
