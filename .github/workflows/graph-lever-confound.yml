@@ -101,11 +101,45 @@ jobs:
           [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
 
+      # WITHOUT THIS THE MATRIX MEASURES NOTHING. The neural NER is GLiNER, and
+      # it is loaded from SHODH_GLINER_MODEL_PATH (default ./models/gliner-bi-edge).
+      # With no model the recogniser silently degrades to the rule-based
+      # fallback -- a different extractor than production ships, building a
+      # different graph. The first dispatch of this workflow omitted these steps
+      # and had to be cancelled; recall.yml has fetched and verified them all
+      # along, which is exactly why its numbers are the trustworthy ones.
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v6
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Verify model assets (hard gate)
+        run: |
+          GL="${{ github.workspace }}/models/gliner-bi-edge"
+          MM="$HOME/.cache/shodh-memory/models/minilm-l6"
+          test -s "$MM/model_quantized.onnx" || { echo "::error::MiniLM weights missing"; exit 1; }
+          test -s "$GL/model.onnx" || { echo "::error::GLiNER model missing - refusing to measure fallback NER"; exit 1; }
+          test -s "$GL/tokenizer.json" || { echo "::error::GLiNER tokenizer missing"; exit 1; }
+          test -s "$GL/label_embeddings.bin" || { echo "::error::GLiNER label embeddings missing"; exit 1; }
+
       - name: Run the matrix
         env:
           SUITE: ${{ github.event.inputs.suite || 'locomo-gate' }}
           LEVERS: ${{ github.event.inputs.levers || 'SHODH_GRAPH_EDGE_DIR,SHODH_GRAPH_PREDICATE_WEIGHTS,SHODH_GRAPH_TYPED_ONLY,SHODH_GRAPH_REACH_INJECT' }}
           SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          SHODH_MODEL_PATH: $HOME/.cache/shodh-memory/models/minilm-l6
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: |
           set -u
           IFS=',' read -ra LEVER_LIST <<< "$LEVERS"
@@ -134,6 +168,12 @@ jobs:
                     --output "arm-${TAG}.json" \
                     --storage "./s-${TAG}" 2>"${TAG}.log" | tail -4 || echo "ARM ${TAG} FAILED"
               fi
+              # Surface the recogniser in the JOB log, not only in the per-arm
+              # file. The first dispatch was cancelled on inference because
+              # stderr was invisible here and the artifacts had not uploaded yet
+              # -- a diagnostic whose own fidelity cannot be read from its log is
+              # the failure mode this workflow exists to expose.
+              grep -m1 '^NER_BACKEND=' "${TAG}.log" || echo "NER_BACKEND=<not reported> for ${TAG}"
               # Storage is per-arm and large; drop it once the report is written.
               rm -rf "./s-${TAG}"
               echo "::endgroup::"
