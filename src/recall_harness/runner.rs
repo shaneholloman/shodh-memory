@@ -566,34 +566,8 @@ fn run_one_pass(
     // populated graph wired in). The manager is kept alive for the whole pass.
     let manager = build_manager(storage_path)?;
 
-    // NER-backend gate (eval fidelity): every CI number before 2026-06-11 was
-    // silently measured on the rule-based fallback NER (census-shape proof,
-    // run 27342411453). Refuse to measure on it again — a harness that tests a
-    // different recognizer than production ships is not measuring the system.
-    // SHODH_ALLOW_FALLBACK_NER=1 is the explicit, visible escape hatch.
-    let ner_backend = if manager.get_neural_ner().is_fallback_mode() {
-        "fallback"
-    } else {
-        "neural"
-    };
-    eprintln!("NER_BACKEND={ner_backend}");
-    // cfg!(test) exemption: lib tests exercise the harness MACHINERY on
-    // runners that may lack the model; the gate protects MEASUREMENTS (the
-    // recall-eval binary is never cfg(test)).
-    if ner_backend == "fallback"
-        && !cfg!(test)
-        && !std::env::var("SHODH_ALLOW_FALLBACK_NER")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    {
-        anyhow::bail!(
-            "recall harness refusing to run on the FALLBACK NER (model not \
-             loaded) — results would not measure the shipped system. Provide \
-             the pinned model or set SHODH_ALLOW_FALLBACK_NER=1 to override \
-             visibly."
-        );
-    }
-
+    // The NER-backend gate now lives in `ingest_corpus`, so every measurement
+    // path is covered rather than only the two that remembered to ask.
     let id_map = ingest_corpus(&manager, corpus)?;
     let system = manager.get_user_memory(EVAL_USER)?;
 
@@ -1015,10 +989,53 @@ pub(crate) fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManage
 /// memory, then build the entity graph from it. Without the
 /// `process_experience_into_graph` step the graph stays empty and Layer 2
 /// spreading activation is a no-op.
+/// Refuse to measure on the rule-based fallback NER.
+///
+/// This lives at the INGEST chokepoint rather than at each entry point, and the
+/// placement is the fix. The gate previously existed only inside `run_one_pass`
+/// and `run_longmemeval`; the other seven measurement paths that build a corpus
+/// -- `analyze_ablation`, `analyze_funnel`, `analyze_graph_reachability`,
+/// `analyze_linking`, `run_learning_arm`, `ingest_fresh` and
+/// `analyze_selective_forgetting` -- had none, so they would quietly measure a
+/// different recogniser than the one production ships and report the result as
+/// if it were the system.
+///
+/// That is not hypothetical. `.github/workflows/locomo-recall.yml` drives
+/// `--ablation`, `--funnel`, `--forgetting` and `--learning` and fetches no
+/// GLiNER model at all, while `recall.yml` fetches and verifies it. The
+/// ablation matrix -- the instrument behind the graph lever verdicts -- was on
+/// the fallback path, and nothing in its output said so.
+///
+/// Every path reaches ingest, so a guard here cannot be forgotten by a path
+/// written later. `SHODH_ALLOW_FALLBACK_NER=1` remains the visible escape
+/// hatch, and `cfg!(test)` is exempt because lib tests exercise the harness
+/// MACHINERY on runners that may lack the model -- the gate protects
+/// MEASUREMENTS, and the recall-eval binary is never `cfg(test)`.
+pub(crate) fn guard_ner_backend(manager: &MultiUserMemoryManager) -> Result<()> {
+    let backend = if manager.get_neural_ner().is_fallback_mode() {
+        "fallback"
+    } else {
+        "neural"
+    };
+    eprintln!("NER_BACKEND={backend}");
+    if backend == "fallback"
+        && !cfg!(test)
+        && !std::env::var("SHODH_ALLOW_FALLBACK_NER")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "recall harness refusing to run on the FALLBACK NER (model not              loaded) -- results would not measure the shipped system. Provide              the pinned model or set SHODH_ALLOW_FALLBACK_NER=1 to override              visibly."
+        );
+    }
+    Ok(())
+}
+
 pub fn ingest_corpus(
     manager: &MultiUserMemoryManager,
     corpus: &[CorpusItem],
 ) -> Result<HashMap<String, Uuid>> {
+    guard_ner_backend(manager)?;
     let mut map = HashMap::with_capacity(corpus.len());
     let ner = manager.get_neural_ner();
     let user_mem = manager.get_user_memory(EVAL_USER)?;
