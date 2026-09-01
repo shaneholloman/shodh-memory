@@ -867,6 +867,40 @@ fn summarise_reachability(report: &ReachabilityReport) {
             100.0 * p * p * p,
             p
         );
+        // Entity labels. A label-pair typing rule that never matches is
+        // indistinguishable from one that does nothing, unless you can see this.
+        let mut labels: Vec<(&String, &usize)> = gs.entity_labels.iter().collect();
+        labels.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let shown: Vec<String> = labels
+            .iter()
+            .take(8)
+            .map(|(name, n)| format!("{name}={n}"))
+            .collect();
+        eprintln!("  entity labels: {}", shown.join("  "));
+
+        // Connectivity. A k-connected graph survives k-1 vertex deletions; if
+        // this shatters after a handful, connectivity is HUB-CARRIED and a high
+        // edge count was never high connectivity.
+        eprintln!(
+            "  components: {} (largest {:.1}% of entities)",
+            gs.components_all.0,
+            100.0 * gs.components_all.1
+        );
+        for (k, count, largest) in &gs.components_after_hub_removal {
+            eprintln!(
+                "    after removing top-{k:<3} hubs: {count:>5} components, largest {:.1}%",
+                100.0 * largest
+            );
+        }
+        eprintln!(
+            "  TYPED-only subgraph: {} components, largest {:.1}%, {} entities isolated ({:.1}%)",
+            gs.typed_components.0,
+            100.0 * gs.typed_components.1,
+            gs.typed_components.2,
+            100.0 * gs.typed_components.2 as f64 / gs.total_entities.max(1) as f64,
+        );
+        eprintln!("  (isolated-in-typed is the ceiling on what a grammar-guided walk can reach)");
+
         let mut by_count: Vec<(&String, &usize)> = gs.relation_types.iter().collect();
         by_count.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         let top: Vec<String> = by_count

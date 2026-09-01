@@ -704,6 +704,45 @@ pub struct GraphStructure {
     /// information. Derivable from entity->episode incidence rather than stored.
     #[serde(default)]
     pub symmetric_edges: usize,
+
+    /// Entity nodes by label, descending.
+    ///
+    /// Label-pair typing rules key off these, so a rule can be correct, enabled,
+    /// and still never fire because the labels it matches are not being
+    /// produced. Measured: `SHODH_PERSON_PERSON_KNOWS=1` yielded a
+    /// BYTE-IDENTICAL graph -- typed 215, generic 4815, pair_table 40, every
+    /// metric +0.0000 -- which is what a rule that never matches looks like.
+    /// Without this field there was no way to tell "the rule does nothing" from
+    /// "the rule never fired".
+    #[serde(default)]
+    pub entity_labels: BTreeMap<String, usize>,
+
+    /// Connected components of the FULL edge set: (count, largest as a fraction
+    /// of entities).
+    #[serde(default)]
+    pub components_all: (usize, f64),
+
+    /// Same, after deleting the top-N highest-degree entities, for N in
+    /// {1, 5, 10, 25}.
+    ///
+    /// A k-connected graph survives removal of k-1 vertices. If the graph
+    /// shatters once a handful of hubs go, its connectivity is HUB-CARRIED --
+    /// high edge count is not high connectivity. That matters twice: it is the
+    /// precondition for the Gyori-Lovasz partition theorem, and it says whether
+    /// the 94.8%-of-gold-within-one-hop figure is structure or a few
+    /// degree-301 nodes standing in the middle of everything.
+    #[serde(default)]
+    pub components_after_hub_removal: Vec<(usize, usize, f64)>,
+
+    /// Components of the TYPED-ONLY subgraph, plus how many entities are
+    /// isolated in it.
+    ///
+    /// The typed layer is the substrate any path automaton would walk. At mean
+    /// typed degree below 1 most entities may be isolated there, in which case
+    /// a grammar-guided walk has nothing to traverse for most queries -- worth
+    /// knowing BEFORE building the walker rather than after.
+    #[serde(default)]
+    pub typed_components: (usize, f64, usize),
 }
 
 /// Reachability tallies for one category (cumulative within-N-hops counts).

@@ -2188,10 +2188,107 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             .sum();
         let typed_edges: usize = relation_types.values().sum::<usize>() - symmetric_edges;
 
+        // Entity labels. A label-pair typing rule can be correct and enabled and
+        // still never fire, because the labels it matches are not produced.
+        let mut entity_labels: std::collections::BTreeMap<String, usize> = Default::default();
+        for e in &entities {
+            if e.labels.is_empty() {
+                *entity_labels.entry("<unlabelled>".to_string()).or_insert(0) += 1;
+            }
+            for l in &e.labels {
+                *entity_labels.entry(format!("{l:?}")).or_insert(0) += 1;
+            }
+        }
+
+        // Undirected adjacency, built once and reused for every component pass.
+        let index: std::collections::HashMap<uuid::Uuid, usize> = entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.uuid, i))
+            .collect();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); entities.len()];
+        let mut typed_adj: Vec<Vec<usize>> = vec![Vec::new(); entities.len()];
+        let mut counted: std::collections::HashSet<uuid::Uuid> = Default::default();
+        for e in &entities {
+            for edge in g.get_entity_relationships(&e.uuid).unwrap_or_default() {
+                if !counted.insert(edge.uuid) {
+                    continue;
+                }
+                let (Some(&a), Some(&b)) =
+                    (index.get(&edge.from_entity), index.get(&edge.to_entity))
+                else {
+                    continue;
+                };
+                adj[a].push(b);
+                adj[b].push(a);
+                if !SYMMETRIC.contains(&format!("{:?}", edge.relation_type).as_str()) {
+                    typed_adj[a].push(b);
+                    typed_adj[b].push(a);
+                }
+            }
+        }
+
+        // Components by BFS over an adjacency list, with a set of deleted
+        // vertices. Iterative: a hub-heavy graph would blow a recursive stack.
+        let components = |adj: &Vec<Vec<usize>>, removed: &std::collections::HashSet<usize>| {
+            let n = adj.len();
+            let mut seen = vec![false; n];
+            let (mut count, mut largest) = (0usize, 0usize);
+            for start in 0..n {
+                if seen[start] || removed.contains(&start) {
+                    continue;
+                }
+                count += 1;
+                let mut size = 0usize;
+                let mut stack = vec![start];
+                seen[start] = true;
+                while let Some(v) = stack.pop() {
+                    size += 1;
+                    for &w in &adj[v] {
+                        if !seen[w] && !removed.contains(&w) {
+                            seen[w] = true;
+                            stack.push(w);
+                        }
+                    }
+                }
+                largest = largest.max(size);
+            }
+            (count, largest)
+        };
+
+        let n_ent = entities.len().max(1);
+        let none: std::collections::HashSet<usize> = Default::default();
+        let (c_all, l_all) = components(&adj, &none);
+        let components_all = (c_all, l_all as f64 / n_ent as f64);
+
+        // Delete the top-N by degree. A k-connected graph survives k-1
+        // deletions; if this shatters early, connectivity is hub-carried.
+        let mut by_degree: Vec<usize> = (0..entities.len()).collect();
+        by_degree.sort_unstable_by(|&a, &b| adj[b].len().cmp(&adj[a].len()).then(a.cmp(&b)));
+        let mut components_after_hub_removal = Vec::new();
+        for &k in &[1usize, 5, 10, 25] {
+            if k > by_degree.len() {
+                break;
+            }
+            let removed: std::collections::HashSet<usize> =
+                by_degree.iter().take(k).copied().collect();
+            let (c, l) = components(&adj, &removed);
+            let denom = (entities.len() - k).max(1);
+            components_after_hub_removal.push((k, c, l as f64 / denom as f64));
+        }
+
+        let (c_typed, l_typed) = components(&typed_adj, &none);
+        let isolated_typed = typed_adj.iter().filter(|a| a.is_empty()).count();
+        let typed_components = (c_typed, l_typed as f64 / n_ent as f64, isolated_typed);
+
         GraphStructure {
             relation_types,
             typed_edges,
             symmetric_edges,
+            entity_labels,
+            components_all,
+            components_after_hub_removal,
+            typed_components,
             total_entities,
             total_edges: degree_sum / 2,
             max_degree: degrees.first().copied().unwrap_or(0),
