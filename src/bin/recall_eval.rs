@@ -845,6 +845,37 @@ fn summarise_reachability(report: &ReachabilityReport) {
             pct(c.cases_no_seed, c.cases),
         );
     }
+    // Substrate scoreboard. A typed path walk needs every hop to name a real
+    // relation; a hop through a symmetric type carries no order, so the typed
+    // share bounds what any composition scheme can express -- at a typed
+    // fraction p, a fully-typed k-hop path is about p^k.
+    let gs = &report.graph;
+    let stored = gs.typed_edges + gs.symmetric_edges;
+    if stored > 0 {
+        eprintln!(
+            "  relation substrate: {} stored edges, {} typed ({:.2}%), {} symmetric ({:.2}%)",
+            stored,
+            gs.typed_edges,
+            pct(gs.typed_edges, stored),
+            gs.symmetric_edges,
+            pct(gs.symmetric_edges, stored),
+        );
+        let p = gs.typed_edges as f64 / stored as f64;
+        eprintln!(
+            "  fully-typed path share: 2-hop ~{:.2}%, 3-hop ~{:.3}%  (p^k at p={:.4})",
+            100.0 * p * p,
+            100.0 * p * p * p,
+            p
+        );
+        let mut by_count: Vec<(&String, &usize)> = gs.relation_types.iter().collect();
+        by_count.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let top: Vec<String> = by_count
+            .iter()
+            .take(8)
+            .map(|(name, n)| format!("{name}={n}"))
+            .collect();
+        eprintln!("  relation types: {}", top.join("  "));
+    }
     eprintln!("  ≤2hop% is the canonical double-hop signal: high => graph-native fixes can lift multi_hop;");
     eprintln!("  low + high unreach% => gold has no associative path (extraction/construction gap or non-entity hop).");
 }

@@ -228,6 +228,7 @@ jobs:
         run: |
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import re, glob, collections
+          ANSI = re.compile(chr(27) + re.escape(chr(91)) + "[0-9;]*m")
           KEYS = ("semantic", "cue", "pair_table", "learned", "generic",
                   "fragment_blocked", "pmi_gated")
           print("## Edge-type census - what share of the graph is derivable?")
@@ -239,7 +240,7 @@ jobs:
               for line in open(log, errors="ignore"):
                   if "edge typing provenance" not in line:
                       continue
-                  for k, v in re.findall(r"(\w+)=(\d+)", line):
+                  for k, v in re.findall(r"(\w+)=(\d+)", ANSI.sub("", line)):
                       if k in KEYS:
                           tot[k] += int(v)
               typed = tot["semantic"] + tot["cue"] + tot["pair_table"] + tot["learned"]

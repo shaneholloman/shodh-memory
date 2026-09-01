@@ -672,6 +672,38 @@ pub struct GraphStructure {
     /// the graph's shape is an artefact of ingest sequence.
     #[serde(default)]
     pub hub_saturation_skipped_edges: u64,
+
+    /// Stored edges by relation type, descending.
+    ///
+    /// The substrate scoreboard for typed path composition. A walk that carries
+    /// relation ORDER needs every hop of a path to name a real relation; a hop
+    /// through `CoOccurs` carries none, because co-occurrence is symmetric and
+    /// composing it with itself is the commutative case. So the typed share is
+    /// not bookkeeping, it bounds what a path grammar can express: at a typed
+    /// fraction p, a fully-typed k-hop path is about p^k of paths.
+    ///
+    /// Measured on the LoCoMo gate corpus this was 1.89% typed -- 215 edges of
+    /// 11,370, against 11,155 CoOccurs -- which makes a typed 2-hop path
+    /// roughly 0.04% and leaves composition nothing to walk. But LoCoMo is
+    /// casual dialogue, where "Hey, that hike sounds great" genuinely contains
+    /// no typed relation, so that number may say more about the corpus than
+    /// about the extractor. This field exists so the same question can be asked
+    /// of a DOCUMENT corpus, where the answer is likely different and where the
+    /// product actually runs.
+    #[serde(default)]
+    pub relation_types: BTreeMap<String, usize>,
+
+    /// Edges whose relation type carries direction and meaning, i.e. everything
+    /// except the symmetric association types. Counted here rather than derived
+    /// by the reader so the definition lives in one place.
+    #[serde(default)]
+    pub typed_edges: usize,
+
+    /// `CoOccurs`, `RelatedTo`, `AssociatedWith`, `CoRetrieved`, `WorksWith`,
+    /// `Knows`, `AlternativeTo` -- symmetric, so order across them is not
+    /// information. Derivable from entity->episode incidence rather than stored.
+    #[serde(default)]
+    pub symmetric_edges: usize,
 }
 
 /// Reachability tallies for one category (cumulative within-N-hops counts).

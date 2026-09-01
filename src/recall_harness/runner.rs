@@ -2150,7 +2150,48 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
         degrees.sort_unstable_by(|a, b| b.cmp(a));
         let total_entities = degrees.len();
         let degree_sum: usize = degrees.iter().sum();
+
+        // Relation-type histogram over STORED edges. Walked from the entity side
+        // and de-duplicated by edge uuid, because get_entity_relationships
+        // returns an edge once from each endpoint it is reachable from and
+        // counting incidences would double most of them.
+        //
+        // SYMMETRIC types carry no order, so a path hop through one contributes
+        // nothing a composition could be non-commutative about. They are also
+        // the ones fully determined by entity->episode incidence, so this split
+        // is the same line as "stored vs derivable".
+        const SYMMETRIC: [&str; 7] = [
+            "CoOccurs",
+            "RelatedTo",
+            "AssociatedWith",
+            "CoRetrieved",
+            "WorksWith",
+            "Knows",
+            "AlternativeTo",
+        ];
+        let mut relation_types: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut seen_edges: std::collections::HashSet<uuid::Uuid> = Default::default();
+        for e in &entities {
+            for edge in g.get_entity_relationships(&e.uuid).unwrap_or_default() {
+                if !seen_edges.insert(edge.uuid) {
+                    continue;
+                }
+                *relation_types
+                    .entry(format!("{:?}", edge.relation_type))
+                    .or_insert(0) += 1;
+            }
+        }
+        let symmetric_edges: usize = relation_types
+            .iter()
+            .filter(|(name, _)| SYMMETRIC.contains(&name.as_str()))
+            .map(|(_, n)| *n)
+            .sum();
+        let typed_edges: usize = relation_types.values().sum::<usize>() - symmetric_edges;
+
         GraphStructure {
+            relation_types,
+            typed_edges,
+            symmetric_edges,
             total_entities,
             total_edges: degree_sum / 2,
             max_degree: degrees.first().copied().unwrap_or(0),
